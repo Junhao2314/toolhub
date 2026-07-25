@@ -10,6 +10,7 @@ import (
 
 	"github.com/toolhub-dev/toolhub/internal/domain"
 	"github.com/toolhub-dev/toolhub/internal/security"
+	"github.com/toolhub-dev/toolhub/internal/store"
 )
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
@@ -19,22 +20,22 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Identifier string `json:"identifier"`
+		Password   string `json:"password"`
 	}
 	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	user, err := a.store.UserByEmail(r.Context(), input.Email)
+	user, err := a.store.UserByIdentifier(r.Context(), input.Identifier)
 	hash := a.dummyHash
 	if err == nil {
 		hash = user.PasswordHash
 	}
 	valid, verifyErr := security.VerifyPassword(hash, input.Password)
 	if err != nil || verifyErr != nil || !valid || user.Disabled {
-		_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "login", ResourceType: "session", Outcome: "failure", IPAddress: ip, Metadata: map[string]any{"email": strings.ToLower(strings.TrimSpace(input.Email))}})
-		writeError(w, r, http.StatusUnauthorized, "invalid_credentials", "Email or password is incorrect")
+		_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "login", ResourceType: "session", Outcome: "failure", IPAddress: ip, Metadata: map[string]any{"identifier": strings.ToLower(strings.TrimSpace(input.Identifier))}})
+		writeError(w, r, http.StatusUnauthorized, "invalid_credentials", "Username/email or password is incorrect")
 		return
 	}
 	token, csrf, expires, err := a.store.CreateSession(r.Context(), user.ID, a.config.SessionTTL, ip, r.UserAgent())
@@ -93,6 +94,66 @@ func (a *API) csrf(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"csrfToken": token})
+}
+
+func (a *API) updateOwnUsername(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username        string `json:"username"`
+		CurrentPassword string `json:"currentPassword"`
+	}
+	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	username, err := security.NormalizeUsername(input.Username)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_username", err.Error())
+		return
+	}
+	principal := principalFrom(r.Context())
+	if err := a.store.UpdateOwnUsername(r.Context(), principal.ID, input.CurrentPassword, username); err != nil {
+		writeCredentialMutationError(w, r, err)
+		return
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update_username", ResourceType: "user", ResourceID: principal.ID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"username": username}})
+	clearSessionCookie(w, a.config.SecureCookies)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) updateOwnPassword(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := security.ValidatePassword(input.NewPassword); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_password", err.Error())
+		return
+	}
+	principal := principalFrom(r.Context())
+	if err := a.store.UpdateOwnPassword(r.Context(), principal.ID, input.CurrentPassword, input.NewPassword); err != nil {
+		writeCredentialMutationError(w, r, err)
+		return
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update_password", ResourceType: "user", ResourceID: principal.ID, Outcome: "success", IPAddress: clientIP(r)})
+	clearSessionCookie(w, a.config.SecureCookies)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeCredentialMutationError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, store.ErrInvalidCurrentPassword):
+		writeError(w, r, http.StatusForbidden, "current_password_invalid", "Current password is incorrect")
+	case errors.Is(err, store.ErrUsernameUnavailable):
+		writeError(w, r, http.StatusConflict, "username_unavailable", "Username is unavailable")
+	case errors.Is(err, store.ErrEmailUnavailable):
+		writeError(w, r, http.StatusConflict, "email_unavailable", "Email is unavailable")
+	default:
+		handleStoreError(w, r, err)
+	}
 }
 
 func clearSessionCookie(w http.ResponseWriter, secure bool) {

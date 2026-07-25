@@ -3,6 +3,7 @@ package security
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -19,6 +20,48 @@ func TestPasswordRoundTrip(t *testing.T) {
 	ok, err = VerifyPassword(encoded, "wrong password")
 	if err != nil || ok {
 		t.Fatalf("invalid password accepted: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestNormalizeUsername(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		valid bool
+	}{
+		{input: " LiuJH.273 ", want: "liujh.273", valid: true},
+		{input: "abc", want: "abc", valid: true},
+		{input: "ab", valid: false},
+		{input: "user@example.com", valid: false},
+		{input: "contains space", valid: false},
+		{input: strings.Repeat("a", 33), valid: false},
+	}
+	for _, test := range tests {
+		got, err := NormalizeUsername(test.input)
+		if test.valid && (err != nil || got != test.want) {
+			t.Fatalf("NormalizeUsername(%q) = %q, %v; want %q", test.input, got, err, test.want)
+		}
+		if !test.valid && err == nil {
+			t.Fatalf("NormalizeUsername(%q) unexpectedly succeeded", test.input)
+		}
+	}
+}
+
+func TestGenerateTemporaryPassword(t *testing.T) {
+	password, err := GenerateTemporaryPassword()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(password) < 24 || !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(password) {
+		t.Fatalf("temporary password is not URL-safe or long enough: length=%d", len(password))
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := VerifyPassword(hash, password)
+	if err != nil || !valid {
+		t.Fatalf("temporary password did not verify: valid=%v err=%v", valid, err)
 	}
 }
 

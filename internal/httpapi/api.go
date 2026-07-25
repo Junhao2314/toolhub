@@ -59,6 +59,8 @@ func (a *API) Router() http.Handler {
 		api.Post("/auth/logout", a.logout)
 		api.Get("/auth/me", a.me)
 		api.Get("/auth/csrf", a.csrf)
+		api.Patch("/account/username", a.updateOwnUsername)
+		api.Patch("/account/password", a.updateOwnPassword)
 		api.Get("/overview", a.overview)
 
 		api.Group(func(read chi.Router) {
@@ -105,6 +107,7 @@ func (a *API) Router() http.Handler {
 			admin.Use(a.requireRoles("admin"))
 			admin.Get("/users", a.listUsers)
 			admin.Post("/users", a.createUser)
+			admin.Post("/users/{id}/password", a.resetUserPassword)
 			admin.Get("/audit", a.listAudit)
 			admin.Post("/skills/{id}/review", a.reviewSkill)
 			admin.Post("/updates/{id}/approve", a.approveUpdate)

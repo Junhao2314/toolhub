@@ -6,7 +6,7 @@ import (
 )
 
 func (s *Store) ListUsers(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT u.id::text AS id,u.email,u.display_name AS "displayName",u.disabled,u.created_at AS "createdAt",
+	return s.JSONList(ctx, `SELECT u.id::text AS id,u.username,u.email,u.display_name AS "displayName",u.disabled,u.password_change_recommended AS "passwordChangeRecommended",u.created_at AS "createdAt",
 		coalesce(array_agg(r.name ORDER BY r.name) FILTER (WHERE r.name IS NOT NULL),ARRAY[]::text[]) AS roles
 		FROM users u LEFT JOIN user_roles ur ON ur.user_id=u.id LEFT JOIN roles r ON r.id=ur.role_id GROUP BY u.id ORDER BY u.created_at`)
 }

@@ -20,11 +20,8 @@ const (
 )
 
 func HashPassword(password string) (string, error) {
-	if len(password) < 12 {
-		return "", errors.New("password must contain at least 12 characters")
-	}
-	if len(password) > 1024 {
-		return "", errors.New("password is too long")
+	if err := ValidatePassword(password); err != nil {
+		return "", err
 	}
 	salt := make([]byte, argonSaltLength)
 	if _, err := rand.Read(salt); err != nil {
@@ -32,6 +29,16 @@ func HashPassword(password string) (string, error) {
 	}
 	hash := argon2.IDKey([]byte(password), salt, argonIterations, argonMemory, argonParallelism, argonKeyLength)
 	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argonMemory, argonIterations, argonParallelism, base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
+}
+
+func ValidatePassword(password string) error {
+	if len(password) < 12 {
+		return errors.New("password must contain at least 12 characters")
+	}
+	if len(password) > 1024 {
+		return errors.New("password is too long")
+	}
+	return nil
 }
 
 func VerifyPassword(encoded, password string) (bool, error) {

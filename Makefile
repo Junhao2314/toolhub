@@ -19,7 +19,7 @@ lint:
 	cd web && npm run typecheck
 
 docker-config:
-	TOOLHUB_MASTER_KEY=test-only-key TOOLHUB_BOOTSTRAP_ADMIN_EMAIL=admin@example.com TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD=test-only-password docker compose config --quiet
+	TOOLHUB_MASTER_KEY=test-only-key TOOLHUB_BOOTSTRAP_ADMIN_USERNAME=admin TOOLHUB_BOOTSTRAP_ADMIN_EMAIL=admin@example.com TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD=test-only-password docker compose config --quiet
 
 dev:
 	go run ./cmd/toolhub

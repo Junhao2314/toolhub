@@ -6,12 +6,14 @@ import (
 )
 
 type Principal struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"displayName"`
-	Roles       []string  `json:"roles"`
-	CSRFHash    []byte    `json:"-"`
-	ExpiresAt   time.Time `json:"expiresAt"`
+	ID                        string    `json:"id"`
+	Username                  string    `json:"username"`
+	Email                     string    `json:"email"`
+	DisplayName               string    `json:"displayName"`
+	Roles                     []string  `json:"roles"`
+	PasswordChangeRecommended bool      `json:"passwordChangeRecommended"`
+	CSRFHash                  []byte    `json:"-"`
+	ExpiresAt                 time.Time `json:"expiresAt"`
 }
 
 func (p Principal) HasRole(roles ...string) bool {
@@ -26,13 +28,15 @@ func (p Principal) HasRole(roles ...string) bool {
 }
 
 type User struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	DisplayName  string    `json:"displayName"`
-	PasswordHash string    `json:"-"`
-	Roles        []string  `json:"roles"`
-	Disabled     bool      `json:"disabled"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID                        string    `json:"id"`
+	Username                  string    `json:"username"`
+	Email                     string    `json:"email"`
+	DisplayName               string    `json:"displayName"`
+	PasswordHash              string    `json:"-"`
+	Roles                     []string  `json:"roles"`
+	Disabled                  bool      `json:"disabled"`
+	PasswordChangeRecommended bool      `json:"passwordChangeRecommended"`
+	CreatedAt                 time.Time `json:"createdAt"`
 }
 
 type AuditEvent struct {

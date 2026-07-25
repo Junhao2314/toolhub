@@ -19,7 +19,7 @@ Requirements: Docker with Compose v2 and a host already connected to Tailscale.
 cd /root/docker/toolhub
 cp .env.example .env
 openssl rand -base64 32
-# Put the generated value in TOOLHUB_MASTER_KEY and set a unique admin password.
+# Put the generated value in TOOLHUB_MASTER_KEY and set a unique admin username/password.
 docker compose up -d --build --wait
 curl --fail http://127.0.0.1:18480/healthz
 ```

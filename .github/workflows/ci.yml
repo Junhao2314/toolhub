@@ -72,6 +72,7 @@ jobs:
       - name: Browser smoke
         env:
           TOOLHUB_E2E_EMAIL: admin@toolhub.local
+          TOOLHUB_E2E_USERNAME: admin
           TOOLHUB_E2E_PASSWORD: ToolHubLocal-2026-ChangeMe
         run: npm run test:e2e
         working-directory: web

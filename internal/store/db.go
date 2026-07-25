@@ -108,7 +108,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) BootstrapAdmin(ctx context.Context, email, name, password string) (bool, error) {
+func (s *Store) BootstrapAdmin(ctx context.Context, username, email, name, password string) (bool, error) {
 	var count int
 	if err := s.pool.QueryRow(ctx, "SELECT count(*) FROM users").Scan(&count); err != nil {
 		return false, err
@@ -116,8 +116,12 @@ func (s *Store) BootstrapAdmin(ctx context.Context, email, name, password string
 	if count > 0 {
 		return false, nil
 	}
+	username, err := security.NormalizeUsername(username)
+	if err != nil {
+		return false, fmt.Errorf("validate bootstrap username: %w", err)
+	}
 	if strings.TrimSpace(email) == "" || strings.TrimSpace(name) == "" || password == "" {
-		return false, errors.New("bootstrap admin email, name, and password are required on first startup")
+		return false, errors.New("bootstrap admin username, email, name, and password are required on first startup")
 	}
 	hash, err := security.HashPassword(password)
 	if err != nil {
@@ -129,7 +133,7 @@ func (s *Store) BootstrapAdmin(ctx context.Context, email, name, password string
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	userID := uuid.NewString()
-	if _, err := tx.Exec(ctx, "INSERT INTO users(id,email,display_name,password_hash) VALUES($1,$2,$3,$4)", userID, strings.ToLower(strings.TrimSpace(email)), strings.TrimSpace(name), hash); err != nil {
+	if _, err := tx.Exec(ctx, "INSERT INTO users(id,username,email,display_name,password_hash) VALUES($1,$2,$3,$4,$5)", userID, username, strings.ToLower(strings.TrimSpace(email)), strings.TrimSpace(name), hash); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(ctx, "INSERT INTO user_roles(user_id,role_id) SELECT $1,id FROM roles WHERE name='admin'", userID); err != nil {

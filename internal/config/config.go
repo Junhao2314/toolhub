@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/toolhub-dev/toolhub/internal/security"
 )
 
 type Config struct {
@@ -15,6 +17,7 @@ type Config struct {
 	DatabaseURL            string
 	MasterKey              []byte
 	BootstrapAdminEmail    string
+	BootstrapAdminUsername string
 	BootstrapAdminName     string
 	BootstrapAdminPassword string
 	LocalNodeName          string
@@ -44,11 +47,16 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse TOOLHUB_SECURE_COOKIES: %w", err)
 	}
+	bootstrapUsername, err := security.NormalizeUsername(env("TOOLHUB_BOOTSTRAP_ADMIN_USERNAME", "admin"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TOOLHUB_BOOTSTRAP_ADMIN_USERNAME: %w", err)
+	}
 	cfg := Config{
 		ListenAddr:             env("TOOLHUB_LISTEN_ADDR", "127.0.0.1:18480"),
 		DatabaseURL:            strings.TrimSpace(os.Getenv("TOOLHUB_DATABASE_URL")),
 		MasterKey:              masterKey,
 		BootstrapAdminEmail:    normalizeEmail(os.Getenv("TOOLHUB_BOOTSTRAP_ADMIN_EMAIL")),
+		BootstrapAdminUsername: bootstrapUsername,
 		BootstrapAdminName:     env("TOOLHUB_BOOTSTRAP_ADMIN_NAME", "ToolHub Admin"),
 		BootstrapAdminPassword: os.Getenv("TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD"),
 		LocalNodeName:          env("TOOLHUB_LOCAL_NODE_NAME", "project-host"),

@@ -7,6 +7,8 @@ ToolHub assumes the host and Tailnet are trusted administrative infrastructure. 
 ## Credentials
 
 - Passwords use Argon2id with 64 MiB memory, three iterations, random salt, and constant-time verification.
+- Browser login accepts a case-insensitive username or email identifier and returns one uniform invalid-credentials error.
+- Random temporary passwords use the operating system CSPRNG, are returned once, and are never written to audit metadata or logs. Username/password changes revoke all sessions for the target user.
 - Session and Agent bearer tokens are stored only as SHA-256 hashes.
 - AI keys, MCP environment values, SSH keys, and Agent task keys use XChaCha20-Poly1305 with record ID associated data.
 - Agent secret resolution is authorized against the node's desired MCP deployments. An Agent cannot fetch AI keys, SSH keys, or another node's MCP values.

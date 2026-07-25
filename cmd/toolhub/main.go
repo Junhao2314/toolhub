@@ -56,12 +56,12 @@ func run(logger *slog.Logger) error {
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	created, err := st.BootstrapAdmin(ctx, cfg.BootstrapAdminEmail, cfg.BootstrapAdminName, cfg.BootstrapAdminPassword)
+	created, err := st.BootstrapAdmin(ctx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminEmail, cfg.BootstrapAdminName, cfg.BootstrapAdminPassword)
 	if err != nil {
 		return err
 	}
 	if created {
-		logger.Info("bootstrap administrator created", "email", cfg.BootstrapAdminEmail)
+		logger.Info("bootstrap administrator created", "username", cfg.BootstrapAdminUsername, "email", cfg.BootstrapAdminEmail)
 	}
 	localNodeID, localNodeCreated, err := st.BootstrapLocalNode(ctx, cfg.LocalNodeName)
 	if err != nil {

@@ -2,10 +2,12 @@ export type Dict = Record<string, unknown>
 
 export interface User {
   id: string
+  username: string
   email: string
   displayName: string
   roles: string[]
   disabled?: boolean
+  passwordChangeRecommended?: boolean
   createdAt?: string
 }
 
@@ -38,8 +40,8 @@ class ToolHubClient {
     return payload as T
   }
 
-  async login(email: string, password: string): Promise<Session> {
-    const session = await this.request<Session>('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) })
+  async login(identifier: string, password: string): Promise<Session> {
+    const session = await this.request<Session>('/auth/login', { method: 'POST', body: JSON.stringify({ identifier, password }) })
     this.setCSRF(session.csrfToken ?? '')
     return session
   }
@@ -52,9 +54,24 @@ class ToolHubClient {
   }
 
   async logout(): Promise<void> {
-    await this.request('/auth/logout', { method: 'POST' })
+    try {
+      await this.request('/auth/logout', { method: 'POST' })
+    } finally {
+      this.setCSRF('')
+    }
+  }
+
+  async updateOwnUsername(username: string, currentPassword: string): Promise<void> {
+    await this.patch('/account/username', { username, currentPassword })
     this.setCSRF('')
   }
+
+  async updateOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+    await this.patch('/account/password', { currentPassword, newPassword })
+    this.setCSRF('')
+  }
+
+  forgetSession() { this.setCSRF('') }
 
   list<T>(path: string): Promise<{ items: T[] }> { return this.request(path) }
   get<T>(path: string): Promise<T> { return this.request(path) }

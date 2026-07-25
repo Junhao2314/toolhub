@@ -13,6 +13,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/toolhub-dev/toolhub/internal/domain"
+	"github.com/toolhub-dev/toolhub/internal/security"
+	"github.com/toolhub-dev/toolhub/internal/store"
 )
 
 var enrollmentHostnamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$`)
@@ -69,23 +71,106 @@ func (a *API) serveList(w http.ResponseWriter, r *http.Request, raw json.RawMess
 
 func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Email       string `json:"email"`
-		DisplayName string `json:"displayName"`
-		Password    string `json:"password"`
-		Role        string `json:"role"`
+		Username     string `json:"username"`
+		Email        string `json:"email"`
+		DisplayName  string `json:"displayName"`
+		Role         string `json:"role"`
+		PasswordMode string `json:"passwordMode"`
+		Password     string `json:"password"`
 	}
 	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	user, err := a.store.CreateUser(r.Context(), input.Email, input.DisplayName, input.Password, input.Role)
+	username, err := security.NormalizeUsername(input.Username)
 	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "user_create_failed", err.Error())
+		writeError(w, r, http.StatusBadRequest, "invalid_username", err.Error())
+		return
+	}
+	if strings.TrimSpace(input.DisplayName) == "" || strings.Count(strings.TrimSpace(input.Email), "@") != 1 {
+		writeError(w, r, http.StatusBadRequest, "invalid_user", "Email and display name are required")
+		return
+	}
+	if input.Role != "admin" && input.Role != "operator" && input.Role != "viewer" {
+		writeError(w, r, http.StatusBadRequest, "invalid_role", "Role must be admin, operator, or viewer")
+		return
+	}
+	password, temporaryPassword, err := resolveTemporaryPassword(input.PasswordMode, input.Password)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_password", err.Error())
+		return
+	}
+	user, err := a.store.CreateUser(r.Context(), username, input.Email, input.DisplayName, password, input.Role)
+	if err != nil {
+		if errors.Is(err, store.ErrUsernameUnavailable) || errors.Is(err, store.ErrEmailUnavailable) {
+			writeCredentialMutationError(w, r, err)
+		} else {
+			handleStoreError(w, r, err)
+		}
 		return
 	}
 	principal := principalFrom(r.Context())
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "create", ResourceType: "user", ResourceID: user.ID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"role": input.Role}})
-	writeJSON(w, http.StatusCreated, user)
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "create", ResourceType: "user", ResourceID: user.ID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"role": input.Role, "passwordMode": normalizedPasswordMode(input.PasswordMode)}})
+	response := map[string]any{"user": user}
+	if temporaryPassword != "" {
+		response["temporaryPassword"] = temporaryPassword
+	}
+	writeJSON(w, http.StatusCreated, response)
+}
+
+func (a *API) resetUserPassword(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Mode     string `json:"mode"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	password, temporaryPassword, err := resolveTemporaryPassword(input.Mode, input.Password)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_password", err.Error())
+		return
+	}
+	userID := chi.URLParam(r, "id")
+	if err := a.store.ResetUserPassword(r.Context(), userID, password); err != nil {
+		handleStoreError(w, r, err)
+		return
+	}
+	principal := principalFrom(r.Context())
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "reset_password", ResourceType: "user", ResourceID: userID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"passwordMode": normalizedPasswordMode(input.Mode)}})
+	response := map[string]any{"reset": true}
+	if temporaryPassword != "" {
+		response["temporaryPassword"] = temporaryPassword
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func resolveTemporaryPassword(mode, manual string) (string, string, error) {
+	mode = normalizedPasswordMode(mode)
+	switch mode {
+	case "random":
+		if manual != "" {
+			return "", "", errors.New("password must be omitted in random mode")
+		}
+		password, err := security.GenerateTemporaryPassword()
+		return password, password, err
+	case "manual":
+		if err := security.ValidatePassword(manual); err != nil {
+			return "", "", err
+		}
+		return manual, "", nil
+	default:
+		return "", "", errors.New("password mode must be random or manual")
+	}
+}
+
+func normalizedPasswordMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "random"
+	}
+	return mode
 }
 
 func (a *API) createEnrollment(w http.ResponseWriter, r *http.Request) {

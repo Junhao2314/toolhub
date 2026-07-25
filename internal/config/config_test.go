@@ -34,3 +34,29 @@ func TestLoadDefaultsProjectHostName(t *testing.T) {
 		t.Fatalf("expected default project host, got %q", config.LocalNodeName)
 	}
 }
+
+func TestLoadNormalizesBootstrapUsername(t *testing.T) {
+	t.Setenv("TOOLHUB_DATABASE_URL", "postgres://toolhub:test@localhost/toolhub")
+	t.Setenv("TOOLHUB_MASTER_KEY", strings.Repeat("k", 32))
+	t.Setenv("TOOLHUB_TIMEZONE", "UTC")
+	t.Setenv("TOOLHUB_BOOTSTRAP_ADMIN_USERNAME", " LiuJH273 ")
+
+	config, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.BootstrapAdminUsername != "liujh273" {
+		t.Fatalf("expected normalized bootstrap username, got %q", config.BootstrapAdminUsername)
+	}
+}
+
+func TestLoadRejectsInvalidBootstrapUsername(t *testing.T) {
+	t.Setenv("TOOLHUB_DATABASE_URL", "postgres://toolhub:test@localhost/toolhub")
+	t.Setenv("TOOLHUB_MASTER_KEY", strings.Repeat("k", 32))
+	t.Setenv("TOOLHUB_TIMEZONE", "UTC")
+	t.Setenv("TOOLHUB_BOOTSTRAP_ADMIN_USERNAME", "bad@example.com")
+
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "TOOLHUB_BOOTSTRAP_ADMIN_USERNAME") {
+		t.Fatalf("expected invalid bootstrap username error, got %v", err)
+	}
+}

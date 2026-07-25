@@ -3,11 +3,12 @@ set -eu
 
 base_url="${TOOLHUB_SMOKE_URL:-http://127.0.0.1:18480}"
 email="${TOOLHUB_SMOKE_EMAIL:?TOOLHUB_SMOKE_EMAIL is required}"
+username="${TOOLHUB_SMOKE_USERNAME:-admin}"
 password="${TOOLHUB_SMOKE_PASSWORD:?TOOLHUB_SMOKE_PASSWORD is required}"
 smoke_dir="$(mktemp -d)"
 trap 'rm -rf "$smoke_dir"' EXIT
 
-login_status="$(curl --silent --show-error --output "$smoke_dir/login.json" --cookie-jar "$smoke_dir/cookies" --write-out '%{http_code}' -H 'Content-Type: application/json' --data "{\"email\":\"$email\",\"password\":\"$password\"}" "$base_url/api/v1/auth/login")"
+login_status="$(curl --silent --show-error --output "$smoke_dir/login.json" --cookie-jar "$smoke_dir/cookies" --write-out '%{http_code}' -H 'Content-Type: application/json' --data "{\"identifier\":\"$email\",\"password\":\"$password\"}" "$base_url/api/v1/auth/login")"
 [ "$login_status" = "200" ] || { printf 'login failed: HTTP %s\n' "$login_status"; exit 1; }
 
 csrf="$(sed -n 's/.*"csrfToken":"\([^"]*\)".*/\1/p' "$smoke_dir/login.json")"
@@ -26,4 +27,7 @@ csrf_status="$(curl --silent --show-error --output /dev/null --cookie "$smoke_di
 logout_status="$(curl --silent --show-error --output /dev/null --cookie "$smoke_dir/cookies" --write-out '%{http_code}' -H "X-CSRF-Token: $csrf" -X POST "$base_url/api/v1/auth/logout")"
 [ "$logout_status" = "204" ] || { printf 'logout failed: HTTP %s\n' "$logout_status"; exit 1; }
 
-printf '%s\n' 'API smoke passed: login, project host, overview, CSRF rejection, logout'
+username_login_status="$(curl --silent --show-error --output "$smoke_dir/username-login.json" --cookie-jar "$smoke_dir/cookies" --write-out '%{http_code}' -H 'Content-Type: application/json' --data "{\"identifier\":\"$username\",\"password\":\"$password\"}" "$base_url/api/v1/auth/login")"
+[ "$username_login_status" = "200" ] || { printf 'username login failed: HTTP %s\n' "$username_login_status"; exit 1; }
+
+printf '%s\n' 'API smoke passed: email/username login, project host, overview, CSRF rejection, logout'

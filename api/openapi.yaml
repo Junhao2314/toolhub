@@ -22,11 +22,30 @@ paths:
     get: {security: [], operationId: probeSession, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /auth/csrf:
     get: {operationId: rotateCSRF, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /account/username:
+    patch:
+      operationId: updateOwnUsername
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateUsernameRequest'}}}}
+      responses: {'204': {description: Username updated and all sessions revoked}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /account/password:
+    patch:
+      operationId: updateOwnPassword
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdatePasswordRequest'}}}}
+      responses: {'204': {description: Password updated and all sessions revoked}, '403': {$ref: '#/components/responses/Error'}}
   /overview:
     get: {operationId: getOverview, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /users:
     get: {operationId: listUsers, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post: {operationId: createUser, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
+    post:
+      operationId: createUser
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateUserRequest'}}}}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}
+  /users/{id}/password:
+    post:
+      operationId: resetUserPassword
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TemporaryPasswordRequest'}}}}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
   /nodes:
     get: {operationId: listNodes, responses: {'200': {$ref: '#/components/responses/JSON'}}}
     post: {operationId: createEnrollment, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
@@ -112,8 +131,41 @@ components:
   schemas:
     LoginRequest:
       type: object
-      required: [email, password]
-      properties: {email: {type: string, format: email}, password: {type: string, minLength: 12}}
+      additionalProperties: false
+      required: [identifier, password]
+      properties: {identifier: {type: string, minLength: 1}, password: {type: string, minLength: 12}}
+    Username:
+      type: string
+      minLength: 3
+      maxLength: 32
+      pattern: '^[a-z0-9._-]+$'
+    UpdateUsernameRequest:
+      type: object
+      additionalProperties: false
+      required: [username, currentPassword]
+      properties: {username: {$ref: '#/components/schemas/Username'}, currentPassword: {type: string}}
+    UpdatePasswordRequest:
+      type: object
+      additionalProperties: false
+      required: [currentPassword, newPassword]
+      properties: {currentPassword: {type: string}, newPassword: {type: string, minLength: 12, maxLength: 1024}}
+    TemporaryPasswordRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        mode: {type: string, enum: [random, manual]}
+        password: {type: string, minLength: 12, maxLength: 1024, description: Required only in manual mode and never echoed in the response.}
+    CreateUserRequest:
+      type: object
+      additionalProperties: false
+      required: [username, email, displayName, role]
+      properties:
+        username: {$ref: '#/components/schemas/Username'}
+        email: {type: string, format: email}
+        displayName: {type: string, minLength: 1}
+        role: {type: string, enum: [admin, operator, viewer]}
+        passwordMode: {type: string, enum: [random, manual]}
+        password: {type: string, minLength: 12, maxLength: 1024, description: Required only in manual mode.}
     Error:
       type: object
       required: [error]

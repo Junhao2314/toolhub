@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Boxes, Bot, BriefcaseBusiness, ChevronDown, CircleUserRound, LogOut, Menu, Network, Settings, ShieldCheck, Store, Workflow, X } from 'lucide-react'
+import { Boxes, Bot, BriefcaseBusiness, ChevronDown, CircleUserRound, KeyRound, LogOut, Menu, Network, Settings, ShieldCheck, Store, Workflow, X } from 'lucide-react'
 import { api, APIError, type Session } from './api/client'
 import { IconButton, Loading } from './components/ui'
 import Login from './pages/Login'
@@ -11,6 +11,7 @@ import Jobs from './pages/Jobs'
 import MCP from './pages/MCP'
 import Access from './pages/Access'
 import SettingsPage from './pages/Settings'
+import Account from './pages/Account'
 
 const navigation = [
   { path: '/overview', label: 'Overview', icon: BriefcaseBusiness },
@@ -19,6 +20,7 @@ const navigation = [
   { path: '/nodes', label: 'Nodes', icon: Network },
   { path: '/jobs', label: 'Jobs', icon: Workflow },
   { path: '/mcp', label: 'MCP', icon: Bot },
+  { path: '/account', label: 'Account', icon: CircleUserRound },
   { path: '/access', label: 'Users & Audit', icon: ShieldCheck, admin: true },
   { path: '/settings', label: 'Settings', icon: Settings, admin: true },
 ]
@@ -47,6 +49,12 @@ export default function App() {
     setPath(next)
     setMobileNav(false)
   }
+  const signedOut = () => {
+    api.forgetSession()
+    setSession(null)
+    history.replaceState({}, '', '/')
+    setPath('/overview')
+  }
 
   if (checking) return <div className="boot"><div className="brand-mark"><Boxes /></div><Loading label="Opening ToolHub" /></div>
   if (!session) return <Login onLogin={setSession} />
@@ -56,7 +64,8 @@ export default function App() {
     : path.startsWith('/nodes') ? <Nodes />
     : path.startsWith('/jobs') ? <Jobs />
     : path.startsWith('/mcp') ? <MCP />
-    : path.startsWith('/access') && isAdmin ? <Access />
+    : path.startsWith('/account') ? <Account user={session.user} signedOut={signedOut} />
+    : path.startsWith('/access') && isAdmin ? <Access currentUserID={session.user.id} sessionInvalidated={signedOut} />
     : path.startsWith('/settings') && isAdmin ? <SettingsPage />
     : <Overview navigate={navigate} />
 
@@ -71,8 +80,9 @@ export default function App() {
       <header className="topbar">
         <IconButton label="Open navigation" onClick={() => setMobileNav(true)}><Menu size={20} /></IconButton>
         <div className="topbar-context"><span>Operations</span><ChevronDown size={14} /></div>
-        <div className="account"><CircleUserRound size={18} /><span><strong>{session.user.displayName}</strong><small>{session.user.roles.join(', ')}</small></span><IconButton label="Sign out" onClick={() => api.logout().finally(() => setSession(null))}><LogOut size={17} /></IconButton></div>
+        <div className="account"><CircleUserRound size={18} /><span><strong>{session.user.displayName}</strong><small>@{session.user.username} · {session.user.roles.join(', ')}</small></span><IconButton label="Sign out" onClick={() => api.logout().finally(signedOut)}><LogOut size={17} /></IconButton></div>
       </header>
+      {session.user.passwordChangeRecommended && <button className="credential-reminder" onClick={() => navigate('/account')}><KeyRound size={17} /><span>This account is using a temporary password. Change it from Account.</span></button>}
       <main>{page}</main>
     </div>
   </div>
