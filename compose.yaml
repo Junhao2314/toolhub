@@ -1,0 +1,61 @@
+name: toolhub
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: toolhub
+      POSTGRES_USER: toolhub
+      POSTGRES_PASSWORD: ${TOOLHUB_POSTGRES_PASSWORD:-toolhub-local-only}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U toolhub -d toolhub"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  toolhub:
+    build:
+      context: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TOOLHUB_LISTEN_ADDR: 0.0.0.0:18480
+      TOOLHUB_DATABASE_URL: postgres://toolhub:${TOOLHUB_POSTGRES_PASSWORD:-toolhub-local-only}@postgres:5432/toolhub?sslmode=disable
+      TOOLHUB_MASTER_KEY: ${TOOLHUB_MASTER_KEY:?TOOLHUB_MASTER_KEY is required}
+      TOOLHUB_BOOTSTRAP_ADMIN_EMAIL: ${TOOLHUB_BOOTSTRAP_ADMIN_EMAIL:?TOOLHUB_BOOTSTRAP_ADMIN_EMAIL is required}
+      TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD: ${TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD:?TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD is required}
+      TOOLHUB_BOOTSTRAP_ADMIN_NAME: ${TOOLHUB_BOOTSTRAP_ADMIN_NAME:-ToolHub Admin}
+      TOOLHUB_PUBLIC_URL: ${TOOLHUB_PUBLIC_URL:-}
+      TOOLHUB_TIMEZONE: ${TOOLHUB_TIMEZONE:-Asia/Shanghai}
+      TOOLHUB_SECURE_COOKIES: ${TOOLHUB_SECURE_COOKIES:-true}
+      SKILLSMP_API_KEY: ${SKILLSMP_API_KEY:-}
+    ports:
+      - "127.0.0.1:${TOOLHUB_PORT:-18480}:18480"
+    volumes:
+      - toolhub_data:/data
+    networks:
+      - backend
+      - egress
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  backend:
+    internal: true
+  egress:
+
+volumes:
+  postgres_data:
+  toolhub_data:

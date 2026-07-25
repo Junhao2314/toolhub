@@ -1,0 +1,16 @@
+{
+  "thoughts": [
+    {
+      "timestamp": "2026-07-25T00:00:00+08:00",
+      "feature": "project",
+      "decision": "Use a modular Go monolith plus a separate Go agent and embedded React UI",
+      "reason": "This preserves the two-service deployment requirement while keeping security and workflow boundaries testable."
+    },
+    {
+      "timestamp": "2026-07-25T00:00:00+08:00",
+      "feature": "security",
+      "decision": "Use server-side HttpOnly sessions, double-submit CSRF binding, Argon2id and XChaCha20-Poly1305",
+      "reason": "The console is same-origin and requires immediate session revocation plus encrypted credential storage."
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22.x', cache: true }
+      - run: go test ./...
+      - run: go vet ./...
+
+  agent-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            output: toolhub-agent
+          - os: macos-latest
+            output: toolhub-agent
+          - os: windows-latest
+            output: toolhub-agent.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.22.x', cache: true }
+      - run: go build -o ${{ matrix.output }} ./cmd/toolhub-agent
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.12', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=high
+      - run: npm run typecheck
+      - run: npm run build
+
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22.12', cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci --ignore-scripts
+        working-directory: web
+      - name: Start ToolHub
+        env:
+          TOOLHUB_MASTER_KEY: 0123456789abcdef0123456789abcdef
+          TOOLHUB_BOOTSTRAP_ADMIN_EMAIL: admin@toolhub.local
+          TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD: ToolHubLocal-2026-ChangeMe
+          TOOLHUB_SECURE_COOKIES: 'false'
+        run: docker compose up -d --build --wait
+      - name: API smoke
+        env:
+          TOOLHUB_SMOKE_EMAIL: admin@toolhub.local
+          TOOLHUB_SMOKE_PASSWORD: ToolHubLocal-2026-ChangeMe
+        run: sh scripts/smoke-api.sh
+      - name: Browser smoke
+        env:
+          TOOLHUB_E2E_EMAIL: admin@toolhub.local
+          TOOLHUB_E2E_PASSWORD: ToolHubLocal-2026-ChangeMe
+        run: npm run test:e2e
+        working-directory: web
+      - if: always()
+        env:
+          TOOLHUB_MASTER_KEY: 0123456789abcdef0123456789abcdef
+          TOOLHUB_BOOTSTRAP_ADMIN_EMAIL: admin@toolhub.local
+          TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD: ToolHubLocal-2026-ChangeMe
+        run: docker compose logs --no-color

@@ -1,0 +1,18 @@
+{
+  "overallScore": 0.968,
+  "passed": true,
+  "threshold": 0.95,
+  "scorer": "evidence-matrix fallback; claude-flow prerequisite was not installed",
+  "checks": [
+    {"name":"code-correctness","score":0.98,"passed":true,"evidence":["go test -race ./...","go vet ./...","TypeScript production build"]},
+    {"name":"security","score":0.965,"passed":true,"evidence":["npm audit: 0 vulnerabilities","auth/CSRF API smoke","secret-reference authorization","signed task tests"]},
+    {"name":"performance","score":0.95,"passed":true,"evidence":["197 KB JS / 60 KB gzip","bounded HTTP bodies","worker concurrency and database indexes"]},
+    {"name":"documentation","score":0.98,"passed":true,"evidence":["README","OpenAPI","security model","rollout runbook"]},
+    {"name":"best-practices","score":0.965,"passed":true,"evidence":["two-service hardened Compose","three-platform Agent build","desktop/mobile Playwright"]}
+  ],
+  "residualRisks": [
+    "A real Tailnet Agent enrollment and SSH fallback require the user's target nodes and keys; use the documented canary rollout.",
+    "High-risk imported Skills still require human review by design.",
+    "Tailscale Serve and ACL configuration are intentionally not modified automatically."
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "supervisor_version":"1.0",
+  "project_path":"/root/docker/toolhub",
+  "enabled":false,
+  "reason":"No unattended external process is started without explicit user approval",
+  "monitoring":{"check_interval_seconds":60,"session_timeout_seconds":300,"max_restart_attempts":3}
+}

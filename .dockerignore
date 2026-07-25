@@ -1,0 +1,11 @@
+.git
+.builder
+.env
+bin
+coverage
+playwright-report
+test-results
+web/node_modules
+web/dist
+cmd/toolhub/dist
+*.log

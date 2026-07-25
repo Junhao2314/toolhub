@@ -1,0 +1,19 @@
+{
+  "session_id": "session-2026-07-25-001",
+  "feature_id": "feat-010",
+  "start_time": "2026-07-25T00:00:00+08:00",
+  "workflow_steps": [
+    {"step":1,"action":"Read specification and builder constraints","outcome":"complete"},
+    {"step":2,"action":"Discover local toolchain and plugin capabilities","outcome":"complete"},
+    {"step":3,"action":"Initialize persistent builder state","outcome":"complete"},
+    {"step":4,"action":"Implement control plane, Agent, runtime, workflows, and UI","outcome":"complete"},
+    {"step":5,"action":"Run security, build, container, API, and browser verification","outcome":"complete"},
+    {"step":6,"action":"Create documentation, CI, and rollout runbook","outcome":"complete"}
+  ],
+  "decisions": [
+    {"point":"Deployment ownership","chosen":"Refuse unmanaged targets and use atomic managed-directory replacement"},
+    {"point":"Update semantics","chosen":"Candidate discovery is separate from approval and reconciliation"},
+    {"point":"Remote fallback","chosen":"Pinned SSH/SFTP with a fixed signed-task runner only"}
+  ],
+  "errors": ["See .builder/errors.json; all recorded errors are resolved"]
+}

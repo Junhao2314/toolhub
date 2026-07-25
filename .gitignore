@@ -1,0 +1,14 @@
+.env
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+cmd/toolhub/dist/assets/
+bin/
+coverage/
+playwright-report/
+test-results/
+*.log
+*.tmp
+.DS_Store

@@ -1,0 +1,118 @@
+openapi: 3.1.0
+info:
+  title: ToolHub API
+  version: 0.1.0
+  description: Tailnet-only control plane for Codex, Claude, Hermes Skills and MCP.
+servers:
+  - url: /api/v1
+security:
+  - sessionCookie: []
+paths:
+  /auth/login:
+    post:
+      security: []
+      operationId: login
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '401': {$ref: '#/components/responses/Error'}}
+  /auth/logout:
+    post: {operationId: logout, responses: {'204': {description: Logged out}}}
+  /auth/me:
+    get: {operationId: getCurrentUser, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /overview:
+    get: {operationId: getOverview, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /users:
+    get: {operationId: listUsers, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: createUser, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
+  /nodes:
+    get: {operationId: listNodes, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: createEnrollment, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
+  /nodes/{id}:
+    get: {operationId: getNode, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    patch: {operationId: updateNode, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    delete: {operationId: archiveNode, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Archived}}}
+  /nodes/{id}/scan:
+    post: {operationId: scanNode, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /skills:
+    get: {operationId: listSkills, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: importSkill, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /skills/upload:
+    post:
+      operationId: uploadSkill
+      requestBody: {required: true, content: {multipart/form-data: {schema: {type: object, properties: {file: {type: string, format: binary}}, required: [file]}}}}
+      responses: {'201': {$ref: '#/components/responses/JSON'}}
+  /skills/{id}:
+    get: {operationId: getSkill, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    delete: {operationId: archiveSkill, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Archived for 30 days}}}
+  /skills/{id}/review:
+    post: {operationId: reviewSkill, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /skills/{id}/deployments:
+    post: {operationId: setSkillTargets, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /sources:
+    get: {operationId: listSources, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /deployments:
+    get: {operationId: listDeployments, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /deployments/{id}/rollback:
+    post: {operationId: rollbackDeployment, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /updates:
+    get: {operationId: listUpdates, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: checkUpdates, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /updates/{id}/approve:
+    post: {operationId: approveUpdate, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /sync:
+    post: {operationId: sync, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /jobs:
+    get: {operationId: listJobs, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /jobs/{id}/cancel:
+    post: {operationId: cancelJob, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /market/search:
+    get:
+      operationId: searchMarket
+      parameters: [{name: q, in: query, required: true, schema: {type: string}}, {name: page, in: query, schema: {type: integer, minimum: 1}}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '429': {$ref: '#/components/responses/Error'}}
+  /recommendations:
+    post: {operationId: recommendSkills, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /mcp/servers:
+    get: {operationId: listMCPServers, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: createMCPServer, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
+  /mcp/servers/{id}:
+    patch: {operationId: updateMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    delete: {operationId: deleteMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Deleted}}}
+  /mcp/servers/{id}/health:
+    post: {operationId: checkMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /mcp/profiles:
+    get: {operationId: listMCPProfiles, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: createMCPProfile, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
+  /mcp/deployments:
+    get: {operationId: listMCPDeployments, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: deployMCPProfile, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /settings:
+    get: {operationId: getSettings, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    patch: {operationId: updateSettings, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /settings/ai-providers:
+    get: {operationId: listAIProviders, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: createAIProvider, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
+  /audit:
+    get: {operationId: listAudit, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+components:
+  securitySchemes:
+    sessionCookie: {type: apiKey, in: cookie, name: toolhub_session}
+  parameters:
+    ID: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+  requestBodies:
+    JSON: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+  responses:
+    JSON: {description: JSON response, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+    Error: {description: Error response, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties: {email: {type: string, format: email}, password: {type: string, minLength: 12}}
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties: {code: {type: string}, message: {type: string}, requestId: {type: string}}
