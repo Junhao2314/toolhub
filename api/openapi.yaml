@@ -18,6 +18,10 @@ paths:
     post: {operationId: logout, responses: {'204': {description: Logged out}}}
   /auth/me:
     get: {operationId: getCurrentUser, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /auth/session:
+    get: {security: [], operationId: probeSession, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+  /auth/csrf:
+    get: {operationId: rotateCSRF, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /overview:
     get: {operationId: getOverview, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /users:
@@ -32,6 +36,8 @@ paths:
     delete: {operationId: archiveNode, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Archived}}}
   /nodes/{id}/scan:
     post: {operationId: scanNode, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /nodes/{id}/connections:
+    post: {operationId: createNodeConnection, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
   /skills:
     get: {operationId: listSkills, responses: {'200': {$ref: '#/components/responses/JSON'}}}
     post: {operationId: importSkill, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}

@@ -20,25 +20,43 @@ type SSHConnection struct {
 }
 
 func (s *Store) CreateSSHConnection(ctx context.Context, nodeID, address, knownHosts, privateKey, actor string) (string, error) {
-	address = strings.TrimSpace(address)
-	knownHosts = strings.TrimSpace(knownHosts)
-	if !sshAddressPattern.MatchString(address) || strings.ContainsAny(address, "\r\n\t ") {
-		return "", errors.New("SSH address must use user@host with no options")
-	}
-	if !strings.Contains(knownHosts, " ssh-") || strings.Contains(knownHosts, "\n") {
-		return "", errors.New("one pinned OpenSSH known_hosts line is required")
-	}
-	if !strings.Contains(privateKey, "PRIVATE KEY") {
-		return "", errors.New("an OpenSSH private key is required")
-	}
-	secretID, err := s.CreateSecret(ctx, "ssh-key:"+nodeID+":"+uuid.NewString(), "ssh-private-key", []byte(privateKey), map[string]any{"nodeId": nodeID}, actor)
+	address, knownHosts, err := validateSSHConnection(address, knownHosts, privateKey)
 	if err != nil {
 		return "", err
 	}
 	id := uuid.NewString()
-	_, err = s.pool.Exec(ctx, `INSERT INTO node_connections(id,node_id,kind,address,host_key_fingerprint,secret_id)
-		VALUES($1,$2,'ssh',$3,$4,$5)`, id, nodeID, address, knownHosts, secretID)
-	return id, err
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	secretID, err := s.createSecret(ctx, tx, "ssh-key:"+nodeID+":"+uuid.NewString(), "ssh-private-key", []byte(privateKey), map[string]any{"nodeId": nodeID}, actor)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, "UPDATE node_connections SET enabled=false WHERE node_id=$1 AND kind='ssh' AND enabled", nodeID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO node_connections(id,node_id,kind,address,host_key_fingerprint,secret_id)
+		VALUES($1,$2,'ssh',$3,$4,$5)`, id, nodeID, address, knownHosts, secretID); err != nil {
+		return "", err
+	}
+	return id, tx.Commit(ctx)
+}
+
+func validateSSHConnection(address, knownHosts, privateKey string) (string, string, error) {
+	address = strings.TrimSpace(address)
+	knownHosts = strings.TrimSpace(knownHosts)
+	if !sshAddressPattern.MatchString(address) || strings.ContainsAny(address, "\r\n\t ") {
+		return "", "", errors.New("SSH address must use user@host with no options")
+	}
+	if !strings.Contains(knownHosts, " ssh-") || strings.ContainsAny(knownHosts, "\r\n") {
+		return "", "", errors.New("one pinned OpenSSH known_hosts line is required")
+	}
+	if !strings.Contains(privateKey, "PRIVATE KEY") {
+		return "", "", errors.New("an OpenSSH private key is required")
+	}
+	return address, knownHosts, nil
 }
 
 func (s *Store) SSHConnectionForNode(ctx context.Context, nodeID string) (SSHConnection, error) {

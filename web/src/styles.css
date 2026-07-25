@@ -153,6 +153,9 @@ td small { color: var(--muted); margin-top: 3px; max-width: 360px; }
 .target-matrix span { padding: 8px 11px; }
 .target-matrix span strong { display: block; margin-bottom: 4px; }
 .target-matrix label { display: grid; place-items: center; height: 100%; border-left: 1px solid var(--line); }
+.target-matrix label:has(input:disabled) { background: #f1f3f1; opacity: .45; cursor: not-allowed; }
+.target-matrix .local-target { background: #f2f8f4; box-shadow: inset 3px 0 var(--green); }
+.target-matrix span small { display: block; color: var(--green); font-size: 10px; margin-bottom: 4px; }
 .matrix-head { background: var(--surface-2); font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--muted); }
 
 .market-search { height: 54px; max-width: 900px; margin: 0 auto 28px; display: flex; align-items: center; gap: 12px; border: 1px solid #bfc8c2; background: #fff; padding: 7px 8px 7px 16px; }
@@ -179,8 +182,11 @@ td small { color: var(--muted); margin-top: 3px; max-width: 360px; }
 .node-avatar { width: 40px; height: 40px; display: grid; place-items: center; background: var(--surface-2); color: var(--muted); border-radius: 5px; }
 .node-avatar.online { background: var(--green-soft); color: var(--green); }
 .node-avatar.offline { background: var(--red-soft); color: var(--red); }
+.node-avatar.pending { background: var(--amber-soft); color: var(--amber); }
 .node-primary { min-width: 0; }
 .node-primary > span { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.node-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.local-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; background: var(--green-soft); color: var(--green); font-size: 10px; font-weight: 700; }
 .label-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 .label-row small { background: #edf1ee; color: #59635d; padding: 2px 5px; }
 .node-row dl { display: grid; grid-template-columns: repeat(3, 1fr); margin: 0; }
@@ -189,6 +195,15 @@ td small { color: var(--muted); margin-top: 3px; max-width: 360px; }
 .node-row dd { margin: 0; font-size: 12px; }
 .enrollment-result { display: grid; justify-items: start; gap: 9px; }
 .enrollment-result code { width: 100%; padding: 11px; background: var(--surface-2); border: 1px solid var(--line); }
+.enrollment-result details { width: 100%; color: var(--muted); font-size: 12px; }
+.enrollment-result details code { display: block; margin-top: 8px; }
+.command-block { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 36px; align-items: stretch; border: 1px solid var(--line); background: var(--surface-2); }
+.command-block code { border: 0; min-width: 0; }
+.command-block .icon-button { align-self: center; }
+.ssh-note { display: flex; gap: 10px; align-items: flex-start; background: var(--blue-soft); color: #295778; padding: 12px; }
+.ssh-note span { display: grid; gap: 4px; }
+.ssh-note small { line-height: 1.45; }
+.secret-input { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
 .profile-list article, .provider-list article, .user-list article { min-height: 70px; background: var(--surface); border: 1px solid var(--line); display: grid; grid-template-columns: 42px minmax(0, 1fr) auto auto; align-items: center; gap: 13px; padding: 12px 15px; }
 .profile-list article p, .provider-list article span, .user-list article span { color: var(--muted); font-size: 12px; margin-top: 4px; display: block; }
 .provider-list article code { display: block; margin-top: 5px; color: var(--blue); }

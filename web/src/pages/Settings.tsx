@@ -1,10 +1,10 @@
 import { KeyRound, Plus, Save, ShieldCheck } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { api, type Dict } from '../api/client'
 import { Button, ErrorNotice, Field, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
 import { useData } from '../hooks/useData'
 
-interface SettingsData extends Dict { publicUrl: string; listenPort: number; timezone: string; marketApiKeyConfigured: boolean; policies: { updatePolicy?: { schedule: string; timezone: string }; syncPolicy?: { schedule: string; timezone: string } } }
+interface SettingsData extends Dict { publicUrl: string; listenPort: number; timezone: string; localNodeName: string; marketApiKeyConfigured: boolean; policies: { updatePolicy?: { schedule: string; timezone: string }; syncPolicy?: { schedule: string; timezone: string } } }
 interface Provider { id: string; name: string; baseUrl: string; model: string; isDefault: boolean; enabled: boolean }
 
 export default function SettingsPage() {
@@ -38,7 +38,7 @@ function Providers({ items }: { items: Provider[] }) {
 }
 
 function Security({ value }: { value: SettingsData }) {
-  return <section className="security-settings"><div><ShieldCheck size={22} /><span><strong>Tailnet-only listener</strong><p>Container host binding is fixed to 127.0.0.1:{value.listenPort}. Tailscale Serve should terminate HTTPS and WSS.</p></span><Status value={value.publicUrl ? 'configured' : 'needs-config'} /></div><div><KeyRound size={22} /><span><strong>Encrypted credentials</strong><p>AI keys, SSH keys, Agent task keys, and MCP environment values use authenticated encryption.</p></span><Status value="active" /></div><div><ShieldCheck size={22} /><span><strong>SkillsMP key</strong><p>Optional provider key for higher Marketplace quotas.</p></span><Status value={value.marketApiKeyConfigured ? 'configured' : 'anonymous'} /></div></section>
+  return <section className="security-settings"><div><ShieldCheck size={22} /><span><strong>Project host · {value.localNodeName}</strong><p>This reserved local node is the default onboarding and single-node canary target after Agent inventory is available.</p></span><Status value="default" /></div><div><ShieldCheck size={22} /><span><strong>Tailnet-only listener</strong><p>Container host binding is fixed to 127.0.0.1:{value.listenPort}. Tailscale Serve should terminate HTTPS and WSS.</p></span><Status value={value.publicUrl ? 'configured' : 'needs-config'} /></div><div><KeyRound size={22} /><span><strong>Encrypted credentials</strong><p>AI keys, SSH keys, Agent task keys, and MCP environment values use authenticated encryption.</p></span><Status value="active" /></div><div><ShieldCheck size={22} /><span><strong>SkillsMP key</strong><p>Optional provider key for higher Marketplace quotas.</p></span><Status value={value.marketApiKeyConfigured ? 'configured' : 'anonymous'} /></div></section>
 }
 
 function ProviderModal({ close, saved }: { close: () => void; saved: () => void }) {
@@ -50,5 +50,3 @@ function ProviderModal({ close, saved }: { close: () => void; saved: () => void 
   const submit = () => api.post('/settings/ai-providers', { name, baseUrl, model, apiKey, isDefault: true }).then(saved).catch((reason: Error) => setError(reason.message))
   return <Modal title="Add AI provider" close={close}>{error && <ErrorNotice message={error} />}<Field label="Name"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="OpenAI" /></Field><Field label="OpenAI-compatible endpoint"><input value={baseUrl} onChange={(event) => setBaseURL(event.target.value)} /></Field><Field label="Model"><input value={model} onChange={(event) => setModel(event.target.value)} /></Field><Field label="API key"><input type="password" value={apiKey} onChange={(event) => setAPIKey(event.target.value)} /></Field><div className="modal-actions"><Button variant="secondary" onClick={close}>Cancel</Button><Button onClick={submit} disabled={!name || !baseUrl || !model || !apiKey}>Save encrypted provider</Button></div></Modal>
 }
-
-const _effect = useEffect

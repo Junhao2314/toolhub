@@ -1,9 +1,9 @@
 {
   "project":"ToolHub",
   "status":"completed",
-  "completedAt":"2026-07-25T02:30:00+08:00",
-  "featuresCompleted":10,
+  "completedAt":"2026-07-25T16:06:51+08:00",
+  "featuresCompleted":11,
   "featuresPending":0,
-  "verificationScore":0.968,
-  "nextAction":"Execute the documented single-node canary on the target Tailnet"
+  "verificationScore":0.974,
+  "nextAction":"Use the UI-generated command to enroll project-host, then execute the documented single-node canary"
 }

@@ -16,10 +16,14 @@ csrf="$(sed -n 's/.*"csrfToken":"\([^"]*\)".*/\1/p' "$smoke_dir/login.json")"
 overview_status="$(curl --silent --show-error --output /dev/null --cookie "$smoke_dir/cookies" --write-out '%{http_code}' "$base_url/api/v1/overview")"
 [ "$overview_status" = "200" ] || { printf 'overview failed: HTTP %s\n' "$overview_status"; exit 1; }
 
+nodes_status="$(curl --silent --show-error --output "$smoke_dir/nodes.json" --cookie "$smoke_dir/cookies" --write-out '%{http_code}' "$base_url/api/v1/nodes")"
+[ "$nodes_status" = "200" ] || { printf 'nodes failed: HTTP %s\n' "$nodes_status"; exit 1; }
+grep -q '"isLocal":true' "$smoke_dir/nodes.json" || { printf '%s\n' 'project-host node is missing'; exit 1; }
+
 csrf_status="$(curl --silent --show-error --output /dev/null --cookie "$smoke_dir/cookies" --write-out '%{http_code}' -H 'Content-Type: application/json' --data '{}' "$base_url/api/v1/sync")"
 [ "$csrf_status" = "403" ] || { printf 'CSRF rejection failed: HTTP %s\n' "$csrf_status"; exit 1; }
 
 logout_status="$(curl --silent --show-error --output /dev/null --cookie "$smoke_dir/cookies" --write-out '%{http_code}' -H "X-CSRF-Token: $csrf" -X POST "$base_url/api/v1/auth/logout")"
 [ "$logout_status" = "204" ] || { printf 'logout failed: HTTP %s\n' "$logout_status"; exit 1; }
 
-printf '%s\n' 'API smoke passed: login, authenticated overview, CSRF rejection, logout'
+printf '%s\n' 'API smoke passed: login, project host, overview, CSRF rejection, logout'

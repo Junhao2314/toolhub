@@ -2,13 +2,20 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/toolhub-dev/toolhub/internal/domain"
 )
+
+var enrollmentHostnamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$`)
 
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	value, err := a.store.Overview(r.Context())
@@ -90,6 +97,11 @@ func (a *API) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	serverURL, err := enrollmentServerURL(a.config.PublicURL, r)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "invalid_public_url", err.Error())
+		return
+	}
 	principal := principalFrom(r.Context())
 	token, expires, err := a.store.CreateEnrollmentToken(r.Context(), input.Name, input.Labels, principal.ID)
 	if err != nil {
@@ -97,7 +109,38 @@ func (a *API) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "create_enrollment", ResourceType: "node", ResourceID: input.Name, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"expiresAt": expires}})
-	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "expiresAt": expires, "agentCommand": "toolhub-agent enroll --server " + a.config.PublicURL + " --token [REDACTED]"})
+	command := fmt.Sprintf("toolhub-agent enroll --server %s --token %s", serverURL, token)
+	writeJSON(w, http.StatusCreated, map[string]any{"token": token, "expiresAt": expires, "agentCommand": command})
+}
+
+func enrollmentServerURL(configured string, r *http.Request) (string, error) {
+	serverURL := strings.TrimSpace(configured)
+	if serverURL == "" {
+		scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+		if scheme != "http" && scheme != "https" {
+			scheme = "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+		}
+		serverURL = scheme + "://" + r.Host
+	}
+	parsed, err := url.Parse(serverURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("TOOLHUB_PUBLIC_URL must be an HTTP(S) origin without credentials, path, query, or fragment")
+	}
+	hostname := parsed.Hostname()
+	if net.ParseIP(hostname) == nil && !enrollmentHostnamePattern.MatchString(hostname) {
+		return "", errors.New("TOOLHUB_PUBLIC_URL contains an invalid hostname")
+	}
+	host := hostname
+	if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+	if port := parsed.Port(); port != "" {
+		host = net.JoinHostPort(hostname, port)
+	}
+	return parsed.Scheme + "://" + host, nil
 }
 
 func (a *API) getNode(w http.ResponseWriter, r *http.Request) {

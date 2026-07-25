@@ -32,5 +32,22 @@ test('login and core navigation render without overlap', async ({ page }, testIn
   expect(header!.x + header!.width).toBeLessThanOrEqual(viewport.width + 1)
 
   await page.screenshot({ path: `../test-results/${testInfo.project.name}-skills.png`, fullPage: true })
+
+  if (testInfo.project.name === 'mobile') {
+    await page.getByRole('button', { name: 'Open navigation' }).click()
+  }
+  await page.getByRole('button', { name: 'Nodes', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Nodes' })).toBeVisible()
+  await expect(page.getByText('Project host', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Configure pinned SSH fallback' }).first().click()
+  await expect(page.getByRole('heading', { name: /SSH fallback/ })).toBeVisible()
+  await expect(page.getByLabel('Pinned known_hosts line')).toBeVisible()
+  await expect(page.getByLabel('Private key')).toBeVisible()
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.getByRole('button', { name: 'Enroll project host' }).click()
+  await expect(page.getByRole('heading', { name: /Enroll project host/ })).toBeVisible()
+  await expect(page.getByLabel('Node name')).toHaveValue('project-host')
+  await page.getByRole('button', { name: 'Close', exact: true }).click()
+  await page.screenshot({ path: `../test-results/${testInfo.project.name}-nodes.png`, fullPage: true })
   expect(consoleErrors).toEqual([])
 })

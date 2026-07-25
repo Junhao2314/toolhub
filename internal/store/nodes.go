@@ -33,6 +33,41 @@ func (s *Store) CreateEnrollmentToken(ctx context.Context, nodeName string, labe
 	return token, expires, err
 }
 
+func (s *Store) BootstrapLocalNode(ctx context.Context, nodeName string) (string, bool, error) {
+	nodeName = strings.TrimSpace(nodeName)
+	if nodeName == "" || len(nodeName) > 100 {
+		return "", false, errors.New("local node name must contain 1-100 characters")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", int64(1848001)); err != nil {
+		return "", false, fmt.Errorf("lock project-host bootstrap: %w", err)
+	}
+	var id string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM nodes WHERE labels->>'scope'='local'
+		ORDER BY (archived_at IS NULL) DESC,created_at LIMIT 1 FOR UPDATE`).Scan(&id)
+	if err == nil {
+		if _, err := tx.Exec(ctx, `UPDATE nodes SET name=$2,archived_at=NULL,
+			status=CASE WHEN archived_at IS NOT NULL THEN 'pending' ELSE status END,
+			labels=labels || '{"scope":"local","group":"canary"}'::jsonb,updated_at=now() WHERE id=$1`, id, nodeName); err != nil {
+			return "", false, err
+		}
+		return id, false, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", false, err
+	}
+	id = uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO nodes(id,name,status,labels,connection_preference)
+		VALUES($1,$2,'pending','{"scope":"local","group":"canary"}'::jsonb,'agent')`, id, nodeName); err != nil {
+		return "", false, fmt.Errorf("create project-host node: %w", err)
+	}
+	return id, true, tx.Commit(ctx)
+}
+
 func (s *Store) EnrollAgent(ctx context.Context, token, hostname, platform, architecture, tailscaleIP string, publicKey []byte) (domain.EnrollmentResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -71,15 +106,23 @@ func (s *Store) EnrollAgent(ctx context.Context, token, hostname, platform, arch
 		VALUES($1,$2,'agent-task-key',$3,'{}')`, secretID, "agent-task-key:"+nodeName, ciphertext); err != nil {
 		return domain.EnrollmentResult{}, err
 	}
-	nodeID := uuid.NewString()
+	nodeID := ""
 	var ipValue any
 	if strings.TrimSpace(tailscaleIP) != "" {
 		ipValue = strings.TrimSpace(tailscaleIP)
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO nodes(id,name,hostname,platform,architecture,tailscale_ip,status,labels,agent_public_key,agent_token_hash,task_key_secret_id,last_seen_at)
-		VALUES($1,$2,$3,$4,$5,$6,'online',$7,$8,$9,$10,now())`, nodeID, nodeName, hostname, platform, architecture, ipValue, labels, publicKey, security.TokenHash(agentToken), secretID)
+	err = tx.QueryRow(ctx, "SELECT id::text FROM nodes WHERE name=$1 AND status='pending' AND archived_at IS NULL FOR UPDATE", nodeName).Scan(&nodeID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		nodeID = uuid.NewString()
+		_, err = tx.Exec(ctx, `INSERT INTO nodes(id,name,hostname,platform,architecture,tailscale_ip,status,labels,agent_public_key,agent_token_hash,task_key_secret_id,last_seen_at)
+			VALUES($1,$2,$3,$4,$5,$6,'online',$7,$8,$9,$10,now())`, nodeID, nodeName, hostname, platform, architecture, ipValue, labels, publicKey, security.TokenHash(agentToken), secretID)
+	} else if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE nodes SET hostname=$2,platform=$3,architecture=$4,tailscale_ip=$5,status='online',
+			labels=labels || $6::jsonb,agent_public_key=$7,agent_token_hash=$8,task_key_secret_id=$9,last_seen_at=now(),updated_at=now()
+			WHERE id=$1`, nodeID, hostname, platform, architecture, ipValue, labels, publicKey, security.TokenHash(agentToken), secretID)
+	}
 	if err != nil {
-		return domain.EnrollmentResult{}, fmt.Errorf("create node: %w", err)
+		return domain.EnrollmentResult{}, fmt.Errorf("claim node: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "UPDATE enrollment_tokens SET used_at=now() WHERE id=$1", enrollmentID); err != nil {
 		return domain.EnrollmentResult{}, err

@@ -1,5 +1,5 @@
 import { Archive, Check, Download, FileUp, GitBranch, RefreshCw, RotateCcw, Search, ShieldAlert } from 'lucide-react'
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
 import { useData } from '../hooks/useData'
@@ -49,15 +49,21 @@ function ImportModal({ close, imported }: { close: () => void; imported: () => v
 }
 
 function TargetModal({ skill, close, saved }: { skill: Skill; close: () => void; saved: () => void }) {
-  const nodes = useData(() => api.list<{ id: string; name: string; status: string }>('/nodes'), [])
+  const nodes = useData(() => api.list<{ id: string; name: string; status: string; isLocal: boolean; runtimeKinds: string[] }>('/nodes'), [])
   const [targets, setTargets] = useState<Record<string, boolean>>({})
   const [error, setError] = useState('')
+  const defaultsApplied = useRef(false)
+  useEffect(() => {
+    if (defaultsApplied.current || !nodes.data) return
+    defaultsApplied.current = true
+    const local = nodes.data.items.find((node) => node.isLocal)
+    if (!local) return
+    setTargets(Object.fromEntries(local.runtimeKinds.map((runtime) => [`${local.id}:${runtime}`, true])))
+  }, [nodes.data])
   const toggle = (key: string) => setTargets((current) => ({ ...current, [key]: !current[key] }))
   const submit = () => {
     const matrix = Object.entries(targets).filter(([, enabled]) => enabled).map(([key]) => { const [nodeId, runtime] = key.split(':'); return { nodeId, runtime, enabled: true } })
     api.post(`/skills/${skill.id}/deployments`, { targets: matrix, sync: true, dryRun: false }).then(saved).catch((reason: Error) => setError(reason.message))
   }
-  return <Modal title={`Targets · ${skill.name}`} close={close}>{error && <ErrorNotice message={error} />}{nodes.loading ? <Loading /> : <div className="target-matrix"><div className="matrix-head"><span>Node</span><span>Codex</span><span>Claude</span><span>Hermes</span></div>{nodes.data?.items.map((node) => <div key={node.id}><span><strong>{node.name}</strong><Status value={node.status} /></span>{['codex', 'claude', 'hermes'].map((runtime) => <label key={runtime}><input type="checkbox" checked={targets[`${node.id}:${runtime}`] ?? false} onChange={() => toggle(`${node.id}:${runtime}`)} /><i /></label>)}</div>)}</div>}<div className="modal-actions"><Button variant="secondary" onClick={close}>Cancel</Button><Button onClick={submit}>Save and sync</Button></div></Modal>
+  return <Modal title={`Targets · ${skill.name}`} close={close}>{error && <ErrorNotice message={error} />}{nodes.loading ? <Loading /> : <><div className="inline-notice"><ShieldAlert size={16} />The project host is listed first. Its discovered runtimes are selected as the default single-node canary.</div><div className="target-matrix"><div className="matrix-head"><span>Node</span><span>Codex</span><span>Claude</span><span>Hermes</span></div>{nodes.data?.items.map((node) => <div key={node.id} className={node.isLocal ? 'local-target' : ''}><span><strong>{node.name}</strong>{node.isLocal && <small>Project host</small>}<Status value={node.status} /></span>{['codex', 'claude', 'hermes'].map((runtime) => { const available = node.runtimeKinds.includes(runtime); return <label key={runtime} title={available ? runtime : `${runtime} not discovered`}><input type="checkbox" disabled={!available} checked={targets[`${node.id}:${runtime}`] ?? false} onChange={() => toggle(`${node.id}:${runtime}`)} /><i /></label> })}</div>)}</div></>}<div className="modal-actions"><Button variant="secondary" onClick={close}>Cancel</Button><Button onClick={submit} disabled={!Object.values(targets).some(Boolean)}>Save and sync</Button></div></Modal>
 }
-
-const _unused = [ShieldAlert]

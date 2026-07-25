@@ -26,6 +26,8 @@ curl --fail http://127.0.0.1:18480/healthz
 
 Open `http://127.0.0.1:18480` for local setup. Production cookies default to `Secure`; the local HTTP smoke profile explicitly sets `TOOLHUB_SECURE_COOKIES=false`.
 
+ToolHub creates a pending `project-host` node on first startup. Set `TOOLHUB_LOCAL_NODE_NAME` when the project machine should use a different display name. Nodes -> Enroll project host produces the exact one-time Agent command to run on that machine.
+
 Expose the loopback listener with Tailscale Serve according to the installed Tailscale version. Keep Docker bound to `127.0.0.1:18480`; do not publish the port on a public interface. Set `TOOLHUB_PUBLIC_URL` to the resulting Tailnet HTTPS URL so enrollment commands and WSS origins are correct.
 
 ## Agent
@@ -38,6 +40,8 @@ toolhub-agent run
 ```
 
 Service templates are under `packaging/systemd`, `packaging/launchd`, and `packaging/windows`. Enrollment scans existing runtime homes without moving or rewriting files. ToolHub refuses to replace an existing Skill directory unless it contains ToolHub's management marker.
+
+Nodes also provides an SSH fallback form. It accepts `user@host`, one pinned `known_hosts` line, and a private key. The key is encrypted before storage; fallback permits only signed task upload and the fixed Agent task runner. Once the project-host inventory is online, its discovered runtimes are preselected in the Skill target matrix as the default single-node canary.
 
 ## Development
 

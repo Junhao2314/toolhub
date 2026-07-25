@@ -63,6 +63,13 @@ func run(logger *slog.Logger) error {
 	if created {
 		logger.Info("bootstrap administrator created", "email", cfg.BootstrapAdminEmail)
 	}
+	localNodeID, localNodeCreated, err := st.BootstrapLocalNode(ctx, cfg.LocalNodeName)
+	if err != nil {
+		return err
+	}
+	if localNodeCreated {
+		logger.Info("project-host node created", "nodeId", localNodeID, "name", cfg.LocalNodeName)
+	}
 	publicHost := ""
 	if parsed, parseErr := url.Parse(cfg.PublicURL); parseErr == nil {
 		publicHost = parsed.Hostname()

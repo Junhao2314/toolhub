@@ -9,6 +9,7 @@
     {"id":"feat-007","name":"Marketplace and AI","description":"SkillsMP proxy/cache and OpenAI-compatible structured recommendations","priority":"high","status":"completed","passes":true,"tests":{"passed":10,"total":10}},
     {"id":"feat-008","name":"MCP management","description":"Server/profile CRUD, imports, health, deployment and encrypted env refs","priority":"high","status":"completed","passes":true,"tests":{"passed":14,"total":14}},
     {"id":"feat-009","name":"Operations UI","description":"Eight responsive console views with complete operational states","priority":"high","status":"completed","passes":true,"tests":{"passed":20,"total":20}},
-    {"id":"feat-010","name":"Verification and rollout","description":"Unit, integration, E2E, docs and canary rollout guidance","priority":"high","status":"completed","passes":true,"tests":{"passed":20,"total":20}}
+    {"id":"feat-010","name":"Verification and rollout","description":"Unit, integration, E2E, docs and canary rollout guidance","priority":"high","status":"completed","passes":true,"tests":{"passed":20,"total":20}},
+    {"id":"feat-011","name":"Project host onboarding","description":"Default local node, UI SSH fallback, local-first canary targeting, and readiness guidance","priority":"high","status":"completed","passes":true,"tests":{"passed":12,"total":12}}
   ]
 }

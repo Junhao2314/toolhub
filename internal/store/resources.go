@@ -14,13 +14,18 @@ func (s *Store) ListUsers(ctx context.Context) (json.RawMessage, error) {
 func (s *Store) ListNodes(ctx context.Context) (json.RawMessage, error) {
 	return s.JSONList(ctx, `SELECT n.id::text AS id,n.name,n.hostname,n.platform,n.architecture,host(n.tailscale_ip) AS "tailscaleIp",n.status,n.labels,
 		n.connection_preference AS "connectionPreference",n.last_seen_at AS "lastSeenAt",n.created_at AS "createdAt",
-		(SELECT count(*) FROM runtimes r WHERE r.node_id=n.id) AS "runtimeCount"
-		FROM nodes n WHERE n.archived_at IS NULL ORDER BY n.name`)
+		(n.labels->>'scope'='local') AS "isLocal",
+		EXISTS(SELECT 1 FROM node_connections c WHERE c.node_id=n.id AND c.kind='ssh' AND c.enabled) AS "hasSsh",
+		(SELECT count(*) FROM runtimes r WHERE r.node_id=n.id) AS "runtimeCount",
+		coalesce((SELECT array_agg(DISTINCT r.kind ORDER BY r.kind) FROM runtimes r WHERE r.node_id=n.id),ARRAY[]::text[]) AS "runtimeKinds"
+		FROM nodes n WHERE n.archived_at IS NULL ORDER BY (n.labels->>'scope'='local') DESC,n.name`)
 }
 
 func (s *Store) GetNode(ctx context.Context, id string) (json.RawMessage, error) {
 	return s.JSONObject(ctx, `SELECT n.id::text AS id,n.name,n.hostname,n.platform,n.architecture,host(n.tailscale_ip) AS "tailscaleIp",n.status,n.labels,
 		n.connection_preference AS "connectionPreference",n.last_seen_at AS "lastSeenAt",n.created_at AS "createdAt",
+		(n.labels->>'scope'='local') AS "isLocal",
+		EXISTS(SELECT 1 FROM node_connections c WHERE c.node_id=n.id AND c.kind='ssh' AND c.enabled) AS "hasSsh",
 		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT r.id::text AS id,r.kind,r.root_path AS "rootPath",r.version,r.inventory,r.scanned_at AS "scannedAt" FROM runtimes r WHERE r.node_id=n.id ORDER BY r.kind) x),'[]') AS runtimes
 		FROM nodes n WHERE n.id=$1 AND n.archived_at IS NULL`, id)
 }

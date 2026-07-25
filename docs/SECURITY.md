@@ -18,6 +18,8 @@ Agent tasks have a closed type set and are HMAC-signed over canonical JSON. The 
 
 SSH fallback uses a pinned OpenSSH `known_hosts` line, BatchMode, IdentitiesOnly, SFTP upload, and one fixed command: `toolhub-agent run-task --file <validated-temp-path>`. ToolHub does not expose a remote shell API.
 
+The Nodes page never reads SSH private keys back. Saving a replacement disables the previous active SSH connection and stores the new key as a separate encrypted secret for auditability.
+
 ## Skill Intake
 
 Archives reject absolute paths, traversal, backslashes, duplicate paths, symlinks, oversized files, and multiple package roots. Review reports expose scripts, executables, URLs, allowed tools, possible credentials, and license presence. Imported content is immutable and remains Library-only until an administrator approves it and assigns targets.

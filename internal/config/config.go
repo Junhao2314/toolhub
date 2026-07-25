@@ -17,6 +17,7 @@ type Config struct {
 	BootstrapAdminEmail    string
 	BootstrapAdminName     string
 	BootstrapAdminPassword string
+	LocalNodeName          string
 	PublicURL              string
 	Timezone               *time.Location
 	SkillsMPAPIKey         string
@@ -50,6 +51,7 @@ func Load() (Config, error) {
 		BootstrapAdminEmail:    normalizeEmail(os.Getenv("TOOLHUB_BOOTSTRAP_ADMIN_EMAIL")),
 		BootstrapAdminName:     env("TOOLHUB_BOOTSTRAP_ADMIN_NAME", "ToolHub Admin"),
 		BootstrapAdminPassword: os.Getenv("TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD"),
+		LocalNodeName:          env("TOOLHUB_LOCAL_NODE_NAME", "project-host"),
 		PublicURL:              strings.TrimRight(strings.TrimSpace(os.Getenv("TOOLHUB_PUBLIC_URL")), "/"),
 		Timezone:               location,
 		SkillsMPAPIKey:         strings.TrimSpace(os.Getenv("SKILLSMP_API_KEY")),

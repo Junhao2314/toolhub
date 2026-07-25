@@ -13,7 +13,7 @@ func (a *API) getSettings(w http.ResponseWriter, r *http.Request) {
 		handleStoreError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"publicUrl": a.config.PublicURL, "listenPort": 18480, "timezone": a.config.Timezone.String(), "policies": policies, "marketApiKeyConfigured": a.config.SkillsMPAPIKey != ""})
+	writeJSON(w, http.StatusOK, map[string]any{"publicUrl": a.config.PublicURL, "listenPort": 18480, "timezone": a.config.Timezone.String(), "localNodeName": a.config.LocalNodeName, "policies": policies, "marketApiKeyConfigured": a.config.SkillsMPAPIKey != ""})
 }
 
 func (a *API) updateSettings(w http.ResponseWriter, r *http.Request) {

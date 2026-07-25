@@ -8,9 +8,18 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
+type secretExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 func (s *Store) CreateSecret(ctx context.Context, name, kind string, value []byte, metadata map[string]any, createdBy string) (string, error) {
+	return s.createSecret(ctx, s.pool, name, kind, value, metadata, createdBy)
+}
+
+func (s *Store) createSecret(ctx context.Context, executor secretExecutor, name, kind string, value []byte, metadata map[string]any, createdBy string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || kind == "" || len(value) == 0 {
 		return "", errors.New("secret name, kind, and value are required")
@@ -25,7 +34,7 @@ func (s *Store) CreateSecret(ctx context.Context, name, kind string, value []byt
 	if createdBy != "" {
 		actor = createdBy
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO encrypted_secrets(id,name,kind,ciphertext,metadata,created_by)
+	_, err = executor.Exec(ctx, `INSERT INTO encrypted_secrets(id,name,kind,ciphertext,metadata,created_by)
 		VALUES($1,$2,$3,$4,$5,$6)`, id, name, kind, ciphertext, encoded, actor)
 	return id, err
 }
