@@ -11,9 +11,9 @@ RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=false
 ReadWritePaths=/var/lib/toolhub-agent
-ReadWritePaths=-%h/.codex -%h/.claude -%h/.hermes
+ReadWritePaths=-%h
 
 [Install]
 WantedBy=multi-user.target

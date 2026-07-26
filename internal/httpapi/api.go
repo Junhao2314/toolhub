@@ -107,8 +107,8 @@ func (a *API) Router() http.Handler {
 			ops.Delete("/mcp/servers/{id}", a.deleteMCPServer)
 			ops.Post("/mcp/servers/{id}/health", a.checkMCPHealth)
 			ops.Post("/mcp/profiles", a.createMCPProfile)
+			ops.Put("/mcp/profiles/{id}/servers", a.setMCPProfileServers)
 			ops.Post("/mcp/deployments", a.deployMCPProfile)
-			ops.Post("/shared-sources/{id}/sync", a.syncSharedSource)
 		})
 
 		api.Group(func(admin chi.Router) {
@@ -162,6 +162,14 @@ func (a *API) handleStoreError(w http.ResponseWriter, r *http.Request, err error
 	}
 	if errors.Is(err, store.ErrSourceFileAuthoritative) {
 		writeError(w, r, http.StatusConflict, "source_file_authoritative", "This MCP server is managed by its node-local shared source file")
+		return
+	}
+	if errors.Is(err, store.ErrManagedMCPProfile) {
+		writeError(w, r, http.StatusConflict, "managed_mcp_profile_required", "Managed MCP delivery requires a fixed ToolHub runtime profile")
+		return
+	}
+	if errors.Is(err, store.ErrMCPProfileRuntime) {
+		writeError(w, r, http.StatusConflict, "mcp_profile_runtime_mismatch", "The MCP profile does not match the target runtime")
 		return
 	}
 	if errors.Is(err, store.ErrStateConflict) {

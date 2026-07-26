@@ -19,6 +19,8 @@ import (
 var (
 	ErrNotFound                = errors.New("not found")
 	ErrSourceFileAuthoritative = errors.New("source file is authoritative")
+	ErrManagedMCPProfile       = errors.New("managed MCP profile is required")
+	ErrMCPProfileRuntime       = errors.New("MCP profile runtime does not match target runtime")
 	ErrInvalidCurrentPassword  = errors.New("current password is incorrect")
 	ErrUsernameUnavailable     = errors.New("username is unavailable")
 	ErrEmailUnavailable        = errors.New("email is unavailable")

@@ -2,7 +2,6 @@ package agentclient
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,14 +18,12 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/Junhao2314/toolhub/internal/domain"
-	runtimeadapter "github.com/Junhao2314/toolhub/internal/runtime"
 )
 
 type Runner struct {
 	config            Config
 	executor          *Executor
 	inventoryInterval time.Duration
-	inventoryTrigger  chan struct{}
 	mu                sync.Mutex
 	activeMu          sync.Mutex
 	activeTasks       map[string]int
@@ -34,14 +31,11 @@ type Runner struct {
 
 const DefaultInventoryInterval = 6 * time.Hour
 
-const sharedReconcileRetryAttempts = 5
-
 func NewRunner(config Config) *Runner {
-	return &Runner{config: config, executor: NewExecutor(config), inventoryInterval: DefaultInventoryInterval, inventoryTrigger: make(chan struct{}, 1), activeTasks: map[string]int{}}
+	return &Runner{config: config, executor: NewExecutor(config), inventoryInterval: DefaultInventoryInterval, activeTasks: map[string]int{}}
 }
 
 func (r *Runner) Run(ctx context.Context) error {
-	r.startSharedWatchers(ctx)
 	backoff := time.Second
 	for {
 		if ctx.Err() != nil {
@@ -151,9 +145,9 @@ func (r *Runner) executeTasks(ctx context.Context, socket *websocket.Conn, tasks
 			if json.Unmarshal(result, &inventory) == nil {
 				_ = r.send(socket, "inventory", inventory)
 			}
-		} else if task.Kind == "sync_shared" && status == "succeeded" {
+		} else if (task.Kind == "apply_mcp" || task.Kind == "deploy_skill") && status == "succeeded" {
 			if err := r.sendInventory(ctx, socket); err != nil {
-				log.Printf("refresh inventory after shared sync: %v", err)
+				log.Printf("refresh inventory after %s: %v", task.Kind, err)
 			}
 		}
 		attempt := r.activeAttempt(task.ID, task.Attempt)
@@ -182,7 +176,7 @@ func taskDeadline(kind string) time.Duration {
 	switch kind {
 	case "scan_inventory":
 		return 2 * time.Minute
-	case "deploy_skill", "apply_mcp", "adopt_skill", "sync_shared":
+	case "deploy_skill", "apply_mcp", "adopt_skill":
 		return 10 * time.Minute
 	default:
 		return time.Minute
@@ -235,10 +229,6 @@ func (r *Runner) heartbeatLoop(ctx context.Context, socket *websocket.Conn) {
 			if r.sendInventory(ctx, socket) != nil {
 				return
 			}
-		case <-r.inventoryTrigger:
-			if r.sendInventory(ctx, socket) != nil {
-				return
-			}
 		}
 	}
 }
@@ -249,64 +239,6 @@ func (r *Runner) sendInventory(ctx context.Context, socket *websocket.Conn) erro
 		return err
 	}
 	return r.send(socket, "inventory", inventory)
-}
-
-func (r *Runner) startSharedWatchers(ctx context.Context) {
-	key, err := base64.StdEncoding.DecodeString(r.config.TaskKey)
-	if err != nil || len(key) != 32 {
-		return
-	}
-	reconciler := runtimeadapter.SharedReconciler{DataDir: r.config.DataDir, Sources: r.config.SharedSources, FingerprintKey: key}
-	for _, source := range r.config.SharedSources {
-		source := source
-		if source.Mode != runtimeadapter.SharedModeManaged || !source.AutoSync {
-			continue
-		}
-		go func() {
-			err := runtimeadapter.WatchSharedSourceUntilCancelled(ctx, source, func(reconcileCtx context.Context, scopes []string) {
-				reconcileErr := retrySharedReconcile(reconcileCtx, 500*time.Millisecond, sharedReconcileRetryAttempts, func() error {
-					_, err := reconciler.Reconcile(reconcileCtx, runtimeadapter.SharedSyncRequest{SourceName: source.Name, Scopes: scopes})
-					return err
-				})
-				if reconcileErr != nil {
-					log.Printf("shared source %s reconcile failed: %v", source.Name, reconcileErr)
-					return
-				}
-				select {
-				case r.inventoryTrigger <- struct{}{}:
-				default:
-				}
-			})
-			if err != nil && ctx.Err() == nil {
-				log.Printf("shared source %s watcher stopped: %v", source.Name, err)
-			}
-		}()
-	}
-}
-
-func retrySharedReconcile(ctx context.Context, minimumDelay time.Duration, attempts int, reconcile func() error) error {
-	if attempts < 1 {
-		attempts = 1
-	}
-	delay := minimumDelay
-	var lastErr error
-	for attempt := 0; attempt < attempts; attempt++ {
-		if lastErr = reconcile(); lastErr == nil {
-			return nil
-		}
-		if attempt == attempts-1 {
-			break
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-		delay *= 2
-	}
-	return lastErr
 }
 
 func (r *Runner) send(socket *websocket.Conn, messageType string, payload any) error {

@@ -12,74 +12,58 @@
 
 Rollback is always a new desired-state transition to the recorded previous approved version. Do not edit ToolHub-managed runtime directories while reconciliation is enabled.
 
-## Shared-source staged rollout
+## Central MCP and shared-Skill migration
 
-Shared-source support is node-scoped. Omitting `sharedSources` allows read-only auto-probe when the default shared directory or manifest exists; it does not authorize writes. Before enabling reconciliation, add an explicit source to the Agent configuration with the real enrolled home and paths. The minimum managed set is Claude + Codex; add Hermes, Grok, or OpenClaw only when those runtimes are intentionally part of the rollout. Start with:
+PostgreSQL is authoritative. Shared sources and native runtime configuration are discovery/import inputs only. The Agent writer supports materialized Skills plus fixed mcpm profiles for Codex and Claude; Hermes/OpenClaw stay outside MCP delivery and Grok continues to inherit Claude.
 
-```json
-{
-  "sharedSources": [
-    {
-      "name": "root-shared",
-      "mode": "observed",
-      "autoSync": false,
-      "skillsRoot": "/root/.shared/skills",
-      "mcpManifest": "/root/.shared/mcp/servers.json",
-      "allowedSkillRoots": [
-        "/root/.shared/skills",
-        "/root/.agents/skills",
-        "/root/.shared/vibe-skills"
-      ],
-      "consumers": {
-        "codex": {
-          "skillsPath": "/root/.codex/skills",
-          "mcpPath": "/root/.codex/.tmp/plugins/plugins/shared-mcp/.mcp.json",
-          "mcpFormat": "codex-plugin-json"
-        },
-        "claude": {
-          "skillsPath": "/root/.claude/skills",
-          "mcpPath": "/root/.claude/settings.json",
-          "mcpFormat": "claude-settings-json"
-        }
-      }
-    }
-  ]
-}
-```
+Before starting, confirm the systemd unit can write the enrolled home paths. Atomic replacement of top-level files such as `~/.claude.json` requires write access to the home directory itself; `ProtectHome=read-only` cannot be reopened by a nested `ReadWritePaths=` exception. Keep `ProtectSystem=strict`, set `ProtectHome=false`, and allow-list the enrolled home plus the Agent data directory. Record hashes, modes, owners, symlink targets, and secure backups for the mcpm registry, Claude/Codex configs, the legacy shared trees, and any ToolHub-authored plugin.
 
-Merge that block into the existing JSON; do not replace enrollment credentials or runtime paths. Then use this sequence:
+### Phase 1 — scan, import, and seed (no runtime writes)
 
-1. Record hashes, modes, owners, and symlink targets for the manifest and all consumers. Make secure, timestamped backups without following Skill links, and confirm no cron, timer, or legacy generator is writing concurrently.
-2. Restart the Agent in `observed` mode and confirm the shared source plus the configured Claude/Codex consumers appear in inventory. Optional consumers appear only when explicitly configured; no filesystem write is allowed in this mode.
-3. Run the same reconciler locally in dry-run mode:
+1. Deploy the control plane and Agent code, restart the Agent, and wait for a fresh inventory.
+2. Confirm live mcpm members appear as `mcpm-import` servers and both fixed profiles (`toolhub-codex`, `toolhub-claude`) have identical seeded membership with deployment state `observed`.
+3. Confirm legacy shared-manifest entries appear as disabled `shared-import` candidates. The live definition keeps a conflicting name; the candidate receives `-shared`.
+4. Adopt importable shared Skills into immutable pending-review artifacts. A package-invalid Skill stays blocked and does not prevent healthy siblings from importing.
 
-   ```bash
-   toolhub-agent sync-shared --config /etc/toolhub-agent/agent.json --source root-shared --scope all --dry-run
-   ```
+Gate: compare command/args/URL/key names and profile membership with the pre-rollout files. No runtime file timestamp or hash may have changed.
 
-   Resolve every reported conflict. Confirm unknown/local MCP entries are preserved, especially Hermes `task-trellis` and `acemcp`.
-4. With explicit human approval, secure the shared manifest and each existing MCP target to mode `0600`. The Agent reports insecure permissions during dry-run and refuses a managed write rather than changing an existing file's mode implicitly.
-5. Change the source to `"mode": "managed"` while keeping `"autoSync": false`, restart the Agent, repeat the dry-run, and apply MCP first:
+### Phase 2 — Codex cutover
 
-   ```bash
-   toolhub-agent sync-shared --config /etc/toolhub-agent/agent.json --source root-shared --scope mcp
-   ```
+1. Explicitly deploy the `toolhub-codex` profile to the canary node. Wait for the `apply_mcp` node task and deployment state, not merely the parent Job.
+2. Confirm `~/.config/mcpm/servers.json` is mode `0600`, contains the desired `toolhub-codex` tags, and preserves unrelated definitions/tags.
+3. Confirm `~/.codex/config.toml` contains one `[mcp_servers.toolhub-codex]` relay, no recognized legacy `all-mcp` relay/subsections, and unchanged model/provider settings.
+4. Archive the old ToolHub-authored `shared-mcp` plugin only after its `plugin.json` identity is validated.
 
-   Verify enabled/disabled servers, native file syntax, Grok's Claude inheritance, and the preserved local entries before applying Skill links:
+Gate: a fresh Codex session exposes the expected tools once, with no duplicate servers. Keep the Agent mcpm and anchor backups until the full migration is accepted.
 
-   ```bash
-   toolhub-agent sync-shared --config /etc/toolhub-agent/agent.json --source root-shared --scope skills
-   ```
+### Phase 3 — Claude cutover
 
-6. Verify the Claude/Codex link sets and any explicitly configured optional consumers, then review the shared-source status in ToolHub. A whole-file compare-and-swap or managed-entry mismatch is a conflict; inspect the local edit and rerun rather than forcing an overwrite.
-7. After one manual canary and at least one periodic inventory cycle, set `"autoSync": true` and restart the Agent. The existing Agent process watches only the manifest and the top level of the shared Skills directory, debounces events, serializes each source with a lock, and reports a fresh redacted inventory after successful reconciliation.
+1. Explicitly deploy the `toolhub-claude` profile and wait for actual deployment state.
+2. Confirm top-level `~/.claude.json` has exactly one `mcpServers.toolhub-claude` relay.
+3. Remove only the dead `mcpServers` block from `~/.claude/settings.json` and the invalid `mcp_servers` block from `settings.local.json`; preserve `env`, `permissions`, and every unrelated field.
 
-Existing MCP target replacements create `0600` last-known-good backups under `<dataDir>/backups/shared/<source>/<consumer>/`; the five newest files are retained per consumer. Shared ownership state lives under `<dataDir>/shared/` and must be included in Agent data backups.
+Gate: `claude mcp list` or a fresh Claude session exposes the expected tools, and unrelated settings remain byte/semantic equivalent.
 
-### Shared-source rollback
+### Phase 4 — materialize Skills
 
-1. Set `"mode": "observed"` and `"autoSync": false`, then restart the Agent before touching any consumer file.
-2. Cancel only pending `shared_sync` jobs or `sync_shared` tasks. Leave unrelated Skill and MCP work alone.
-3. Restore MCP targets only from verified pre-rollout or Agent backups, using the recorded hashes and permissions.
-4. Restore or remove only links recorded as ToolHub-owned; never bulk-delete a consumer Skills directory or alter the canonical shared source.
-5. Re-enable a legacy generator only after confirming the Agent watcher is inactive. Migration `004_shared_sources.sql` is additive and has no down migration.
+1. Review and approve imported shared Skill artifacts.
+2. Assign explicit runtime targets; the retired `shared` deployment target must not be used.
+3. Deploy one low-risk canary first, then the remaining approved matrix. Managed symlink-farm entries may be replaced only through the normal conflict-safe deployer; unmanaged real directories remain untouched.
+
+Gate: expected Skills are real managed directories in each runtime, no managed link still points into the legacy shared tree, and rollback succeeds for the canary.
+
+### Phase 5 — retire legacy sources
+
+1. Archive `~/.shared/mcp` and `~/.shared/skills` into the Agent backup tree without following symlinks; verify the archive is readable and restorable.
+2. Remove the archived legacy trees and dangling links owned by the old farm. Do not remove unrelated runtime directories.
+3. Remove the legacy `all-mcp` profile/tag only after both fixed profiles are healthy.
+4. Run a fresh inventory and full Skill/MCP reconciliation.
+
+Gate: Codex and Claude remain healthy after legacy removal, materialized Skills remain present, mcpm has no stray `all-mcp` membership, and the archive can be restored.
+
+### Rollback
+
+- Phases 2–3: restore the timestamped mcpm and native-anchor backups, then verify the legacy relay before retrying.
+- Phase 4: use the normal per-deployment rollback transition; do not hand-edit managed directories.
+- Phase 5: restore the verified archive and recorded symlink layout. Never bulk-delete or recreate an entire runtime Skills root.
+- Stop at the first failed gate. A succeeded Job is not proof of a successful Agent task or in-sync deployment.

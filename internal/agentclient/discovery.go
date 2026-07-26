@@ -24,7 +24,7 @@ func (e *Executor) discoverInventory(ctx context.Context) (domain.AgentInventory
 	if err != nil {
 		return domain.AgentInventory{}, err
 	}
-	inventory := domain.AgentInventory{Runtimes: scan.Runtimes, SharedSources: scan.SharedSources}
+	inventory := domain.AgentInventory{Runtimes: scan.Runtimes, SharedSources: scan.SharedSources, MCPImports: scan.MCPImports}
 	var response struct {
 		CaptureRequests []domain.MCPCaptureRequest `json:"captureRequests"`
 	}

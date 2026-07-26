@@ -54,13 +54,15 @@ func (s *Store) SecretValue(ctx context.Context, id string) ([]byte, error) {
 func (s *Store) AgentSecretValue(ctx context.Context, nodeID, id string) ([]byte, error) {
 	var ciphertext []byte
 	err := s.pool.QueryRow(ctx, `SELECT es.ciphertext FROM encrypted_secrets es WHERE es.id=$2 AND es.kind IN ('mcp-env','mcp-header') AND EXISTS (
-		SELECT 1 FROM mcp_deployments d JOIN mcp_profile_servers ps ON ps.profile_id=d.profile_id
+		SELECT 1 FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id JOIN mcp_profile_servers ps ON ps.profile_id=d.profile_id
 		JOIN mcp_servers ms ON ms.id=ps.server_id CROSS JOIN LATERAL (
 			SELECT value FROM jsonb_each_text(ms.env_refs)
 			UNION ALL
 			SELECT value FROM jsonb_each_text(ms.header_refs)
 		) ref
-		WHERE d.node_id=$1 AND ms.authority='toolhub' AND ms.enabled AND ref.value=$2::text AND d.desired_enabled)`, nodeID, id).Scan(&ciphertext)
+		WHERE d.node_id=$1 AND d.runtime_kind IN ('codex','claude') AND d.state<>'observed' AND d.desired_enabled
+		AND p.source='toolhub' AND p.name='toolhub-'||d.runtime_kind AND p.origin->>'managedRuntime'=d.runtime_kind
+		AND ms.authority='toolhub' AND ms.enabled AND ref.value=$2::text)`, nodeID, id).Scan(&ciphertext)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

@@ -126,16 +126,7 @@ func (s *Store) SetSkillTargets(ctx context.Context, skillID, actor string, targ
 	}
 	for _, target := range targets {
 		if !domain.IsSkillRuntime(target.Runtime) {
-			return domain.Job{}, errors.New("invalid runtime target")
-		}
-		if target.Runtime == domain.RuntimeShared {
-			var managedSources int
-			if err := tx.QueryRow(ctx, `SELECT count(*) FROM shared_sources WHERE node_id=$1 AND mode='managed' AND status<>'missing'`, target.NodeID).Scan(&managedSources); err != nil {
-				return domain.Job{}, err
-			}
-			if managedSources != 1 {
-				return domain.Job{}, errors.New("shared Skill targets require exactly one managed shared source on the node")
-			}
+			return domain.Job{}, errors.New("Skill delivery supports materialized runtime targets only")
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO deployments(id,node_id,runtime_kind,skill_id,desired_version_id,desired_enabled,desired_generation,state)
 			VALUES($1,$2,$3,$4,$5,$6,1,'pending')

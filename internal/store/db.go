@@ -93,7 +93,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, string(body)); err != nil {
+		if _, err := tx.Exec(ctx, migrationExecutionSQL(entry.Name(), body)); err != nil {
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
 		}
@@ -106,6 +106,21 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func migrationExecutionSQL(name string, body []byte) string {
+	sql := string(body)
+	if name != "006_orchestration_leases_generations.sql" {
+		return sql
+	}
+	// Migration 006 was applied to the live database from a transient version
+	// whose JSON extractions were parenthesized. The checked-in applied file is
+	// immutable, but its unparenthesized concatenation is parsed by PostgreSQL as
+	// (text || jsonb) ->> key on a clean install. Reproduce the already-applied
+	// semantics only at execution time for databases that do not yet have v006.
+	const ambiguous = "kind || ':' || payload->>'deploymentId' || ':' || payload->>'desiredGeneration'"
+	const corrected = "kind || ':' || (payload->>'deploymentId') || ':' || (payload->>'desiredGeneration')"
+	return strings.ReplaceAll(sql, ambiguous, corrected)
 }
 
 func (s *Store) BootstrapAdmin(ctx context.Context, username, email, name, password string) (bool, error) {

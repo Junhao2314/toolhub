@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 type sharedManagedState struct {
@@ -60,43 +58,6 @@ func loadSharedState(dataDir, sourceName string) (sharedManagedState, error) {
 
 func newSharedState(sourceName string) sharedManagedState {
 	return sharedManagedState{Version: 1, SourceName: sourceName, Links: map[string]map[string]managedLink{}, MCP: map[string]managedMCPState{}}
-}
-
-func saveSharedState(dataDir string, state sharedManagedState) error {
-	state.Version = 1
-	state.UpdatedAt = time.Now().UTC()
-	path := sharedStatePath(dataDir, state.SourceName)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	body, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	temporary := path + ".new-" + uuid.NewString()
-	file, err := os.OpenFile(temporary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err := file.Write(body); err != nil {
-		file.Close()
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := file.Close(); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	if err := os.Rename(temporary, path); err != nil {
-		_ = os.Remove(temporary)
-		return err
-	}
-	return syncDirectory(filepath.Dir(path))
 }
 
 func sharedStatePath(dataDir, sourceName string) string {

@@ -14,15 +14,6 @@ import (
 	"github.com/Junhao2314/toolhub/internal/protocol"
 )
 
-type SharedSyncTarget struct {
-	SourceID          string
-	NodeID            string
-	NodeGroup         string
-	Name              string
-	Mode              string
-	SourceFingerprint string
-}
-
 func upsertSharedInventoryTx(ctx context.Context, tx pgx.Tx, nodeID string, sources []domain.SharedSourceInventory) error {
 	if _, err := tx.Exec(ctx, `UPDATE shared_sources SET status='missing',last_error='shared source was omitted from the latest inventory',updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
 		return err
@@ -102,11 +93,11 @@ func upsertSharedSkillsTx(ctx context.Context, tx pgx.Tx, nodeID, sourceID strin
 		if strings.TrimSpace(skill.Name) == "" || strings.TrimSpace(skill.SourcePath) == "" {
 			return errors.New("shared inventory contains an invalid Skill")
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO skill_discoveries(id,node_id,runtime_kind,canonical_path,name,directory_hash,managed,protected,disabled,missing,drift,last_seen_at)
-			VALUES($1,$2,'shared',$3,$4,$5,$6,false,false,false,$7,now())
+		_, err := tx.Exec(ctx, `INSERT INTO skill_discoveries(id,node_id,runtime_kind,canonical_path,name,directory_hash,managed,protected,disabled,missing,drift,scan_error,last_seen_at)
+			VALUES($1,$2,'shared',$3,$4,$5,$6,false,false,false,$7,$8,now())
 			ON CONFLICT(node_id,runtime_kind,canonical_path) DO UPDATE SET name=excluded.name,directory_hash=excluded.directory_hash,
-			managed=excluded.managed,missing=false,drift=excluded.drift,last_seen_at=now(),updated_at=now()`, uuid.NewString(), nodeID,
-			skill.SourcePath, skill.Name, skill.SHA256, skill.Managed, skill.State == "blocked" || skill.State == "failed")
+			managed=excluded.managed,missing=false,drift=excluded.drift,scan_error=excluded.scan_error,last_seen_at=now(),updated_at=now()`, uuid.NewString(), nodeID,
+			skill.SourcePath, skill.Name, skill.SHA256, skill.Managed, skill.State == "blocked" || skill.State == "failed", truncateSharedError(skill.LastError))
 		if err != nil {
 			return fmt.Errorf("upsert shared Skill %q for source %s: %w", skill.Name, sourceID, err)
 		}
@@ -251,65 +242,11 @@ func sharedSourceProjectionQuery() string {
 			'headerKeys',coalesce((SELECT jsonb_agg(DISTINCT value) FROM mcp_runtime_bindings b
 				CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(b.header_keys)='array' THEN b.header_keys ELSE '[]'::jsonb END)
 				WHERE b.shared_source_id=ss.id AND b.server_name=ms.runtime_name),'[]'::jsonb)) ORDER BY ms.runtime_name)
-			FROM mcp_servers ms WHERE ms.shared_source_id=ss.id AND ms.authority='shared-file'),'[]'::jsonb) AS "mcpServers"
+			FROM mcp_servers ms WHERE ms.shared_source_id=ss.id AND ms.authority='shared-file'),'[]'::jsonb) AS "mcpServers",
+		coalesce((SELECT jsonb_agg(jsonb_build_object('name',sd.name,'path',sd.canonical_path,'managed',sd.managed,'error',sd.scan_error) ORDER BY sd.name)
+			FROM skill_discoveries sd WHERE sd.node_id=ss.node_id AND sd.runtime_kind='shared' AND NOT sd.missing
+			AND (sd.canonical_path=ss.skills_root OR sd.canonical_path LIKE ss.skills_root || '/%')),'[]'::jsonb) AS skills
 	FROM shared_sources ss JOIN nodes n ON n.id=ss.node_id`
-}
-
-func (s *Store) SharedSyncTargets(ctx context.Context) ([]SharedSyncTarget, error) {
-	rows, err := s.pool.Query(ctx, `SELECT ss.id::text,ss.node_id::text,coalesce(n.labels->>'group',''),ss.name,ss.mode,ss.source_fingerprint
-		FROM shared_sources ss JOIN nodes n ON n.id=ss.node_id WHERE ss.status<>'missing' AND n.archived_at IS NULL ORDER BY n.name,ss.name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var result []SharedSyncTarget
-	for rows.Next() {
-		var target SharedSyncTarget
-		if err := rows.Scan(&target.SourceID, &target.NodeID, &target.NodeGroup, &target.Name, &target.Mode, &target.SourceFingerprint); err != nil {
-			return nil, err
-		}
-		result = append(result, target)
-	}
-	return result, rows.Err()
-}
-
-func (s *Store) SharedSyncTarget(ctx context.Context, id string) (SharedSyncTarget, error) {
-	var target SharedSyncTarget
-	err := s.pool.QueryRow(ctx, `SELECT ss.id::text,ss.node_id::text,coalesce(n.labels->>'group',''),ss.name,ss.mode,ss.source_fingerprint
-		FROM shared_sources ss JOIN nodes n ON n.id=ss.node_id WHERE ss.id=$1 AND ss.status<>'missing' AND n.archived_at IS NULL`, id).
-		Scan(&target.SourceID, &target.NodeID, &target.NodeGroup, &target.Name, &target.Mode, &target.SourceFingerprint)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return SharedSyncTarget{}, ErrNotFound
-	}
-	return target, err
-}
-
-func projectSharedSyncResultTx(ctx context.Context, tx pgx.Tx, nodeID, sourceID string, result []byte, succeeded bool) error {
-	if !succeeded {
-		message := truncateSharedError(string(result))
-		_, err := tx.Exec(ctx, `UPDATE shared_sources SET status='failed',last_error=$2,last_sync_at=now(),updated_at=now() WHERE id=$1`, sourceID, message)
-		return err
-	}
-	var syncResult domain.SharedSyncResult
-	if err := json.Unmarshal(result, &syncResult); err != nil {
-		return errors.New("shared sync task returned an invalid result")
-	}
-	projectedID, err := upsertSharedSourceTx(ctx, tx, nodeID, syncResult.Source)
-	if err != nil {
-		return err
-	}
-	if projectedID != sourceID {
-		return errors.New("shared sync result does not match the requested source")
-	}
-	status := syncResult.Source.Status
-	lastError := syncResult.Source.LastError
-	if len(syncResult.Conflicts) > 0 {
-		status = "conflict"
-		lastError = strings.Join(syncResult.Conflicts, "; ")
-	}
-	_, err = tx.Exec(ctx, `UPDATE shared_sources SET source_fingerprint=$2,status=$3,last_error=$4,last_sync_at=now(),last_scan_at=now(),updated_at=now() WHERE id=$1`,
-		sourceID, syncResult.Source.SourceFingerprint, status, truncateSharedError(lastError))
-	return err
 }
 
 func truncateSharedError(value string) string {

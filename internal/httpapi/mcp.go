@@ -86,6 +86,28 @@ func (a *API) createMCPProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
+func (a *API) setMCPProfileServers(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		ServerIDs []string `json:"serverIds"`
+	}
+	if err := decodeJSON(w, r, &input, 256<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	profileID := chi.URLParam(r, "id")
+	if err := a.store.SetMCPProfileServers(r.Context(), profileID, input.ServerIDs); err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrSourceFileAuthoritative) || errors.Is(err, store.ErrManagedMCPProfile) || errors.Is(err, store.ErrMCPProfileRuntime) {
+			a.handleStoreError(w, r, err)
+			return
+		}
+		writeError(w, r, http.StatusBadRequest, "mcp_profile_membership_failed", err.Error())
+		return
+	}
+	principal := principalFrom(r.Context())
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update_membership", ResourceType: "mcp_profile", ResourceID: profileID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"serverCount": len(input.ServerIDs)}})
+	writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+}
+
 func (a *API) deployMCPProfile(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		ProfileID string                      `json:"profileId"`
@@ -98,6 +120,10 @@ func (a *API) deployMCPProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := a.store.SetMCPDeployments(r.Context(), input.ProfileID, principalFrom(r.Context()).ID, input.Targets, input.DryRun)
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrManagedMCPProfile) || errors.Is(err, store.ErrMCPProfileRuntime) {
+			a.handleStoreError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "mcp_deploy_failed", err.Error())
 		return
 	}

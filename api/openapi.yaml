@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: ToolHub API
   version: 0.1.0
-  description: Tailnet-only control plane for Codex, Claude, Hermes, Grok, and OpenClaw Skills and MCP, including node-local shared sources.
+  description: Tailnet-only control plane with PostgreSQL desired state, materialized Skills, and mcpm-backed MCP delivery for Codex and Claude. Node-local shared sources are read-only import inputs.
 servers:
   - url: /api/v1
 security:
@@ -88,7 +88,7 @@ paths:
   /reconcile:
     post:
       operationId: reconcileRuntimeState
-      description: Queues scoped Skill, ToolHub-authoritative MCP, and shared-source reconciliation jobs. Job success means orchestration completed, not that every Agent task has completed.
+      description: Queues scoped Skill and ToolHub-authoritative MCP reconciliation jobs. Job success means orchestration completed, not that every Agent task has completed.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileRequest'}}}}
       responses: {'202': {$ref: '#/components/responses/JSON'}}
   /discoveries:
@@ -106,20 +106,13 @@ paths:
   /shared-sources:
     get:
       operationId: listSharedSources
-      description: Lists redacted node-local shared source state, consumer links, and renderer fingerprints. Secret values are never returned.
+      description: Lists redacted node-local shared source state as a read-only discovery/import surface. Secret values are never returned and no shared-source writer endpoint exists.
       responses: {'200': {$ref: '#/components/responses/JSON'}}
   /shared-sources/{id}:
     get:
       operationId: getSharedSource
       parameters: [{$ref: '#/components/parameters/ID'}]
       responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
-  /shared-sources/{id}/sync:
-    post:
-      operationId: syncSharedSource
-      description: Queues a typed signed sync_shared Agent task. Non-dry-run requests require managed mode in the local Agent configuration.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SharedSyncRequest'}}}}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
   /jobs:
     get: {operationId: listJobs, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /jobs/{id}/cancel:
@@ -132,7 +125,10 @@ paths:
   /recommendations:
     post: {operationId: recommendSkills, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /mcp/servers:
-    get: {operationId: listMCPServers, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    get:
+      operationId: listMCPServers
+      description: Lists central servers plus redacted import provenance. mcpm imports are enabled baselines; legacy shared-manifest imports are disabled review candidates and may carry a conflict-renamed display name.
+      responses: {'200': {$ref: '#/components/responses/JSON'}}
     post:
       operationId: createMCPServer
       description: Creates a ToolHub-authoritative MCP server. Environment and HTTP header values are encrypted and ordinary responses contain references only.
@@ -144,11 +140,25 @@ paths:
   /mcp/servers/{id}/health:
     post: {operationId: checkMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
   /mcp/profiles:
-    get: {operationId: listMCPProfiles, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    get:
+      operationId: listMCPProfiles
+      description: Lists profiles and membership. Initial mcpm discovery creates fixed toolhub-codex and toolhub-claude profiles with managedRuntime provenance.
+      responses: {'200': {$ref: '#/components/responses/JSON'}}
     post: {operationId: createMCPProfile, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}}
+  /mcp/profiles/{id}/servers:
+    put:
+      operationId: setManagedMCPProfileServers
+      description: Replaces membership for a fixed toolhub-codex or toolhub-claude profile. An observed deployment remains observed until it is explicitly deployed.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MCPProfileServersRequest'}}}}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
   /mcp/deployments:
     get: {operationId: listMCPDeployments, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post: {operationId: deployMCPProfile, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+    post:
+      operationId: deployMCPProfile
+      description: Explicitly transitions an observed fixed profile deployment to pending and queues mcp_sync. The profile managedRuntime must exactly match the Codex or Claude target runtime; arbitrary profiles are never dispatched to the fixed native anchor.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MCPDeploymentRequest'}}}}
+      responses: {'202': {$ref: '#/components/responses/JSON'}}
   /settings:
     get: {operationId: getSettings, responses: {'200': {$ref: '#/components/responses/JSON'}}}
     patch: {operationId: updateSettings, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
@@ -205,12 +215,6 @@ components:
         role: {type: string, enum: [admin, operator, viewer]}
         passwordMode: {type: string, enum: [random, manual]}
         password: {type: string, minLength: 12, maxLength: 1024, description: Required only in manual mode.}
-    SharedSyncRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        scopes: {type: array, uniqueItems: true, items: {type: string, enum: [skills, mcp]}, default: [skills, mcp]}
-        dryRun: {type: boolean, default: false}
     ReconcileRequest:
       type: object
       additionalProperties: false
@@ -219,8 +223,29 @@ components:
         skillIds: {type: array, items: {type: string, format: uuid}}
         profileIds: {type: array, items: {type: string, format: uuid}}
         mcpDeploymentIds: {type: array, items: {type: string, format: uuid}}
-        sharedSourceIds: {type: array, items: {type: string, format: uuid}}
-        sharedScopes: {type: array, uniqueItems: true, items: {type: string, enum: [skills, mcp]}, default: [skills, mcp]}
+        dryRun: {type: boolean, default: false}
+    MCPProfileServersRequest:
+      type: object
+      additionalProperties: false
+      required: [serverIds]
+      properties:
+        serverIds: {type: array, uniqueItems: true, items: {type: string, format: uuid}}
+    MCPDeploymentRequest:
+      type: object
+      additionalProperties: false
+      required: [profileId, targets]
+      properties:
+        profileId: {type: string, format: uuid}
+        targets:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [nodeId, runtime, enabled]
+            properties:
+              nodeId: {type: string, format: uuid}
+              runtime: {type: string, enum: [codex, claude]}
+              enabled: {type: boolean}
         dryRun: {type: boolean, default: false}
     Error:
       type: object

@@ -20,7 +20,6 @@ func (s *Store) ListNodes(ctx context.Context) (json.RawMessage, error) {
 		(SELECT max(r.scanned_at) FROM runtimes r WHERE r.node_id=n.id) AS "scannedAt",
 		(SELECT count(*) FROM mcp_runtime_bindings mb WHERE mb.node_id=n.id AND mb.desired_enabled) AS "autoManagedMcpCount",
 		(SELECT count(*) FROM shared_sources ss WHERE ss.node_id=n.id AND ss.status<>'missing') AS "sharedSourceCount",
-		EXISTS(SELECT 1 FROM shared_sources ss WHERE ss.node_id=n.id AND ss.mode='managed' AND ss.status<>'missing') AS "hasManagedSharedSource",
 		(SELECT count(*) FROM skill_discoveries sd WHERE sd.node_id=n.id AND sd.adopted_skill_id IS NULL AND NOT sd.missing AND NOT sd.protected) AS "pendingSkillCount",
 		(SELECT count(*) FROM skill_discoveries sd WHERE sd.node_id=n.id AND (sd.drift OR sd.missing)) +
 		(SELECT count(*) FROM mcp_runtime_bindings mb WHERE mb.node_id=n.id AND (mb.drift OR mb.missing)) AS "discoveryAttentionCount",
@@ -86,7 +85,7 @@ func (s *Store) ListMCPServers(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (s *Store) ListMCPProfiles(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT p.id::text AS id,p.name,p.description,p.enabled,p.source,p.origin,p.created_at AS "createdAt",coalesce(array_agg(ps.server_id::text) FILTER (WHERE ps.server_id IS NOT NULL),ARRAY[]::text[]) AS "serverIds" FROM mcp_profiles p LEFT JOIN mcp_profile_servers ps ON ps.profile_id=p.id GROUP BY p.id ORDER BY p.name`)
+	return s.JSONList(ctx, `SELECT p.id::text AS id,p.name,p.description,p.enabled,p.source,p.origin,p.created_at AS "createdAt",coalesce(array_agg(ps.server_id::text ORDER BY ps.server_id::text) FILTER (WHERE ps.server_id IS NOT NULL),ARRAY[]::text[]) AS "serverIds" FROM mcp_profiles p LEFT JOIN mcp_profile_servers ps ON ps.profile_id=p.id GROUP BY p.id ORDER BY p.name`)
 }
 
 func (s *Store) ListMCPDeployments(ctx context.Context) (json.RawMessage, error) {

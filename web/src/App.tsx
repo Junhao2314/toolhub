@@ -64,9 +64,9 @@ export default function App() {
 
   const page = path.startsWith('/skills') ? <Skills canAdopt={isAdmin} />
     : path.startsWith('/marketplace') ? <Marketplace />
-    : path.startsWith('/nodes') ? <Nodes canSync={canOperate} />
+    : path.startsWith('/nodes') ? <Nodes />
     : path.startsWith('/jobs') ? <Jobs />
-    : path.startsWith('/mcp') ? <MCP canSync={canOperate} />
+    : path.startsWith('/mcp') ? <MCP />
     : path.startsWith('/account') ? <Account user={session.user} signedOut={signedOut} />
     : path.startsWith('/access') && isAdmin ? <Access currentUserID={session.user.id} sessionInvalidated={signedOut} />
     : path.startsWith('/settings') && isAdmin ? <SettingsPage />

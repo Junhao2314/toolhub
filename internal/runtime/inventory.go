@@ -42,6 +42,7 @@ func ScanAll(paths Paths) ([]domain.InventoryRuntime, error) {
 type InventoryScan struct {
 	Runtimes      []domain.InventoryRuntime
 	SharedSources []domain.SharedSourceInventory
+	MCPImports    []domain.MCPDescriptor
 	MCPSecrets    map[string]MCPSecretValues
 }
 
@@ -58,7 +59,15 @@ func ScanAllConfigured(paths Paths, sharedSources []SharedSourceConfig, dataDir 
 	if paths.Home == "" {
 		return InventoryScan{}, errors.New("home directory is required")
 	}
-	result := InventoryScan{MCPSecrets: map[string]MCPSecretValues{}}
+	result := InventoryScan{MCPSecrets: map[string]MCPSecretValues{}, MCPImports: []domain.MCPDescriptor{}}
+	mcpmScan, err := ScanMCPM(paths.Home, fingerprintKey)
+	if err != nil {
+		return InventoryScan{}, err
+	}
+	result.MCPImports = append(result.MCPImports, mcpmScan.Servers...)
+	for identity, values := range mcpmScan.Secrets {
+		result.MCPSecrets[identity] = values
+	}
 	for _, kind := range []string{domain.RuntimeCodex, domain.RuntimeClaude, domain.RuntimeHermes, domain.RuntimeGrok, domain.RuntimeOpenClaw} {
 		root := paths.RuntimeRoots[kind]
 		if root == "" {
@@ -76,6 +85,10 @@ func ScanAllConfigured(paths Paths, sharedSources []SharedSourceConfig, dataDir 
 			inventory["protected"] = protected
 		}
 		config, descriptors, secrets := scanRuntimeConfig(paths.Home, kind, fingerprintKey)
+		if kind == domain.RuntimeCodex || kind == domain.RuntimeClaude {
+			config["mcpAnchor"] = InspectRuntimeMCPAnchor(paths.Home, kind)
+			config["mcpmServers"] = summarizeMCPImports(paths.Home, mcpmScan.Servers, kind)
+		}
 		for identity, values := range secrets {
 			result.MCPSecrets[identity] = values
 		}
@@ -87,8 +100,37 @@ func ScanAllConfigured(paths Paths, sharedSources []SharedSourceConfig, dataDir 
 	}
 	if len(sharedSources) > 0 {
 		result.SharedSources = ScanSharedSources(sharedSources, dataDir, fingerprintKey)
+		imports, secrets := ScanSharedMCPImports(sharedSources, fingerprintKey)
+		result.MCPImports = append(result.MCPImports, imports...)
+		for identity, values := range secrets {
+			result.MCPSecrets[identity] = values
+		}
 	}
 	return result, nil
+}
+
+func summarizeMCPImports(home string, imports []domain.MCPDescriptor, runtimeKind string) map[string]any {
+	servers := make([]map[string]any, 0)
+	for _, descriptor := range imports {
+		if descriptor.ImportSource != "mcpm" || !containsString(descriptor.TargetRuntimes, runtimeKind) {
+			continue
+		}
+		servers = append(servers, map[string]any{
+			"name": descriptor.Name, "transport": descriptor.Transport, "command": descriptor.Command,
+			"args": descriptor.Args, "url": descriptor.URL, "envKeys": descriptor.EnvKeys,
+			"headerKeys": descriptor.HeaderKeys, "profileTags": descriptor.ProfileTags,
+		})
+	}
+	return map[string]any{"path": MCPMStorePath(home), "servers": servers}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func scanSkillRoot(root string) ([]any, []any, int, int, error) {
@@ -166,7 +208,13 @@ func scanRuntimeConfig(home, kind string, fingerprintKey []byte) (map[string]any
 	for _, candidate := range paths[kind] {
 		if info, err := os.Stat(candidate); err == nil {
 			files = append(files, map[string]any{"path": candidate, "size": info.Size(), "modifiedAt": info.ModTime()})
+			if kind == domain.RuntimeGrok || isLegacySharedMCPPlugin(home, candidate) {
+				continue
+			}
 			for name, rawConfig := range readMCPConfig(candidate, kind) {
+				if isMCPRelayAnchor(kind, name) {
+					continue
+				}
 				config, ok := rawConfig.(map[string]any)
 				if !ok {
 					continue
@@ -196,6 +244,17 @@ func scanRuntimeConfig(home, kind string, fingerprintKey []byte) (map[string]any
 	result["mcpServers"] = summaries
 	result["mcpm"] = readJSONRedacted(filepath.Join(home, ".config", "mcpm", "config.json"))
 	return result, descriptors, secrets
+}
+
+func isLegacySharedMCPPlugin(home, candidate string) bool {
+	return candidate == filepath.Join(home, ".codex", ".tmp", "plugins", "plugins", "shared-mcp", ".mcp.json")
+}
+
+func isMCPRelayAnchor(kind, name string) bool {
+	if name == "all-mcp" {
+		return kind == domain.RuntimeCodex || kind == domain.RuntimeClaude
+	}
+	return name == MCPMProfileForRuntime(kind)
 }
 
 func normalizeMCPServer(kind, name string, config map[string]any, fingerprintKey []byte) (domain.MCPDescriptor, MCPSecretValues, error) {

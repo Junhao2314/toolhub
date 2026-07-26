@@ -19,19 +19,17 @@ import (
 )
 
 type Deployer struct {
-	DataDir       string
-	Paths         Paths
-	SharedSources []SharedSourceConfig
+	DataDir string
+	Paths   Paths
 }
 
 type DeployRequest struct {
-	Runtime    string
-	SourceName string
-	SkillSlug  string
-	VersionID  string
-	SHA256     string
-	Enabled    bool
-	Artifact   []byte
+	Runtime   string
+	SkillSlug string
+	VersionID string
+	SHA256    string
+	Enabled   bool
+	Artifact  []byte
 }
 
 type DeployResult struct {
@@ -42,13 +40,6 @@ type DeployResult struct {
 
 func (d *Deployer) Deploy(request DeployRequest) (DeployResult, error) {
 	root := d.Paths.RuntimeRoots[request.Runtime]
-	if request.Runtime == "shared" {
-		source, err := d.sharedDeploymentSource(request.SourceName)
-		if err != nil {
-			return DeployResult{}, err
-		}
-		root = source.SkillsRoot
-	}
 	if root == "" {
 		return DeployResult{}, errors.New("unknown runtime")
 	}
@@ -60,33 +51,6 @@ func (d *Deployer) Deploy(request DeployRequest) (DeployResult, error) {
 		return d.enable(target, request)
 	}
 	return d.disable(target, request)
-}
-
-func (d *Deployer) sharedDeploymentSource(name string) (SharedSourceConfig, error) {
-	if name != "" {
-		source, err := FindSharedSource(d.SharedSources, name)
-		if err != nil {
-			return SharedSourceConfig{}, err
-		}
-		if source.Mode != SharedModeManaged {
-			return SharedSourceConfig{}, errors.New("shared Skill deployment requires a managed source")
-		}
-		return source, nil
-	}
-	var selected *SharedSourceConfig
-	for index := range d.SharedSources {
-		if d.SharedSources[index].Mode != SharedModeManaged {
-			continue
-		}
-		if selected != nil {
-			return SharedSourceConfig{}, errors.New("shared Skill deployment requires an explicit source")
-		}
-		selected = &d.SharedSources[index]
-	}
-	if selected == nil {
-		return SharedSourceConfig{}, errors.New("shared Skill deployment requires a managed source")
-	}
-	return *selected, nil
 }
 
 func (d *Deployer) enable(target string, request DeployRequest) (DeployResult, error) {

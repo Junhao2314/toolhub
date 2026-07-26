@@ -10,7 +10,6 @@ type DeploySkillPayload struct {
 	DeploymentID      string `json:"deploymentId"`
 	DesiredGeneration int64  `json:"desiredGeneration"`
 	Runtime           string `json:"runtime"`
-	SourceName        string `json:"sourceName,omitempty"`
 	SkillSlug         string `json:"skillSlug"`
 	VersionID         string `json:"versionId"`
 	SHA256            string `json:"sha256"`
@@ -31,36 +30,30 @@ type ApplyMCPPayload struct {
 	Runtime           string         `json:"runtime"`
 	ProfileID         string         `json:"profileId"`
 	ProfileName       string         `json:"profileName"`
+	MCPMProfile       string         `json:"mcpmProfile"`
 	Enabled           bool           `json:"enabled"`
 	Servers           []MCPServerRef `json:"servers"`
 }
 
 type MCPServerRef struct {
-	ID         string          `json:"id"`
-	Name       string          `json:"name"`
-	Transport  string          `json:"transport"`
-	Command    string          `json:"command,omitempty"`
-	Args       []string        `json:"args"`
-	URL        string          `json:"url,omitempty"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Transport  string            `json:"transport"`
+	Command    string            `json:"command,omitempty"`
+	Args       []string          `json:"args"`
+	URL        string            `json:"url,omitempty"`
 	EnvRefs    map[string]string `json:"envRefs"`
 	HeaderRefs map[string]string `json:"headerRefs"`
 	Overrides  json.RawMessage   `json:"overrides,omitempty"`
 }
 
 type ApplyMCPResult struct {
-	ActualHash    string `json:"actualHash"`
-	ActualEnabled bool   `json:"actualEnabled"`
-	Method        string `json:"method"`
-	ServerCount   int    `json:"serverCount"`
-	ConfigPath    string `json:"configPath,omitempty"`
-}
-
-type SyncSharedPayload struct {
-	SourceID                  string   `json:"sourceId"`
-	SourceName                string   `json:"sourceName"`
-	Scopes                    []string `json:"scopes"`
-	DryRun                    bool     `json:"dryRun"`
-	ExpectedSourceFingerprint string   `json:"expectedSourceFingerprint,omitempty"`
+	ActualHash    string   `json:"actualHash"`
+	ActualEnabled bool     `json:"actualEnabled"`
+	Method        string   `json:"method"`
+	ServerCount   int      `json:"serverCount"`
+	ConfigPath    string   `json:"configPath,omitempty"`
+	BackupPaths   []string `json:"backupPaths,omitempty"`
 }
 
 func TaskSigningBytes(id, kind string, payload json.RawMessage) ([]byte, error) {

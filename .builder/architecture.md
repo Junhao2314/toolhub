@@ -9,8 +9,9 @@ ToolHub is a modular monolith: one Go control-plane binary embeds the compiled R
 - Reconciliation writes only previously approved desired state and is idempotent per node/runtime/version.
 - Imported packages are immutable and identified by source commit, canonical SHA-256, and provenance.
 - Agent tasks use a fixed typed protocol, are HMAC-signed, and never expose arbitrary shell execution.
-- Existing Skills are read-only until explicit adoption; adoption uploads a verified immutable snapshot before writing the managed marker. MCP discovery is automatically baselined without a first-run rewrite, then reconciled from central desired state.
-- Secrets are encrypted with a master key and redacted at every API/log boundary.
+- Existing Skills are read-only until explicit adoption; adoption uploads a verified immutable snapshot before writing the managed marker. Shared Skills are imported without modifying the legacy source, then deployed as ordinary materialized artifacts.
+- MCP discovery is no-write: mcpm membership seeds fixed observed profiles, membership edits keep them observed, and only an exact fixed-profile/runtime deployment enables DB → Agent → mcpm → native-anchor reconciliation for Codex/Claude.
+- Secrets are encrypted with a master key and redacted at each inventory/audit/AI/browser boundary that can carry them; there is no universal response middleware.
 
 ## Boundaries
 
@@ -20,7 +21,7 @@ ToolHub is a modular monolith: one Go control-plane binary embeds the compiled R
 - `internal/skills`: package scanning, provenance, hashing and import.
 - `internal/agenthub`: WSS connections, signed tasks and inventory.
 - `internal/worker`: update/sync schedules and job execution.
-- `internal/runtime`: shared runtime inventory/deployment contracts.
+- `internal/runtime`: runtime inventory, materialized Skill deployment, read-only shared-source intake, mcpm registry patching, and native relay anchors.
 - `cmd/toolhub-agent`: cross-platform node process and runtime adapters.
 
 ## Rollback

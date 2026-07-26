@@ -107,7 +107,7 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 		drift=CASE WHEN adopted_skill_id IS NOT NULL THEN true ELSE drift END,updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET missing=true,drift=desired_enabled,updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET missing=desired_enabled,drift=desired_enabled,updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
 		return nil, err
 	}
 	if err := upsertSharedInventoryTx(ctx, tx, nodeID, inventory.SharedSources); err != nil {
@@ -117,7 +117,9 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 		Runtime    string
 		Descriptor domain.MCPDescriptor
 	}
+	var unknownImports []domain.MCPDescriptor
 	var drifted []string
+	anchorObservations := map[string]managedMCPAnchorObservation{}
 	seenBindings := map[string]bool{}
 	for _, runtime := range inventory.Runtimes {
 		if !domain.IsConsumerRuntime(runtime.Kind) {
@@ -132,6 +134,9 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 		}
 		if err := upsertSkillDiscoveries(ctx, tx, nodeID, runtime); err != nil {
 			return nil, err
+		}
+		if runtime.Kind == domain.RuntimeCodex || runtime.Kind == domain.RuntimeClaude {
+			anchorObservations[runtime.Kind] = parseManagedMCPAnchorObservation(runtime.Config["mcpAnchor"])
 		}
 		for _, rawDescriptor := range runtime.MCPServers {
 			descriptor, err := protocol.NormalizeMCPDescriptor(runtime.Kind, rawDescriptor)
@@ -172,10 +177,31 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 			}
 		}
 	}
+	for _, rawDescriptor := range inventory.MCPImports {
+		descriptor, err := normalizeMCPImportDescriptor(rawDescriptor)
+		if err != nil {
+			return nil, err
+		}
+		known, observedBindings, newlyDrifted, err := s.observeMCPImportTx(ctx, tx, nodeID, descriptor)
+		if err != nil {
+			return nil, err
+		}
+		for _, binding := range observedBindings {
+			seenBindings[binding.Runtime+"\x00"+binding.Name] = true
+		}
+		drifted = append(drifted, newlyDrifted...)
+		if !known {
+			unknownImports = append(unknownImports, descriptor)
+		}
+	}
 	for key, prior := range priorBindings {
 		if !seenBindings[key] && prior.DesiredEnabled && (!prior.Drift || !prior.Missing) {
 			drifted = append(drifted, prior.ID)
 		}
+	}
+	driftedDeployments, err := projectManagedMCPDeploymentDriftTx(ctx, tx, nodeID, anchorObservations)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, "UPDATE nodes SET last_seen_at=now(),status='online',updated_at=now() WHERE id=$1", nodeID); err != nil {
 		return nil, err
@@ -185,6 +211,9 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 	}
 	for _, bindingID := range drifted {
 		_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_drift_detected", ResourceType: "mcp_binding", ResourceID: bindingID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID}})
+	}
+	for _, deploymentID := range driftedDeployments {
+		_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_drift_detected", ResourceType: "mcp_deployment", ResourceID: deploymentID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "reason": "mcp_anchor"}})
 	}
 	if !issueCaptureTokens {
 		return nil, nil
@@ -205,7 +234,145 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 		}
 		requests = append(requests, request)
 	}
+	for _, descriptor := range unknownImports {
+		if len(descriptor.EnvKeys) == 0 && len(descriptor.HeaderKeys) == 0 {
+			result, importErr := s.importMCPDescriptor(ctx, nodeID, descriptor, nil, nil)
+			if importErr != nil {
+				return nil, importErr
+			}
+			_ = s.Audit(ctx, domain.AuditEvent{Action: "mcp_candidate_import", ResourceType: "mcp_server", ResourceID: result.ServerID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "source": descriptor.ImportSource, "sourceName": descriptor.ImportSourceName, "serverName": descriptor.Name}})
+			continue
+		}
+		request, err := s.createMCPCaptureToken(ctx, nodeID, descriptor.ImportRuntime, descriptor)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, request)
+	}
 	return requests, nil
+}
+
+type observedImportBinding struct {
+	Runtime string
+	Name    string
+}
+
+type managedMCPAnchorObservation struct {
+	Present      bool
+	Valid        bool
+	LegacyAllMCP bool
+}
+
+func parseManagedMCPAnchorObservation(raw any) managedMCPAnchorObservation {
+	value, _ := raw.(map[string]any)
+	present, _ := value["present"].(bool)
+	valid, _ := value["valid"].(bool)
+	legacy, _ := value["legacyAllMCP"].(bool)
+	return managedMCPAnchorObservation{Present: present, Valid: valid, LegacyAllMCP: legacy}
+}
+
+func projectManagedMCPDeploymentDriftTx(ctx context.Context, tx pgx.Tx, nodeID string, observations map[string]managedMCPAnchorObservation) ([]string, error) {
+	var drifted []string
+	for _, runtimeKind := range []string{domain.RuntimeCodex, domain.RuntimeClaude} {
+		observation, ok := observations[runtimeKind]
+		if !ok {
+			continue
+		}
+		var deploymentID, state string
+		var desiredEnabled bool
+		err := tx.QueryRow(ctx, `SELECT d.id::text,d.state,d.desired_enabled FROM mcp_deployments d
+			JOIN mcp_profiles p ON p.id=d.profile_id
+			WHERE d.node_id=$1 AND d.runtime_kind=$2 AND p.name=$3 AND p.source='toolhub'
+			AND p.origin->>'managedRuntime'=$2 FOR UPDATE`, nodeID, runtimeKind, "toolhub-"+runtimeKind).
+			Scan(&deploymentID, &state, &desiredEnabled)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if state == "observed" || state == "pending" || state == "failed" {
+			continue
+		}
+		anchorDrift := observation.LegacyAllMCP
+		if desiredEnabled {
+			anchorDrift = anchorDrift || !observation.Valid
+		} else {
+			anchorDrift = anchorDrift || observation.Present
+		}
+		var bindingAttention bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcp_runtime_bindings
+			WHERE deployment_id=$1 AND (drift OR (desired_enabled AND missing)))`, deploymentID).Scan(&bindingAttention); err != nil {
+			return nil, err
+		}
+		shouldDrift := anchorDrift || bindingAttention
+		if shouldDrift && state == "in_sync" {
+			if _, err := tx.Exec(ctx, "UPDATE mcp_deployments SET state='drift',updated_at=now() WHERE id=$1", deploymentID); err != nil {
+				return nil, err
+			}
+			drifted = append(drifted, deploymentID)
+		} else if !shouldDrift && state == "drift" {
+			if _, err := tx.Exec(ctx, "UPDATE mcp_deployments SET state='in_sync',last_error='',updated_at=now() WHERE id=$1", deploymentID); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return drifted, nil
+}
+
+func normalizeMCPImportDescriptor(descriptor domain.MCPDescriptor) (domain.MCPDescriptor, error) {
+	if descriptor.ImportSource != "mcpm" && descriptor.ImportSource != "shared-manifest" {
+		return domain.MCPDescriptor{}, errors.New("MCP import has an invalid source")
+	}
+	if !domain.IsConsumerRuntime(descriptor.ImportRuntime) {
+		return domain.MCPDescriptor{}, errors.New("MCP import has an invalid fingerprint runtime")
+	}
+	metadata := descriptor
+	normalized, err := protocol.NormalizeMCPDescriptor(descriptor.ImportRuntime, descriptor)
+	if err != nil {
+		return domain.MCPDescriptor{}, fmt.Errorf("normalize MCP import descriptor: %w", err)
+	}
+	normalized.ImportSource = metadata.ImportSource
+	normalized.ImportSourceName = strings.TrimSpace(metadata.ImportSourceName)
+	normalized.ImportRuntime = metadata.ImportRuntime
+	normalized.ImportEnabled = metadata.ImportEnabled
+	normalized.TargetRuntimes = uniqueSortedRuntimeKinds(metadata.TargetRuntimes)
+	normalized.ProfileTags = append([]string(nil), metadata.ProfileTags...)
+	normalized.SecretFingerprint = metadata.SecretFingerprint
+	if normalized.ImportSourceName == "" {
+		return domain.MCPDescriptor{}, errors.New("MCP import source name is required")
+	}
+	if normalized.ImportSource == "mcpm" && len(normalized.TargetRuntimes) == 0 {
+		return domain.MCPDescriptor{}, errors.New("mcpm import requires a managed runtime target")
+	}
+	for _, runtimeKind := range normalized.TargetRuntimes {
+		if runtimeKind != domain.RuntimeCodex && runtimeKind != domain.RuntimeClaude {
+			return domain.MCPDescriptor{}, errors.New("mcpm import targets only Codex and Claude")
+		}
+	}
+	if len(normalized.EnvKeys) > 0 || len(normalized.HeaderKeys) > 0 {
+		decoded, decodeErr := hex.DecodeString(normalized.SecretFingerprint)
+		if decodeErr != nil || len(decoded) != 32 {
+			return domain.MCPDescriptor{}, errors.New("MCP import secret fingerprint is required")
+		}
+	}
+	return normalized, nil
+}
+
+func uniqueSortedRuntimeKinds(values []string) []string {
+	set := map[string]bool{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			set[value] = true
+		}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func upsertSkillDiscoveries(ctx context.Context, tx pgx.Tx, nodeID string, runtime domain.InventoryRuntime) error {
@@ -320,7 +487,12 @@ func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MC
 	if subtle.ConstantTimeCompare([]byte(security.FingerprintSecretMap(key, fingerprintValues)), []byte(secretFingerprint)) != 1 {
 		return MCPAdoptionResult{}, errors.New("captured secrets do not match the descriptor fingerprint")
 	}
-	result, err := s.adoptRuntimeMCPTx(ctx, tx, nodeID, capture.Runtime, descriptor, capture.Env, capture.Headers)
+	var result MCPAdoptionResult
+	if descriptor.ImportSource != "" {
+		result, err = s.importMCPDescriptorTx(ctx, tx, nodeID, descriptor, capture.Env, capture.Headers)
+	} else {
+		result, err = s.adoptRuntimeMCPTx(ctx, tx, nodeID, capture.Runtime, descriptor, capture.Env, capture.Headers)
+	}
 	if err != nil {
 		return MCPAdoptionResult{}, err
 	}
@@ -330,9 +502,282 @@ func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MC
 	if err := tx.Commit(ctx); err != nil {
 		return MCPAdoptionResult{}, err
 	}
-	_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_secret_capture", ResourceType: "mcp_binding", ResourceID: result.BindingID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "envNames": mapKeys(capture.Env), "headerNames": mapKeys(capture.Headers)}})
-	_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_auto_adopt", ResourceType: "mcp_binding", ResourceID: result.BindingID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "reused": result.Reused}})
+	resourceType, resourceID, action := "mcp_binding", result.BindingID, "runtime_auto_adopt"
+	if descriptor.ImportSource != "" {
+		resourceType, resourceID, action = "mcp_server", result.ServerID, "mcp_candidate_import"
+	}
+	_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_secret_capture", ResourceType: resourceType, ResourceID: resourceID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "envNames": mapKeys(capture.Env), "headerNames": mapKeys(capture.Headers)}})
+	_ = s.Audit(ctx, domain.AuditEvent{Action: action, ResourceType: resourceType, ResourceID: resourceID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "source": descriptor.ImportSource, "reused": result.Reused}})
 	return result, nil
+}
+
+func (s *Store) observeMCPImportTx(ctx context.Context, tx pgx.Tx, nodeID string, descriptor domain.MCPDescriptor) (bool, []observedImportBinding, []string, error) {
+	known := false
+	var serverID string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM mcp_servers
+		WHERE authority='toolhub' AND origin->>'nodeId'=$1 AND origin->>'importSource'=$2
+		AND origin->>'importSourceName'=$3 AND origin->>'serverName'=$4`, nodeID, descriptor.ImportSource, descriptor.ImportSourceName, descriptor.Name).Scan(&serverID)
+	if err == nil {
+		known = true
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return false, nil, nil, err
+	}
+	if descriptor.ImportSource != "mcpm" {
+		return known, nil, nil, nil
+	}
+	var observed []observedImportBinding
+	var drifted []string
+	for _, runtimeKind := range descriptor.TargetRuntimes {
+		var bindingID, desiredConfig, desiredSecret string
+		var desiredEnabled, priorDrift bool
+		err := tx.QueryRow(ctx, `SELECT id::text,desired_config_fingerprint,desired_secret_fingerprint,desired_enabled,drift
+			FROM mcp_runtime_bindings WHERE node_id=$1 AND runtime_kind=$2 AND server_name=$3 FOR UPDATE`, nodeID, runtimeKind, descriptor.Name).
+			Scan(&bindingID, &desiredConfig, &desiredSecret, &desiredEnabled, &priorDrift)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return false, nil, nil, err
+		}
+		// A same-name runtime binding is only an observation of local state. It must
+		// not suppress creation of the distinct mcpm import row during an upgrade
+		// from the legacy runtime-auto baseline.
+		drift := desiredEnabled != descriptor.ImportEnabled || desiredConfig != descriptor.ConfigFingerprint || desiredSecret != descriptor.SecretFingerprint
+		if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET identity=$2,env_keys=$3,header_keys=$4,
+			observed_config_fingerprint=$5,observed_secret_fingerprint=$6,actual_fingerprint=$5,
+			missing=false,drift=$7,last_seen_at=now(),updated_at=now() WHERE id=$1`, bindingID,
+			protocol.MCPIdentity(runtimeKind, descriptor.Name), jsonStringArray(descriptor.EnvKeys), jsonStringArray(descriptor.HeaderKeys),
+			descriptor.ConfigFingerprint, descriptor.SecretFingerprint, drift); err != nil {
+			return false, nil, nil, err
+		}
+		observed = append(observed, observedImportBinding{Runtime: runtimeKind, Name: descriptor.Name})
+		if drift && !priorDrift {
+			drifted = append(drifted, bindingID)
+		}
+	}
+	return known, observed, drifted, nil
+}
+
+func (s *Store) importMCPDescriptor(ctx context.Context, nodeID string, descriptor domain.MCPDescriptor, environment, headers map[string]string) (MCPAdoptionResult, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return MCPAdoptionResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.importMCPDescriptorTx(ctx, tx, nodeID, descriptor, environment, headers)
+	if err != nil {
+		return MCPAdoptionResult{}, err
+	}
+	return result, tx.Commit(ctx)
+}
+
+func (s *Store) importMCPDescriptorTx(ctx context.Context, tx pgx.Tx, nodeID string, descriptor domain.MCPDescriptor, environment, headers map[string]string) (MCPAdoptionResult, error) {
+	if descriptor.ImportSource == "" {
+		return MCPAdoptionResult{}, errors.New("MCP import source is required")
+	}
+	lockKey := strings.Join([]string{"mcp-import", nodeID, descriptor.ImportSource, descriptor.ImportSourceName, descriptor.Name}, ":")
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", lockKey); err != nil {
+		return MCPAdoptionResult{}, err
+	}
+	var existingID string
+	err := tx.QueryRow(ctx, `SELECT id::text FROM mcp_servers
+		WHERE authority='toolhub' AND origin->>'nodeId'=$1 AND origin->>'importSource'=$2
+		AND origin->>'importSourceName'=$3 AND origin->>'serverName'=$4`, nodeID, descriptor.ImportSource, descriptor.ImportSourceName, descriptor.Name).Scan(&existingID)
+	if err == nil {
+		return MCPAdoptionResult{ServerID: existingID, Reused: true}, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return MCPAdoptionResult{}, err
+	}
+	serverID := uuid.NewString()
+	name, err := s.importedMCPServerNameTx(ctx, tx, descriptor)
+	if err != nil {
+		return MCPAdoptionResult{}, err
+	}
+	envRefs := map[string]string{}
+	for _, key := range descriptor.EnvKeys {
+		secretID, err := s.createSecret(ctx, tx, "mcp:"+serverID+":"+key, "mcp-env", []byte(environment[key]), map[string]any{"mcpServerId": serverID, "envName": key, "source": descriptor.ImportSource}, "")
+		if err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		envRefs[key] = secretID
+	}
+	headerRefs := map[string]string{}
+	for _, key := range descriptor.HeaderKeys {
+		secretID, err := s.createSecret(ctx, tx, "mcp:"+serverID+":header:"+key, "mcp-header", []byte(headers[key]), map[string]any{"mcpServerId": serverID, "headerName": key, "source": descriptor.ImportSource}, "")
+		if err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		headerRefs[key] = secretID
+	}
+	argsJSON, _ := json.Marshal(descriptor.Args)
+	envRefsJSON, _ := json.Marshal(envRefs)
+	headerRefsJSON, _ := json.Marshal(headerRefs)
+	origin, _ := json.Marshal(map[string]any{"nodeId": nodeID, "importSource": descriptor.ImportSource, "importSourceName": descriptor.ImportSourceName, "serverName": descriptor.Name, "profileTags": descriptor.ProfileTags})
+	source := "shared-import"
+	if descriptor.ImportSource == "mcpm" {
+		source = "mcpm-import"
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,runtime_name,transport,command,args,url,env_refs,header_refs,enabled,source,origin,config_fingerprint)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, serverID, name, descriptor.Name, descriptor.Transport, descriptor.Command,
+		string(argsJSON), descriptor.URL, string(envRefsJSON), string(headerRefsJSON), descriptor.ImportEnabled, source, string(origin), descriptor.ConfigFingerprint); err != nil {
+		return MCPAdoptionResult{}, err
+	}
+	result := MCPAdoptionResult{ServerID: serverID}
+	if descriptor.ImportSource != "mcpm" {
+		return result, nil
+	}
+	for _, runtimeKind := range descriptor.TargetRuntimes {
+		profileID, err := ensureManagedMCPProfileTx(ctx, tx, runtimeKind, nodeID)
+		if err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		seedable, err := managedMCPProfileSeedableTx(ctx, tx, profileID, nodeID, runtimeKind)
+		if err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		if !seedable {
+			continue
+		}
+		if _, err := tx.Exec(ctx, "INSERT INTO mcp_profile_servers(profile_id,server_id) VALUES($1,$2) ON CONFLICT DO NOTHING", profileID, serverID); err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		desiredHash, err := profileHashTx(ctx, tx, profileID)
+		if err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		deploymentID, err := ensureObservedMCPDeploymentTx(ctx, tx, profileID, nodeID, runtimeKind, desiredHash)
+		if err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		bindingID := uuid.NewString()
+		identity := protocol.MCPIdentity(runtimeKind, descriptor.Name)
+		if err := tx.QueryRow(ctx, `INSERT INTO mcp_runtime_bindings(id,node_id,runtime_kind,server_name,identity,server_id,profile_id,deployment_id,env_keys,header_keys,
+			observed_config_fingerprint,observed_secret_fingerprint,desired_config_fingerprint,desired_secret_fingerprint,desired_fingerprint,actual_fingerprint,
+			desired_enabled,missing,drift,last_seen_at)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$11,$12,$11,$11,$13,false,false,now())
+			ON CONFLICT(node_id,runtime_kind,server_name) DO UPDATE SET server_id=excluded.server_id,profile_id=excluded.profile_id,
+			deployment_id=excluded.deployment_id,identity=excluded.identity,env_keys=excluded.env_keys,header_keys=excluded.header_keys,
+			observed_config_fingerprint=excluded.observed_config_fingerprint,observed_secret_fingerprint=excluded.observed_secret_fingerprint,
+			desired_config_fingerprint=excluded.desired_config_fingerprint,desired_secret_fingerprint=excluded.desired_secret_fingerprint,
+			desired_fingerprint=excluded.desired_fingerprint,actual_fingerprint=excluded.actual_fingerprint,desired_enabled=excluded.desired_enabled,missing=false,drift=false,last_seen_at=now(),updated_at=now()
+			RETURNING id::text`, bindingID, nodeID, runtimeKind, descriptor.Name, identity, serverID, profileID, deploymentID,
+			jsonStringArray(descriptor.EnvKeys), jsonStringArray(descriptor.HeaderKeys), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, descriptor.ImportEnabled).Scan(&bindingID); err != nil {
+			return MCPAdoptionResult{}, err
+		}
+		if result.BindingID == "" {
+			result.BindingID, result.ProfileID, result.DeploymentID = bindingID, profileID, deploymentID
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) importedMCPServerNameTx(ctx context.Context, tx pgx.Tx, descriptor domain.MCPDescriptor) (string, error) {
+	base := strings.TrimSpace(descriptor.Name)
+	if descriptor.ImportSource == "shared-manifest" {
+		var occupied bool
+		if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM mcp_servers WHERE authority='toolhub' AND name=$1)", base).Scan(&occupied); err != nil {
+			return "", err
+		}
+		if occupied {
+			base += "-shared"
+		}
+		return uniqueMCPDisplayNameTx(ctx, tx, base)
+	}
+	var existingID, existingSource string
+	err := tx.QueryRow(ctx, "SELECT id::text,source FROM mcp_servers WHERE authority='toolhub' AND name=$1 FOR UPDATE", base).Scan(&existingID, &existingSource)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return base, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	suffix := "local"
+	var originRuntime string
+	_ = tx.QueryRow(ctx, "SELECT coalesce(origin->>'runtime','') FROM mcp_servers WHERE id=$1", existingID).Scan(&originRuntime)
+	if existingSource == "shared-import" {
+		suffix = "shared"
+	} else if originRuntime != "" {
+		suffix = originRuntime
+	} else if existingSource != "" {
+		suffix = strings.ReplaceAll(existingSource, "_", "-")
+	}
+	replacement, err := uniqueMCPDisplayNameTx(ctx, tx, base+"-"+suffix)
+	if err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(ctx, "UPDATE mcp_servers SET name=$2,updated_at=now() WHERE id=$1", existingID, replacement); err != nil {
+		return "", err
+	}
+	return base, nil
+}
+
+func uniqueMCPDisplayNameTx(ctx context.Context, tx pgx.Tx, base string) (string, error) {
+	for index := 0; index < 1000; index++ {
+		candidate := base
+		if index > 0 {
+			candidate = fmt.Sprintf("%s-%d", base, index+1)
+		}
+		var exists bool
+		if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM mcp_servers WHERE authority='toolhub' AND name=$1)", candidate).Scan(&exists); err != nil {
+			return "", err
+		}
+		if !exists {
+			return candidate, nil
+		}
+	}
+	return "", errors.New("could not allocate an MCP server display name")
+}
+
+func ensureManagedMCPProfileTx(ctx context.Context, tx pgx.Tx, runtimeKind, nodeID string) (string, error) {
+	name := "toolhub-" + runtimeKind
+	if runtimeKind != domain.RuntimeCodex && runtimeKind != domain.RuntimeClaude {
+		return "", errors.New("managed MCP profiles support only Codex and Claude")
+	}
+	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "managed-mcp-profile:"+runtimeKind); err != nil {
+		return "", err
+	}
+	var profileID, source string
+	var origin []byte
+	err := tx.QueryRow(ctx, "SELECT id::text,source,origin FROM mcp_profiles WHERE name=$1 FOR UPDATE", name).Scan(&profileID, &source, &origin)
+	if err == nil {
+		var metadata map[string]any
+		_ = json.Unmarshal(origin, &metadata)
+		if source != "toolhub" || strings.TrimSpace(fmt.Sprint(metadata["managedRuntime"])) != runtimeKind {
+			return "", fmt.Errorf("MCP profile name %q is already owned by another configuration", name)
+		}
+		return profileID, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		profileID = uuid.NewString()
+		metadata, _ := json.Marshal(map[string]any{"managedRuntime": runtimeKind, "importNodeId": nodeID})
+		_, err = tx.Exec(ctx, `INSERT INTO mcp_profiles(id,name,description,enabled,source,origin)
+			VALUES($1,$2,$3,true,'toolhub',$4)`, profileID, name, "ToolHub managed "+runtimeKind+" mcpm profile", string(metadata))
+	}
+	if err != nil {
+		return "", err
+	}
+	return profileID, nil
+}
+
+func managedMCPProfileSeedableTx(ctx context.Context, tx pgx.Tx, profileID, nodeID, runtimeKind string) (bool, error) {
+	var state string
+	err := tx.QueryRow(ctx, `SELECT state FROM mcp_deployments WHERE profile_id=$1 AND node_id=$2 AND runtime_kind=$3 FOR UPDATE`, profileID, nodeID, runtimeKind).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return true, nil
+	}
+	return state == "observed", err
+}
+
+func ensureObservedMCPDeploymentTx(ctx context.Context, tx pgx.Tx, profileID, nodeID, runtimeKind, desiredHash string) (string, error) {
+	deploymentID := uuid.NewString()
+	err := tx.QueryRow(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,actual_enabled,desired_hash,actual_hash,desired_generation,actual_generation,state)
+		VALUES($1,$2,$3,$4,true,false,$5,'',1,0,'observed')
+		ON CONFLICT(profile_id,node_id,runtime_kind) DO UPDATE SET desired_hash=excluded.desired_hash,
+		desired_generation=CASE WHEN mcp_deployments.desired_hash IS DISTINCT FROM excluded.desired_hash THEN mcp_deployments.desired_generation+1 ELSE mcp_deployments.desired_generation END,
+		state=CASE WHEN mcp_deployments.state='observed' THEN 'observed' ELSE mcp_deployments.state END,updated_at=now()
+		RETURNING id::text`, deploymentID, profileID, nodeID, runtimeKind, desiredHash).Scan(&deploymentID)
+	return deploymentID, err
 }
 
 func agentTaskKeyTx(ctx context.Context, tx pgx.Tx, nodeID string, cipher *security.Cipher) ([]byte, error) {
@@ -592,7 +1037,7 @@ func (s *Store) ListDiscoveries(ctx context.Context) (json.RawMessage, error) {
 	return s.JSONList(ctx, `SELECT * FROM (
 		SELECT sd.id::text AS id,'skill'::text AS kind,sd.node_id::text AS "nodeId",n.name AS "nodeName",sd.runtime_kind AS runtime,
 			sd.name,sd.canonical_path AS path,sd.directory_hash AS sha256,sd.managed,sd.protected,sd.disabled,sd.missing,sd.drift,
-			sd.adoption_status AS status,sd.adoption_error AS "lastError",coalesce(sd.adopted_skill_id::text,'') AS "adoptedSkillId",sd.last_seen_at AS "lastSeenAt",
+			sd.adoption_status AS status,coalesce(nullif(sd.adoption_error,''),sd.scan_error) AS "lastError",coalesce(sd.adopted_skill_id::text,'') AS "adoptedSkillId",sd.last_seen_at AS "lastSeenAt",
 			''::text AS source,''::text AS "serverId",''::text AS "profileId",''::text AS "deploymentId",
 			coalesce((SELECT jsonb_object_agg(c.consumer_kind,l.state) FROM shared_skill_links l JOIN shared_consumers c ON c.id=l.consumer_id
 				WHERE l.source_path=sd.canonical_path),'{}'::jsonb) AS "linkCoverage"

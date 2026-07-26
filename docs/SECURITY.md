@@ -13,7 +13,8 @@ ToolHub assumes the host and Tailnet are trusted administrative infrastructure. 
 - AI keys, centrally managed MCP environment/header values, SSH keys, and Agent task keys use XChaCha20-Poly1305 with record ID associated data.
 - MCP inventory contains normalized non-secret descriptors plus environment/header key names only. Secret comparison uses HMAC-SHA256 under the per-node task key; unknown MCP values are requested through an expiring, one-time, node/identity-bound capture token and encrypted immediately.
 - Agent secret resolution permits only `mcp-env` and `mcp-header` secrets referenced by an enabled, desired, ToolHub-authoritative MCP deployment on that node. An Agent cannot fetch AI keys, SSH keys, disabled/unreferenced MCP values, or another node's values.
-- Shared-file MCP values remain on the node. The Agent reports only normalized key names and keyed fingerprints; inline environment or header values from the shared manifest are never sent to the control plane.
+- Observed-only and arbitrary/mismatched MCP profiles are excluded from Agent secret authorization; a fixed profile must first enter the explicit deployment state for its matching runtime.
+- Mirrored `shared-file` MCP rows remain node-local observations. When a legacy manifest entry is imported as a central candidate, its values cross only the authenticated one-time capture route, are fingerprint-verified, and are encrypted immediately; ordinary inventory still contains key names only.
 - Audit metadata, persisted inventory, and AI inputs recursively redact credential-shaped fields. Secret-bearing browser responses are prevented at their specific store/handler boundaries; there is no universal response-redaction middleware.
 
 ## Remote Execution
@@ -28,22 +29,24 @@ The Nodes page never reads SSH private keys back. Saving a replacement disables 
 
 Archives reject absolute paths, traversal, backslashes, duplicate paths, symlinks, oversized files, and multiple package roots. Review reports expose scripts, executables, URLs, allowed tools, possible credentials, and license presence. Imported content is immutable and remains Library-only until an administrator approves it and assigns targets.
 
-Discovered runtime Skills remain read-only until an administrator queues adoption. The Agent rejects `.system`, escaped, or symlinked paths; the backend rescans the uploaded canonical ZIP and verifies its discovery hash. The Agent writes the managed marker only after that import succeeds.
+Discovered runtime Skills remain read-only until an administrator queues adoption. The Agent rejects `.system`, escaped, or symlinked paths; the backend rescans the uploaded canonical ZIP and verifies its discovery hash. The Agent writes the managed marker only after that import succeeds. Shared-source adoption is import-only and intentionally leaves the legacy source unmodified.
 
 ## Deployment Safety
 
 Managed content is cached under `~/.toolhub/artifacts/<sha256>`. Activation stages a full directory, backs up the previous managed directory, and uses rename-based replacement. Existing unmanaged directories and `.system` targets are conflicts, not overwrite candidates.
 
-For ToolHub-authoritative MCP, newly discovered servers are automatically baselined without rewriting the node. After baseline, ToolHub owns desired state and local edits/deletion are drift restored by manual or scheduled reconciliation.
+For ToolHub-authoritative MCP, native non-relay discoveries are automatically baselined without rewriting the node. mcpm imports instead create fixed Codex/Claude profiles in `observed` state; an explicit deployment transition is required before the Agent writes anything.
 
-Shared-file sources use a separate node-local authority boundary:
+The mcpm delivery boundary is narrow and reversible:
 
-- Filesystem paths and allowed Skill roots come only from the local Agent configuration; browser requests and signed tasks identify a configured source and never carry arbitrary paths or shell commands.
-- Auto-probe is observed-only. Writes require an explicit `sharedSources` entry in `managed` mode; `autoSync` is rejected outside managed mode.
-- The manifest and existing MCP targets must already be mode `0600` before a managed write. Generated files, ownership state, temporary files, and retained backups are written with restrictive permissions.
-- Skill reconciliation records ownership and changes only links it previously created. Real directories, unknown links, escaped source links, and locally modified stale links produce conflicts instead of being overwritten or removed.
-- MCP reconciliation preserves unknown top-level fields and unknown server entries. Each write compares the whole file with the scanned bytes, validates managed-entry fingerprints, writes and fsyncs a same-directory temporary file, and atomically replaces the target. Concurrent or out-of-band changes produce conflicts.
-- Before replacing an existing MCP target, the Agent stores a timestamped last-known-good copy under its data directory and retains the five newest backups per source/consumer.
-- Grok is validated as inheriting Claude's concrete MCP output. Renderer merges leave Hermes local-only entries such as `task-trellis` and `acemcp` outside the managed set.
+- `apply_mcp` is accepted only for Codex/Claude with the exact fixed profile name. Hermes, Grok, and OpenClaw remain outside the writer.
+- Profile membership edits preserve an `observed` deployment instead of making it schedulable. Only the explicit fixed-profile deployment transition can move it to `pending`.
+- Secret values are fetched only through `AgentSecretValue` authorization for an enabled desired deployment. They are materialized only into the node-local mcpm registry, which is written at mode `0600`.
+- The structured patch preserves unknown servers and fields, refuses to replace an unowned conflicting definition, updates only the selected profile tag, and uses a same-directory fsynced temporary file plus atomic rename.
+- Existing mcpm and native anchor files receive timestamped mode-`0600` backups. If the native anchor edit fails, the mcpm write is restored before the task fails.
+- Claude/Codex anchor editors preserve unrelated JSON/TOML content and remove only recognized legacy relay sections. ToolHub archives the legacy Codex plugin only after validating its `plugin.json` ToolHub author marker.
+- The packaged Linux service keeps `ProtectSystem=strict`, but the enrolled home is writable because same-directory atomic replacement of `~/.claude.json` cannot work through `ProtectHome=read-only`. Runtime paths remain constrained by the closed signed task protocol and Agent-side path validation.
+
+Shared sources are a separate read-only import boundary. Paths and allowed Skill roots come only from local Agent configuration; browser requests and signed tasks never carry arbitrary filesystem paths. Legacy managed/auto-sync settings normalize to observed mode, and the shared writer, watcher, task kind, and CLI command do not exist.
 
 Before production use, rotate every example credential, enable secure cookies, configure Tailnet ACLs, back up PostgreSQL, and review high-risk Skill findings manually.

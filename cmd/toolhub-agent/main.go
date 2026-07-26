@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -49,45 +49,11 @@ func main() {
 		runAgent(*configPath)
 	case "scan":
 		scan(os.Args[2:])
-	case "sync-shared":
-		syncShared(os.Args[2:])
 	case "run-task":
 		runTask(os.Args[2:])
 	default:
 		log.Fatalf("unknown command %q", os.Args[1])
 	}
-}
-
-func syncShared(args []string) {
-	flags := flag.NewFlagSet("sync-shared", flag.ExitOnError)
-	configPath := flags.String("config", "", "agent configuration path")
-	sourceName := flags.String("source", "", "configured shared source name")
-	scope := flags.String("scope", "all", "skills, mcp, or all")
-	dryRun := flags.Bool("dry-run", false, "report changes without writing")
-	_ = flags.Parse(args)
-	config, err := agentclient.LoadConfig(*configPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if strings.TrimSpace(*sourceName) == "" {
-		log.Fatal("sync-shared requires --source")
-	}
-	key, err := base64.StdEncoding.DecodeString(config.TaskKey)
-	if err != nil || len(key) != 32 {
-		log.Fatal("agent task key is invalid")
-	}
-	scopes := []string{strings.TrimSpace(*scope)}
-	if strings.Contains(*scope, ",") {
-		scopes = strings.Split(*scope, ",")
-	}
-	result, err := (runtimeadapter.SharedReconciler{DataDir: config.DataDir, Sources: config.SharedSources, FingerprintKey: key}).Reconcile(
-		context.Background(),
-		runtimeadapter.SharedSyncRequest{SourceName: strings.TrimSpace(*sourceName), Scopes: scopes, DryRun: *dryRun},
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	_ = json.NewEncoder(os.Stdout).Encode(result)
 }
 
 func enroll(args []string) {
@@ -160,12 +126,8 @@ func runTask(args []string) {
 		defer os.Remove(*filePath)
 		reader = file
 	}
-	body, err := io.ReadAll(io.LimitReader(reader, 2<<20))
+	task, err := decodeAgentTask(reader)
 	if err != nil {
-		log.Fatal(err)
-	}
-	var task domain.AgentTask
-	if err := json.Unmarshal(body, &task); err != nil {
 		log.Fatal(err)
 	}
 	config, err := agentclient.LoadConfig(*configPath)
@@ -177,4 +139,20 @@ func runTask(args []string) {
 	if status != "succeeded" {
 		os.Exit(1)
 	}
+}
+
+func decodeAgentTask(reader io.Reader) (domain.AgentTask, error) {
+	const maxTaskBytes = 2 << 20
+	body, err := io.ReadAll(io.LimitReader(reader, maxTaskBytes+1))
+	if err != nil {
+		return domain.AgentTask{}, err
+	}
+	if len(body) > maxTaskBytes {
+		return domain.AgentTask{}, errors.New("Agent task exceeds size limit")
+	}
+	var task domain.AgentTask
+	if err := json.Unmarshal(body, &task); err != nil {
+		return domain.AgentTask{}, err
+	}
+	return task, nil
 }

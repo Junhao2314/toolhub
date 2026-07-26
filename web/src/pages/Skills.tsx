@@ -61,7 +61,7 @@ function ImportModal({ close, imported }: { close: () => void; imported: () => v
 
 function TargetModal({ skill, close, saved }: { skill: Skill; close: () => void; saved: () => void }) {
   const { t } = useI18n()
-  const nodes = useData(() => api.list<{ id: string; name: string; status: string; isLocal: boolean; runtimeKinds: string[]; hasManagedSharedSource: boolean }>('/nodes'), [])
+  const nodes = useData(() => api.list<{ id: string; name: string; status: string; isLocal: boolean; runtimeKinds: string[] }>('/nodes'), [])
   const [targets, setTargets] = useState<Record<string, boolean>>({})
   const [error, setError] = useState('')
   const defaultsApplied = useRef(false)
@@ -70,7 +70,7 @@ function TargetModal({ skill, close, saved }: { skill: Skill; close: () => void;
     defaultsApplied.current = true
     const local = nodes.data.items.find((node) => node.isLocal)
     if (!local) return
-    const defaults = local.hasManagedSharedSource ? ['shared'] : local.runtimeKinds
+    const defaults = local.runtimeKinds.filter((runtime) => runtime !== 'shared')
     setTargets(Object.fromEntries(defaults.map((runtime) => [`${local.id}:${runtime}`, true])))
   }, [nodes.data])
   const toggle = (key: string) => setTargets((current) => ({ ...current, [key]: !current[key] }))
@@ -78,6 +78,6 @@ function TargetModal({ skill, close, saved }: { skill: Skill; close: () => void;
     const matrix = Object.entries(targets).filter(([, enabled]) => enabled).map(([key]) => { const [nodeId, runtime] = key.split(':'); return { nodeId, runtime, enabled: true } })
     api.post(`/skills/${skill.id}/deployments`, { targets: matrix, sync: true, dryRun: false }).then(saved).catch((reason: Error) => setError(reason.message))
   }
-  const runtimes = ['shared', 'codex', 'claude', 'hermes', 'grok', 'openclaw']
-  return <Modal title={`${t('Targets')} · ${skill.name}`} close={close}>{error && <ErrorNotice message={error} />}{nodes.loading ? <Loading /> : <><div className="inline-notice"><ShieldAlert size={16} />{t('Managed shared-source nodes use one canonical Shared target; other nodes retain per-runtime targets.')}</div><div className="target-matrix wide"><div className="matrix-head"><span>{t('Node')}</span>{runtimes.map((runtime) => <span key={runtime}>{runtime}</span>)}</div>{nodes.data?.items.map((node) => <div key={node.id} className={node.isLocal ? 'local-target' : ''}><span><strong>{node.name}</strong>{node.isLocal && <small>{t('Project host')}</small>}<Status value={node.status} /></span>{runtimes.map((runtime) => { const available = node.hasManagedSharedSource ? runtime === 'shared' : runtime !== 'shared' && node.runtimeKinds.includes(runtime); return <label key={runtime} title={available ? runtime : t('{runtime} not available', { runtime })}><input type="checkbox" disabled={!available} checked={targets[`${node.id}:${runtime}`] ?? false} onChange={() => toggle(`${node.id}:${runtime}`)} /><i /></label> })}</div>)}</div></>}<div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button><Button onClick={submit} disabled={!Object.values(targets).some(Boolean)}>{t('Save and sync')}</Button></div></Modal>
+  const runtimes = ['codex', 'claude', 'hermes', 'grok', 'openclaw']
+  return <Modal title={`${t('Targets')} · ${skill.name}`} close={close}>{error && <ErrorNotice message={error} />}{nodes.loading ? <Loading /> : <><div className="inline-notice"><ShieldAlert size={16} />{t('Skills are materialized per runtime; the legacy Shared deployment target is retired.')}</div><div className="target-matrix wide"><div className="matrix-head"><span>{t('Node')}</span>{runtimes.map((runtime) => <span key={runtime}>{runtime}</span>)}</div>{nodes.data?.items.map((node) => <div key={node.id} className={node.isLocal ? 'local-target' : ''}><span><strong>{node.name}</strong>{node.isLocal && <small>{t('Project host')}</small>}<Status value={node.status} /></span>{runtimes.map((runtime) => { const available = node.runtimeKinds.includes(runtime); return <label key={runtime} title={available ? runtime : t('{runtime} not available', { runtime })}><input type="checkbox" disabled={!available} checked={targets[`${node.id}:${runtime}`] ?? false} onChange={() => toggle(`${node.id}:${runtime}`)} /><i /></label> })}</div>)}</div></>}<div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button><Button onClick={submit} disabled={!Object.values(targets).some(Boolean)}>{t('Save and sync')}</Button></div></Modal>
 }

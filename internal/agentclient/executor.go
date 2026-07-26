@@ -65,8 +65,6 @@ func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, 
 		result, err = e.applyMCP(ctx, task.Payload)
 	case "adopt_skill":
 		result, err = e.adoptSkill(ctx, task.ID, task.Payload)
-	case "sync_shared":
-		result, err = e.syncShared(ctx, task.Payload)
 	default:
 		err = fmt.Errorf("unsupported task kind %q", task.Kind)
 	}
@@ -80,27 +78,6 @@ func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, 
 		return "failed", marshalResult(map[string]any{"error": err.Error(), "code": "history_write_failed"})
 	}
 	return status, encoded
-}
-
-func (e *Executor) syncShared(ctx context.Context, raw json.RawMessage) (any, error) {
-	var payload protocol.SyncSharedPayload
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, err
-	}
-	if payload.SourceID == "" || payload.SourceName == "" {
-		return nil, errors.New("shared sync task requires sourceId and sourceName")
-	}
-	key, err := base64.StdEncoding.DecodeString(e.config.TaskKey)
-	if err != nil || len(key) != 32 {
-		return nil, errors.New("agent task key is invalid")
-	}
-	reconciler := runtimeadapter.SharedReconciler{DataDir: e.config.DataDir, Sources: e.config.SharedSources, FingerprintKey: key}
-	return reconciler.Reconcile(ctx, runtimeadapter.SharedSyncRequest{
-		SourceName:                payload.SourceName,
-		Scopes:                    payload.Scopes,
-		DryRun:                    payload.DryRun,
-		ExpectedSourceFingerprint: payload.ExpectedSourceFingerprint,
-	})
 }
 
 func (e *Executor) verify(task domain.AgentTask) error {
@@ -131,20 +108,9 @@ func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, e
 			return nil, err
 		}
 	}
-	deployer := runtimeadapter.Deployer{DataDir: e.config.DataDir, Paths: e.config.Paths, SharedSources: e.config.SharedSources}
-	result, err := deployer.Deploy(runtimeadapter.DeployRequest{Runtime: request.Runtime, SourceName: request.SourceName, SkillSlug: request.SkillSlug, VersionID: request.VersionID, SHA256: request.SHA256, Enabled: request.Enabled, Artifact: artifact})
-	if err != nil || request.Runtime != domain.RuntimeShared {
-		return protocol.DeploySkillResult{ActualHash: result.ActualHash, ActualEnabled: request.Enabled, BackupPath: result.BackupPath, Changed: result.Changed}, err
-	}
-	key, decodeErr := base64.StdEncoding.DecodeString(e.config.TaskKey)
-	if decodeErr != nil || len(key) != 32 {
-		return nil, errors.New("agent task key is invalid")
-	}
-	syncResult, syncErr := (runtimeadapter.SharedReconciler{DataDir: e.config.DataDir, Sources: e.config.SharedSources, FingerprintKey: key}).Reconcile(ctx, runtimeadapter.SharedSyncRequest{SourceName: request.SourceName, Scopes: []string{"skills"}})
-	if syncErr != nil {
-		return nil, syncErr
-	}
-	return map[string]any{"actualHash": result.ActualHash, "actualEnabled": request.Enabled, "backupPath": result.BackupPath, "changed": result.Changed, "sharedSync": syncResult}, nil
+	deployer := runtimeadapter.Deployer{DataDir: e.config.DataDir, Paths: e.config.Paths}
+	result, err := deployer.Deploy(runtimeadapter.DeployRequest{Runtime: request.Runtime, SkillSlug: request.SkillSlug, VersionID: request.VersionID, SHA256: request.SHA256, Enabled: request.Enabled, Artifact: artifact})
+	return protocol.DeploySkillResult{ActualHash: result.ActualHash, ActualEnabled: request.Enabled, BackupPath: result.BackupPath, Changed: result.Changed}, err
 }
 
 func (e *Executor) applyMCP(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -152,11 +118,6 @@ func (e *Executor) applyMCP(ctx context.Context, raw json.RawMessage) (any, erro
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, err
 	}
-	var profile map[string]any
-	if err := json.Unmarshal(raw, &profile); err != nil {
-		return nil, err
-	}
-	runtimeKind := request.Runtime
 	resolver := func(ctx context.Context, id string) (string, error) {
 		body, err := e.fetchBytes(ctx, "/agent/v1/secrets/"+id, 1<<20)
 		if err != nil {
@@ -170,7 +131,7 @@ func (e *Executor) applyMCP(ctx context.Context, raw json.RawMessage) (any, erro
 		}
 		return response.Value, nil
 	}
-	return runtimeadapter.ApplyMCP(ctx, e.config.Paths, e.config.DataDir, runtimeKind, profile, resolver)
+	return runtimeadapter.ApplyMCP(ctx, e.config.Paths, e.config.DataDir, request, resolver)
 }
 
 func taskPayloadDigest(kind string, payload json.RawMessage) (string, error) {

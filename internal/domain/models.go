@@ -24,7 +24,7 @@ func IsConsumerRuntime(kind string) bool {
 }
 
 func IsSkillRuntime(kind string) bool {
-	return IsConsumerRuntime(kind) || kind == RuntimeShared
+	return IsConsumerRuntime(kind)
 }
 
 func IsMCPRuntime(kind string) bool {
@@ -94,6 +94,7 @@ type InventoryRuntime struct {
 type AgentInventory struct {
 	Runtimes      []InventoryRuntime      `json:"runtimes"`
 	SharedSources []SharedSourceInventory `json:"sharedSources,omitempty"`
+	MCPImports    []MCPDescriptor         `json:"mcpImports,omitempty"`
 }
 
 type MCPDescriptor struct {
@@ -107,6 +108,12 @@ type MCPDescriptor struct {
 	HeaderKeys        []string `json:"headerKeys,omitempty"`
 	ConfigFingerprint string   `json:"configFingerprint"`
 	SecretFingerprint string   `json:"secretFingerprint,omitempty"`
+	ImportSource      string   `json:"importSource,omitempty"`
+	ImportSourceName  string   `json:"importSourceName,omitempty"`
+	ImportRuntime     string   `json:"importRuntime,omitempty"`
+	ImportEnabled     bool     `json:"importEnabled,omitempty"`
+	TargetRuntimes    []string `json:"targetRuntimes,omitempty"`
+	ProfileTags       []string `json:"profileTags,omitempty"`
 }
 
 type SharedSourceInventory struct {
@@ -182,14 +189,6 @@ type SharedMCPBindingInventory struct {
 	LastError          string   `json:"lastError,omitempty"`
 }
 
-type SharedSyncResult struct {
-	Source    SharedSourceInventory `json:"source"`
-	Changed   bool                  `json:"changed"`
-	DryRun    bool                  `json:"dryRun"`
-	Actions   []string              `json:"actions,omitempty"`
-	Conflicts []string              `json:"conflicts,omitempty"`
-}
-
 type MCPCaptureRequest struct {
 	Token    string `json:"token"`
 	Runtime  string `json:"runtime"`
@@ -204,22 +203,22 @@ type AgentMessage struct {
 }
 
 type AgentTask struct {
-	ID                  string          `json:"id"`
-	Kind                string          `json:"kind"`
-	Payload             json.RawMessage `json:"payload"`
-	Signature           string          `json:"signature"`
-	Attempt             int             `json:"attempt"`
-	Transport           string          `json:"transport,omitempty"`
-	LeaseOwner          string          `json:"leaseOwner,omitempty"`
-	LeaseExpiresAt      *time.Time      `json:"leaseExpiresAt,omitempty"`
-	StartedAt           *time.Time      `json:"startedAt,omitempty"`
-	FinishedAt          *time.Time      `json:"finishedAt,omitempty"`
-	CancelRequestedAt   *time.Time      `json:"cancelRequestedAt,omitempty"`
-	TargetKind          string          `json:"targetKind,omitempty"`
-	TargetID            string          `json:"targetId,omitempty"`
-	TargetGeneration    int64           `json:"targetGeneration,omitempty"`
-	SemanticKey         string          `json:"semanticKey,omitempty"`
-	CreatedAt           time.Time       `json:"createdAt"`
+	ID                string          `json:"id"`
+	Kind              string          `json:"kind"`
+	Payload           json.RawMessage `json:"payload"`
+	Signature         string          `json:"signature"`
+	Attempt           int             `json:"attempt"`
+	Transport         string          `json:"transport,omitempty"`
+	LeaseOwner        string          `json:"leaseOwner,omitempty"`
+	LeaseExpiresAt    *time.Time      `json:"leaseExpiresAt,omitempty"`
+	StartedAt         *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt        *time.Time      `json:"finishedAt,omitempty"`
+	CancelRequestedAt *time.Time      `json:"cancelRequestedAt,omitempty"`
+	TargetKind        string          `json:"targetKind,omitempty"`
+	TargetID          string          `json:"targetId,omitempty"`
+	TargetGeneration  int64           `json:"targetGeneration,omitempty"`
+	SemanticKey       string          `json:"semanticKey,omitempty"`
+	CreatedAt         time.Time       `json:"createdAt"`
 }
 
 type Job struct {

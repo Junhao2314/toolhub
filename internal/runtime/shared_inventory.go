@@ -133,8 +133,16 @@ func ScanSharedSource(source SharedSourceConfig, dataDir string, fingerprintKey 
 		inventory.LastError = appendError(inventory.LastError, errorFromString(item.LastError))
 	}
 	for _, skill := range inventory.Skills {
-		inventory.Status = mergeState(inventory.Status, skill.State)
-		inventory.LastError = appendError(inventory.LastError, errorFromString(skill.LastError))
+		state := skill.State
+		if state == "blocked" {
+			// One unscannable Skill must not escalate the whole source to blocked; the
+			// per-skill state and reason stay visible on its own row.
+			state = "drift"
+		}
+		inventory.Status = mergeState(inventory.Status, state)
+		if skill.LastError != "" {
+			inventory.LastError = appendError(inventory.LastError, fmt.Errorf("%s: %s", skill.Name, skill.LastError))
+		}
 	}
 	if skillErr != nil || manifestErr != nil {
 		inventory.Status = mergeState(inventory.Status, "missing")

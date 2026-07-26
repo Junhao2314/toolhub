@@ -1,16 +1,17 @@
-import { Activity, FileJson, Plus, RefreshCw, ServerCog, TestTube2, ToggleLeft, ToggleRight } from 'lucide-react'
-import { useState } from 'react'
+import { Activity, FileJson, Plus, RefreshCw, ServerCog, ToggleLeft, ToggleRight } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { api, type Dict } from '../api/client'
 import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
 import { useData } from '../hooks/useData'
 import { useI18n } from '../i18n'
 
-interface MCPServer extends Dict { id: string; name: string; runtimeName: string; transport: string; command: string; url: string; enabled: boolean; healthStatus: string; source: string; authority: string; credentialMode: string; sharedSourceId?: string; envRefs: Record<string, string>; headerRefs: Record<string, string>; bindingCount: number; hasDrift: boolean }
-interface Profile { id: string; name: string; description: string; enabled: boolean; source: string; serverIds: string[] }
+interface MCPOrigin { importSource?: string; importSourceName?: string; serverName?: string; managedRuntime?: string }
+interface MCPServer extends Dict { id: string; name: string; runtimeName: string; transport: string; command: string; url: string; enabled: boolean; healthStatus: string; source: string; origin?: MCPOrigin; authority: string; credentialMode: string; sharedSourceId?: string; envRefs: Record<string, string>; headerRefs: Record<string, string>; bindingCount: number; hasDrift: boolean }
+interface Profile { id: string; name: string; description: string; enabled: boolean; source: string; origin?: MCPOrigin; serverIds: string[] }
 interface Deployment { id: string; profileName: string; source: string; nodeName: string; runtime: string; state: string; lastError: string; bindings: { id: string; serverName: string; missing: boolean; drift: boolean }[] }
-interface SharedSource { id: string; nodeName: string; name: string; mode: string; autoSync: boolean; status: string; lastError: string; mcpServers: { id: string; name: string; transport: string; enabled: boolean; authority: string; credentialMode: string; envKeys: string[]; headerKeys: string[] }[]; consumers: { kind: string; inheritsFrom: string; state: string; expectedFingerprint: string; actualFingerprint: string; lastError: string; mcpBindings: { serverName: string; enabled: boolean; missing: boolean; drift: boolean }[] }[] }
+interface SharedSource { id: string; nodeName: string; name: string; mode: string; autoSync: boolean; status: string; lastError: string; blockedSkills: { name: string; path: string; error: string }[]; mcpServers: { id: string; name: string; transport: string; enabled: boolean; authority: string; credentialMode: string; envKeys: string[]; headerKeys: string[] }[]; consumers: { kind: string; inheritsFrom: string; state: string; expectedFingerprint: string; actualFingerprint: string; lastError: string; mcpBindings: { serverName: string; enabled: boolean; missing: boolean; drift: boolean }[] }[] }
 
-export default function MCP({ canSync }: { canSync: boolean }) {
+export default function MCP() {
   const { t } = useI18n()
   const [tab, setTab] = useState('Servers')
   const [modal, setModal] = useState<'server' | 'profile' | null>(null)
@@ -21,13 +22,12 @@ export default function MCP({ canSync }: { canSync: boolean }) {
   }, [])
   const toggle = (server: MCPServer) => api.patch(`/mcp/servers/${server.id}`, { enabled: !server.enabled }).then(state.reload).catch((reason: Error) => setError(reason.message))
   const health = (id: string) => api.post(`/mcp/servers/${id}/health`).then(state.reload).catch((reason: Error) => setError(reason.message))
-  const syncShared = (id: string, dryRun: boolean) => api.post(`/shared-sources/${id}/sync`, { scopes: ['mcp'], dryRun }).then(state.reload).catch((reason: Error) => setError(reason.message))
   const addAction = tab === 'Profiles' ? <Button onClick={() => setModal('profile')}><Plus size={16} />{t('Add profile')}</Button> : tab === 'Servers' ? <Button onClick={() => setModal('server')}><Plus size={16} />{t('Add server')}</Button> : undefined
   return <>
     <PageHeader title={t('MCP')} detail={t('Servers, reusable profiles, health, usage, and runtime distribution.')} actions={<><Button variant="secondary" onClick={state.reload}><RefreshCw size={16} />{t('Refresh')}</Button>{addAction}</>} />
     {error && <ErrorNotice message={error} />}
     <div className="toolbar"><Segments options={['Servers', 'Shared Sources', 'Profiles', 'Deployments']} value={tab} onChange={setTab} /></div>
-    {state.loading ? <Loading label={t('Loading MCP inventory')} /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : tab === 'Servers' ? <ServerTable items={state.data.servers} toggle={toggle} health={health} /> : tab === 'Shared Sources' ? <SharedSourceTable items={state.data.sharedSources} canSync={canSync} sync={syncShared} /> : tab === 'Profiles' ? <ProfileTable items={state.data.profiles} /> : <DeploymentTable items={state.data.deployments} />}
+    {state.loading ? <Loading label={t('Loading MCP inventory')} /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : tab === 'Servers' ? <ServerTable items={state.data.servers} toggle={toggle} health={health} /> : tab === 'Shared Sources' ? <SharedSourceTable items={state.data.sharedSources} /> : tab === 'Profiles' ? <ProfileTable items={state.data.profiles} servers={state.data.servers} saved={state.reload} /> : <DeploymentTable items={state.data.deployments} />}
     {modal === 'server' && <ServerModal close={() => setModal(null)} saved={() => { setModal(null); state.reload() }} />}
     {modal === 'profile' && state.data && <ProfileModal servers={state.data.servers} close={() => setModal(null)} saved={() => { setModal(null); state.reload() }} />}
   </>
@@ -36,18 +36,60 @@ export default function MCP({ canSync }: { canSync: boolean }) {
 function ServerTable({ items, toggle, health }: { items: MCPServer[]; toggle: (item: MCPServer) => void; health: (id: string) => void }) {
   const { t } = useI18n()
   if (!items.length) return <Empty title={t('No MCP servers')} detail={t('Add a stdio, SSE, or Streamable HTTP server.')} />
-  return <div className="table-scroll"><table><thead><tr><th>{t('Server')}</th><th>{t('Transport')}</th><th>{t('Endpoint')}</th><th>{t('Bindings')}</th><th>{t('State')}</th><th /></tr></thead><tbody>{items.map((item) => { const shared = item.authority === 'shared-file'; return <tr key={item.id}><td><strong>{item.name}</strong><small>{shared ? t('Shared-file authority · node-local credentials') : item.source === 'runtime-auto' ? t('Auto-managed · runtime name {name}', { name: item.runtimeName }) : item.source}</small></td><td>{item.transport}</td><td><code>{item.command || item.url}</code></td><td>{item.bindingCount ?? 0}<small>{shared ? t('Credential values stay on the node') : t('{n} encrypted refs', { n: Object.keys(item.envRefs ?? {}).length + Object.keys(item.headerRefs ?? {}).length })}</small></td><td><Status value={item.hasDrift ? 'drift' : item.healthStatus} /></td><td className="row-actions"><IconButton label={shared ? t('Shared-file servers are read-only here') : t('Run health check')} disabled={shared} onClick={() => health(item.id)}><Activity size={16} /></IconButton><IconButton label={shared ? t('Edit the source manifest on the node') : item.enabled ? t('Disable server') : t('Enable server')} disabled={shared} onClick={() => toggle(item)}>{item.enabled ? <ToggleRight size={19} /> : <ToggleLeft size={19} />}</IconButton></td></tr> })}</tbody></table></div>
+  return <div className="table-scroll"><table><thead><tr><th>{t('Server')}</th><th>{t('Transport')}</th><th>{t('Endpoint')}</th><th>{t('Bindings')}</th><th>{t('State')}</th><th /></tr></thead><tbody>{items.map((item) => {
+    const shared = item.authority === 'shared-file'
+    const candidate = item.source === 'shared-import'
+    const imported = item.source === 'mcpm-import' || candidate
+    const conflict = candidate && item.name !== item.runtimeName
+    const sourceName = item.origin?.importSourceName || item.origin?.importSource || item.source
+    const sourceDetail = shared
+      ? t('Observed legacy manifest · node-local credentials')
+      : item.source === 'runtime-auto'
+        ? t('Auto-managed · runtime name {name}', { name: item.runtimeName })
+        : imported
+          ? t('Imported from {source} · runtime name {name}', { source: sourceName, name: item.runtimeName })
+          : item.source
+    const stateValue = item.hasDrift ? 'drift' : conflict ? 'conflict' : candidate && !item.enabled ? 'candidate' : !item.enabled ? 'disabled' : item.healthStatus
+    return <tr key={item.id}><td><strong>{item.name}</strong><small>{sourceDetail}</small>{(candidate || conflict) && <span className="label-row">{candidate && <Status value="candidate" />}{conflict && <Status value="name conflict" />}</span>}</td><td>{item.transport}</td><td><code>{item.command || item.url}</code></td><td>{item.bindingCount ?? 0}<small>{shared ? t('Credential values stay on the node') : t('{n} encrypted refs', { n: Object.keys(item.envRefs ?? {}).length + Object.keys(item.headerRefs ?? {}).length })}</small></td><td><Status value={stateValue} /></td><td className="row-actions"><IconButton label={shared ? t('Shared-file servers are read-only here') : t('Run health check')} disabled={shared} onClick={() => health(item.id)}><Activity size={16} /></IconButton><IconButton label={shared ? t('Legacy manifests are import-only') : item.enabled ? t('Disable server') : t('Enable server')} disabled={shared} onClick={() => toggle(item)}>{item.enabled ? <ToggleRight size={19} /> : <ToggleLeft size={19} />}</IconButton></td></tr>
+  })}</tbody></table></div>
 }
 
-function SharedSourceTable({ items, canSync, sync }: { items: SharedSource[]; canSync: boolean; sync: (id: string, dryRun: boolean) => void }) {
+function SharedSourceTable({ items }: { items: SharedSource[] }) {
   const { t } = useI18n()
   if (!items.length) return <Empty title={t('No shared MCP sources')} detail={t('Configure sharedSources locally on an Agent or allow observed auto-probe.')} />
-  return <div className="shared-source-list">{items.map((source) => <article key={source.id}><header><FileJson size={19} /><span><strong>{source.name}</strong><small>{source.nodeName} · {source.mode} · {source.autoSync ? t('auto-sync on') : t('auto-sync off')}</small></span><Status value={source.status} />{canSync && <div className="row-actions"><IconButton label={t('Dry run MCP render')} onClick={() => sync(source.id, true)}><TestTube2 size={16} /></IconButton><IconButton label={t('Sync MCP render')} disabled={source.mode !== 'managed'} onClick={() => sync(source.id, false)}><RefreshCw size={16} /></IconButton></div>}</header>{source.lastError && <div className="inline-notice">{source.lastError}</div>}<div className="shared-mcp-grid"><section><h3>{t('Manifest servers')}</h3>{source.mcpServers.map((server) => <div key={server.id}><strong>{server.name}</strong><small>{server.transport} · {server.enabled ? t('enabled') : t('disabled')} · {server.credentialMode}</small><small>{t('Env keys: {keys}; header keys: {headers}', { keys: server.envKeys?.join(', ') || '—', headers: server.headerKeys?.join(', ') || '—' })}</small></div>)}</section><section><h3>{t('Consumer render state')}</h3>{source.consumers.map((consumer) => <div key={consumer.kind}><strong>{consumer.kind}{consumer.inheritsFrom ? ` ← ${consumer.inheritsFrom}` : ''}</strong><Status value={consumer.state} /><small>{t('{n} bindings', { n: consumer.mcpBindings?.length ?? 0 })}</small>{consumer.lastError && <small>{consumer.lastError}</small>}</div>)}</section></div></article>)}</div>
+  return <div className="shared-source-list">{items.map((source) => <article key={source.id}><header><FileJson size={19} /><span><strong>{source.name}</strong><small>{source.nodeName} · {t('Read-only import source')}</small></span><Status value={source.status} /></header>{source.lastError && <div className="inline-notice">{source.lastError}</div>}{source.blockedSkills?.length > 0 && <div className="inline-notice">{source.blockedSkills.map((skill) => <div key={skill.name}><strong>{skill.name}</strong> — {skill.error}</div>)}</div>}<div className="shared-mcp-grid"><section><h3>{t('Manifest candidates')}</h3>{source.mcpServers.map((server) => <div key={server.id}><strong>{server.name}</strong><small>{server.transport} · {server.enabled ? t('enabled') : t('disabled')} · {server.credentialMode}</small><small>{t('Env keys: {keys}; header keys: {headers}', { keys: server.envKeys?.join(', ') || '—', headers: server.headerKeys?.join(', ') || '—' })}</small></div>)}</section><section><h3>{t('Observed legacy consumers')}</h3>{source.consumers.map((consumer) => <div key={consumer.kind}><strong>{consumer.kind}{consumer.inheritsFrom ? ` ← ${consumer.inheritsFrom}` : ''}</strong><Status value={consumer.state} /><small>{t('{n} bindings', { n: consumer.mcpBindings?.length ?? 0 })}</small>{consumer.lastError && <small>{consumer.lastError}</small>}</div>)}</section></div></article>)}</div>
 }
 
-function ProfileTable({ items }: { items: Profile[] }) {
+function ProfileTable({ items, servers, saved }: { items: Profile[]; servers: MCPServer[]; saved: () => void }) {
   const { t } = useI18n()
-  return items.length ? <div className="profile-list">{items.map((item) => <article key={item.id}><ServerCog size={20} /><div><strong>{item.name}</strong><p>{item.description || t('No description')}</p></div><span>{t('{n} servers', { n: item.serverIds.length })}</span><Status value={item.enabled ? 'enabled' : 'disabled'} /></article>)}</div> : <Empty title={t('No MCP profiles')} detail={t('Group servers into a reusable runtime profile.')} />
+  const managed = items.filter((item) => {
+    const runtime = item.origin?.managedRuntime
+    return (runtime === 'codex' || runtime === 'claude') && item.name === `toolhub-${runtime}`
+  })
+  const selectable = servers.filter((server) => server.authority !== 'shared-file')
+  const [drafts, setDrafts] = useState<Record<string, string[]>>({})
+  const [saving, setSaving] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => setDrafts(Object.fromEntries(managed.map((profile) => [profile.id, [...profile.serverIds]]))), [items])
+  if (!items.length) return <Empty title={t('No MCP profiles')} detail={t('Group servers into a reusable runtime profile.')} />
+  const selected = (profile: Profile) => drafts[profile.id] ?? profile.serverIds
+  const toggleMembership = (profile: Profile, serverID: string) => setDrafts((current) => {
+    const members = current[profile.id] ?? profile.serverIds
+    return { ...current, [profile.id]: members.includes(serverID) ? members.filter((id) => id !== serverID) : [...members, serverID] }
+  })
+  const saveMembership = (profile: Profile) => {
+    setSaving(profile.id)
+    setError('')
+    api.put(`/mcp/profiles/${profile.id}/servers`, { serverIds: selected(profile) }).then(saved).catch((reason: Error) => setError(reason.message)).finally(() => setSaving(''))
+  }
+  return <><div className="profile-list">{items.map((item) => <article key={item.id}><ServerCog size={20} /><div><strong>{item.name}</strong><p>{item.description || t('No description')}</p></div><span>{t('{n} servers', { n: item.serverIds.length })}</span><Status value={item.enabled ? 'enabled' : 'disabled'} /></article>)}</div>{managed.length > 0 && <><h3>{t('Managed runtime membership')}</h3><div className="inline-notice">{t('Membership changes stay observed until the fixed profile is explicitly deployed.')}</div>{error && <ErrorNotice message={error} />}<div className="table-scroll"><table><thead><tr><th>{t('Server')}</th>{managed.map((profile) => <th key={profile.id}>{profile.name}<small>{profile.origin?.managedRuntime}</small></th>)}</tr></thead><tbody>{selectable.map((server) => <tr key={server.id}><td><strong>{server.name}</strong><small>{server.source}</small></td>{managed.map((profile) => <td key={profile.id}><input type="checkbox" checked={selected(profile).includes(server.id)} disabled={saving !== ''} aria-label={t('Include {server} in {profile}', { server: server.name, profile: profile.name })} onChange={() => toggleMembership(profile, server.id)} /></td>)}</tr>)}</tbody></table></div><div className="modal-actions">{managed.map((profile) => <Button key={profile.id} onClick={() => saveMembership(profile)} disabled={saving !== '' || sameIDs(selected(profile), profile.serverIds)}>{saving === profile.id ? t('Saving {profile}...', { profile: profile.name }) : t('Save {profile}', { profile: profile.name })}</Button>)}</div></>}</>
+}
+
+function sameIDs(left: string[], right: string[]) {
+  if (left.length !== right.length) return false
+  const sortedLeft = [...left].sort()
+  const sortedRight = [...right].sort()
+  return sortedLeft.every((value, index) => value === sortedRight[index])
 }
 
 function DeploymentTable({ items }: { items: Deployment[] }) {

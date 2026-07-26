@@ -122,6 +122,13 @@ func normalizeSharedSource(paths Paths, source SharedSourceConfig) (SharedSource
 	if source.Mode == "" {
 		source.Mode = SharedModeObserved
 	}
+	// Managed shared-source delivery was retired in favor of PostgreSQL-backed
+	// Skill artifacts and mcpm profiles. Older Agent configs degrade safely to
+	// read-only observation instead of preserving a filesystem writer.
+	if source.Mode == SharedModeManaged {
+		source.Mode = SharedModeObserved
+		source.AutoSync = false
+	}
 	if source.Mode != SharedModeObserved && source.Mode != SharedModeManaged {
 		return SharedSourceConfig{}, fmt.Errorf("shared source %q has invalid mode", source.Name)
 	}

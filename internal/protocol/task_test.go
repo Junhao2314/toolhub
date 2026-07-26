@@ -19,19 +19,19 @@ func TestTaskSigningBytesCanonicalizesJSON(t *testing.T) {
 	}
 }
 
-func TestSyncSharedPayloadSigningIsCanonical(t *testing.T) {
-	first := json.RawMessage(`{"sourceName":"root-shared","sourceId":"source-1","scopes":["skills","mcp"],"dryRun":true}`)
-	second := json.RawMessage(`{"dryRun":true,"scopes":["skills","mcp"],"sourceId":"source-1","sourceName":"root-shared"}`)
-	a, err := TaskSigningBytes("task-1", "sync_shared", first)
+func TestApplyMCPPayloadSigningIsCanonical(t *testing.T) {
+	first := json.RawMessage(`{"profileId":"profile-1","mcpmProfile":"toolhub-codex","servers":[{"name":"memory"}],"dryRun":true}`)
+	second := json.RawMessage(`{"dryRun":true,"servers":[{"name":"memory"}],"mcpmProfile":"toolhub-codex","profileId":"profile-1"}`)
+	a, err := TaskSigningBytes("task-1", "apply_mcp", first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := TaskSigningBytes("task-1", "sync_shared", second)
+	b, err := TaskSigningBytes("task-1", "apply_mcp", second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(a) != string(b) {
-		t.Fatalf("sync_shared signing bytes differ: %q != %q", a, b)
+		t.Fatalf("apply_mcp signing bytes differ: %q != %q", a, b)
 	}
 	if len(a) == 0 {
 		t.Fatal("empty signing bytes")

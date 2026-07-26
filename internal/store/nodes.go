@@ -260,7 +260,7 @@ func (s *Store) CreateNodeTaskWithOptions(ctx context.Context, nodeID, jobID, ki
 }
 
 func (s *Store) PendingNodeTasks(ctx context.Context, nodeID string) ([]domain.AgentTask, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,payload,signature,attempt,transport,lease_owner,lease_expires_at,
+	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,payload,signature,attempt,coalesce(transport,''),coalesce(lease_owner,''),lease_expires_at,
 		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at
 		FROM node_tasks
 		WHERE node_id=$1 AND status IN ('pending','delivered','running') AND cancel_requested_at IS NULL
@@ -300,7 +300,7 @@ func (s *Store) ReserveNodeTask(ctx context.Context, nodeID, id, transport, owne
 	now := time.Now().UTC()
 	var task domain.AgentTask
 	var status string
-	err = tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,transport,lease_owner,lease_expires_at,
+	err = tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,coalesce(transport,''),coalesce(lease_owner,''),lease_expires_at,
 		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at,status
 		FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE`, id, nodeID).
 		Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,
@@ -391,15 +391,6 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, atte
 		} else {
 			completedInventory = &inventory
 		}
-	} else if (status == "succeeded" || status == "failed") && kind == "sync_shared" {
-		var task protocol.SyncSharedPayload
-		if json.Unmarshal(payload, &task) != nil || task.SourceID == "" {
-			finalStatus = "failed"
-			finalResult = marshalTaskError("shared sync task payload is invalid", "invalid_payload")
-		} else if err := projectSharedSyncResultTx(ctx, tx, nodeID, task.SourceID, finalResult, finalStatus == "succeeded"); err != nil {
-			finalStatus = "failed"
-			finalResult = marshalTaskError(err.Error(), "projection_failed")
-		}
 	} else if kind == "deploy_skill" {
 		outcome, projectedStatus, projectedResult, err := completeDeploySkillTx(ctx, tx, payload, finalStatus, finalResult)
 		if err != nil {
@@ -417,7 +408,9 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, atte
 			DiscoveryID string `json:"discoveryId"`
 		}
 		if json.Unmarshal(payload, &task) == nil {
-			_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET managed=true,missing=false,drift=false,adoption_status='adopted',adoption_error='',updated_at=now() WHERE id=$1", task.DiscoveryID)
+			_, _ = tx.Exec(ctx, `UPDATE skill_discoveries SET managed=runtime_kind<>'shared',missing=false,drift=false,
+				adoption_status=CASE WHEN runtime_kind='shared' THEN 'imported' ELSE 'adopted' END,
+				adoption_error='',updated_at=now() WHERE id=$1`, task.DiscoveryID)
 		}
 	} else if finalStatus == "failed" {
 		var task struct {
@@ -457,7 +450,7 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, atte
 
 func nodeTaskBySemanticKeyTx(ctx context.Context, tx pgx.Tx, semanticKey string) (domain.AgentTask, error) {
 	var task domain.AgentTask
-	err := tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,transport,lease_owner,lease_expires_at,
+	err := tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,coalesce(transport,''),coalesce(lease_owner,''),lease_expires_at,
 		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at
 		FROM node_tasks WHERE semantic_key=$1 AND status IN ('pending','delivered','running') ORDER BY created_at LIMIT 1`, semanticKey).
 		Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,

@@ -25,7 +25,10 @@ func TestSharedSourceProjectionAndHeaderAuthorizationIntegration(t *testing.T) {
 		t.Fatal("integration test database URL must target toolhub_discovery_test")
 	}
 	ctx := context.Background()
-	cipher, err := security.NewCipher(bytes.Repeat([]byte{6}, 32))
+	// Fixed managed MCP profiles are global across integration cases in the
+	// shared test database, so use the same deterministic key as the mcpm import
+	// integration test that may already own toolhub-codex/toolhub-claude.
+	cipher, err := security.NewCipher(bytes.Repeat([]byte{4}, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,20 +82,6 @@ func TestSharedSourceProjectionAndHeaderAuthorizationIntegration(t *testing.T) {
 	if err := st.pool.QueryRow(ctx, `SELECT ss.id::text,ms.id::text FROM shared_sources ss JOIN mcp_servers ms ON ms.shared_source_id=ss.id WHERE ss.node_id=$1 AND ss.name=$2`, nodeID, source.Name).Scan(&sourceID, &sharedServerID); err != nil {
 		t.Fatal(err)
 	}
-	task, err := st.CreateNodeTask(ctx, nodeID, "", "sync_shared", protocol.SyncSharedPayload{SourceID: sourceID, SourceName: source.Name, Scopes: []string{"skills", "mcp"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	source.SourceFingerprint = strings.Repeat("d", 64)
-	resultJSON, _ := json.Marshal(domain.SharedSyncResult{Source: source, Changed: true})
-	if err := st.CompleteTask(ctx, nodeID, task.ID, "succeeded", resultJSON); err != nil {
-		t.Fatal(err)
-	}
-	var projectedFingerprint string
-	var synced bool
-	if err := st.pool.QueryRow(ctx, "SELECT source_fingerprint,last_sync_at IS NOT NULL FROM shared_sources WHERE id=$1", sourceID).Scan(&projectedFingerprint, &synced); err != nil || projectedFingerprint != source.SourceFingerprint || !synced {
-		t.Fatalf("shared task result was not projected: fingerprint=%q synced=%v err=%v", projectedFingerprint, synced, err)
-	}
 	name := "renamed"
 	if err := st.UpdateMCPServer(ctx, sharedServerID, MCPServerPatch{Name: name}); !errors.Is(err, ErrSourceFileAuthoritative) {
 		t.Fatalf("shared-file update error = %v", err)
@@ -114,8 +103,8 @@ func TestSharedSourceProjectionAndHeaderAuthorizationIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SetMCPDeployments(ctx, profileID, adminID, []MCPDeploymentTarget{{NodeID: nodeID, Runtime: domain.RuntimeCodex, Enabled: true}}, false); err != nil {
-		t.Fatal(err)
+	if _, err := st.SetMCPDeployments(ctx, profileID, adminID, []MCPDeploymentTarget{{NodeID: nodeID, Runtime: domain.RuntimeCodex, Enabled: true}}, false); !errors.Is(err, ErrManagedMCPProfile) {
+		t.Fatalf("custom MCP profile deployment error = %v", err)
 	}
 	var envRefs, headerRefs map[string]string
 	var envJSON, headerJSON []byte
@@ -126,6 +115,47 @@ func TestSharedSourceProjectionAndHeaderAuthorizationIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := json.Unmarshal(headerJSON, &headerRefs); err != nil {
+		t.Fatal(err)
+	}
+	legacyDeploymentID := uuid.NewString()
+	if _, err := st.pool.Exec(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,desired_hash,state)
+		VALUES($1,$2,$3,'codex',true,'legacy-arbitrary-profile','pending')`, legacyDeploymentID, profileID, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := st.PendingMCPDeployments(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range pending {
+		if item.DeploymentID == legacyDeploymentID {
+			t.Fatal("legacy arbitrary MCP deployment remained dispatchable")
+		}
+	}
+	if _, err := st.AgentSecretValue(ctx, nodeID, envRefs["AUTH"]); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("legacy arbitrary MCP deployment authorized a secret: %v", err)
+	}
+	tx, err := st.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managedProfileID, err := ensureManagedMCPProfileTx(ctx, tx, domain.RuntimeCodex, nodeID)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetMCPProfileServers(ctx, managedProfileID, []string{sharedServerID}); !errors.Is(err, ErrSourceFileAuthoritative) {
+		t.Fatalf("shared-file managed membership error = %v", err)
+	}
+	if err := st.SetMCPProfileServers(ctx, managedProfileID, []string{centralID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetMCPDeployments(ctx, managedProfileID, adminID, []MCPDeploymentTarget{{NodeID: nodeID, Runtime: domain.RuntimeClaude, Enabled: true}}, false); !errors.Is(err, ErrMCPProfileRuntime) {
+		t.Fatalf("mismatched managed MCP profile error = %v", err)
+	}
+	if _, err := st.SetMCPDeployments(ctx, managedProfileID, adminID, []MCPDeploymentTarget{{NodeID: nodeID, Runtime: domain.RuntimeCodex, Enabled: true}}, false); err != nil {
 		t.Fatal(err)
 	}
 	otherNodeID, _ := enrollTestNode(t, st, adminID, "other-node-"+uuid.NewString())

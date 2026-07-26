@@ -76,6 +76,7 @@ class ToolHubClient {
   list<T>(path: string): Promise<{ items: T[] }> { return this.request(path) }
   get<T>(path: string): Promise<T> { return this.request(path) }
   post<T>(path: string, body: unknown = {}): Promise<T> { return this.request(path, { method: 'POST', body: JSON.stringify(body) }) }
+  put<T>(path: string, body: unknown): Promise<T> { return this.request(path, { method: 'PUT', body: JSON.stringify(body) }) }
   patch<T>(path: string, body: unknown): Promise<T> { return this.request(path, { method: 'PATCH', body: JSON.stringify(body) }) }
   delete(path: string): Promise<void> { return this.request(path, { method: 'DELETE' }) }
 

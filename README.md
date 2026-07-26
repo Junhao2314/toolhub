@@ -7,7 +7,7 @@ Licensed under the [MIT License](LICENSE).
 ## What Is Implemented
 
 - Agent-first WSS enrollment, heartbeat, inventory, signed typed tasks, offline queues, retry, cancellation, and pinned SSH/SFTP fallback.
-- Six-hour inventory for Codex, Claude, and Hermes homes, including symlink/protected-Skill reporting, manual Skill adoption, and automatic MCP takeover.
+- Six-hour read-only discovery for Codex, Claude, and Hermes homes, including symlink/protected-Skill reporting, explicit Skill adoption/import, and observed MCP baselines that require fixed-profile deployment.
 - Immutable Skill artifacts with canonical SHA-256, source commit, provenance, ZIP/Git path safety, review, target matrix, update approval, sync, and per-node rollback.
 - SkillsMP search proxy with rate-limit messaging and fixed-commit Git import; OpenAI-compatible structured recommendations never install automatically.
 - MCP server/profile/deployment management with automatic first-seen baselines, encrypted one-time secret capture, drift detection, native `mcpm` preference, structured fallback patches, and atomic backups.
@@ -55,11 +55,11 @@ sudo toolhub-agent enroll \
 sudo systemctl enable --now toolhub-agent
 ```
 
-The unit keeps the home tree read-only except for the configured user's `.codex`, `.claude`, and `.hermes` runtime directories, which reconciliation must update. If the Agent manages another user's home, set the service `User=` and enrollment `--home` consistently (or add equivalent `ReadWritePaths=` overrides).
+The unit keeps the system read-only but allows writes to the configured home because atomic replacement of top-level files such as `~/.claude.json` requires creating a same-directory temporary file. If the Agent manages another user's home, set the service `User=` and enrollment `--home` consistently (or add equivalent `ReadWritePaths=` overrides).
 
 Service templates are under `packaging/systemd`, `packaging/launchd`, and `packaging/windows`. Enrollment immediately scans existing runtime homes. Existing Skills remain read-only until an administrator adopts one from the Discovered view; the Agent writes the management marker only after the backend imports and verifies the snapshot.
 
-Existing MCP servers are automatically taken over. The Agent sends normalized commands, arguments, URLs, environment key names, and per-node HMAC fingerprints through the authenticated channel. It uploads plaintext environment values only when the backend issues a short-lived one-time capture token. The values are encrypted immediately and never enter browser APIs, inventory JSON, jobs, audit metadata, or logs. The first scan is a no-rewrite baseline; later local edits or deletion are drift, and ToolHub restores central desired state during reconciliation.
+Existing MCP servers are scanned and imported. The Agent sends normalized commands, arguments, URLs, key names, import provenance, and per-node HMAC fingerprints through the authenticated channel. It uploads plaintext values only when the backend issues a short-lived one-time capture token; values are encrypted immediately and never enter browser APIs, inventory JSON, jobs, audit metadata, or logs. mcpm discovery seeds fixed `toolhub-codex` and `toolhub-claude` profiles in an observed/no-write state. After an explicit deployment, ToolHub writes the node-local mcpm registry plus one native relay anchor and treats later edits or deletion as drift.
 
 Nodes also provides an SSH fallback form. It accepts `user@host`, one pinned `known_hosts` line, and a private key. The key is encrypted before storage; fallback permits only signed task upload and the fixed Agent task runner. Once the project-host inventory is online, its discovered runtimes are preselected in the Skill target matrix as the default single-node canary.
 

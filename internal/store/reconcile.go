@@ -6,26 +6,25 @@ import (
 )
 
 type SkillDeploymentTask struct {
-	DeploymentID     string
-	NodeID           string
-	Runtime          string
-	SharedSourceName string
-	SkillSlug        string
-	SkillID          string
-	SourceID         string
-	NodeGroup        string
-	VersionID        string
-	SHA256           string
-	Enabled          bool
+	DeploymentID      string
+	NodeID            string
+	Runtime           string
+	SkillSlug         string
+	SkillID           string
+	SourceID          string
+	NodeGroup         string
+	VersionID         string
+	SHA256            string
+	Enabled           bool
 	DesiredGeneration int64
 }
 
 func (s *Store) PendingSkillDeployments(ctx context.Context) ([]SkillDeploymentTask, error) {
-	rows, err := s.pool.Query(ctx, `SELECT d.id::text,d.node_id::text,d.runtime_kind,coalesce(shared_source.name,''),s.slug,s.id::text,coalesce(s.source_id::text,''),coalesce(n.labels->>'group',''),d.desired_version_id::text,v.content_sha256,d.desired_enabled,d.desired_generation
+	rows, err := s.pool.Query(ctx, `SELECT d.id::text,d.node_id::text,d.runtime_kind,s.slug,s.id::text,coalesce(s.source_id::text,''),coalesce(n.labels->>'group',''),d.desired_version_id::text,v.content_sha256,d.desired_enabled,d.desired_generation
 		FROM deployments d JOIN skills s ON s.id=d.skill_id JOIN skill_versions v ON v.id=d.desired_version_id
 		JOIN nodes n ON n.id=d.node_id
-		LEFT JOIN LATERAL (SELECT ss.name FROM shared_sources ss WHERE ss.node_id=d.node_id AND ss.mode='managed' AND ss.status<>'missing' ORDER BY ss.name LIMIT 1) shared_source ON d.runtime_kind='shared'
-		WHERE d.state IN ('pending','drift','failed','rolling_back') AND v.approved_at IS NOT NULL AND n.archived_at IS NULL`)
+		WHERE d.state IN ('pending','drift','failed','rolling_back') AND d.runtime_kind<>'shared'
+		AND v.approved_at IS NOT NULL AND n.archived_at IS NULL`)
 	if err != nil {
 		return nil, err
 	}
@@ -33,7 +32,7 @@ func (s *Store) PendingSkillDeployments(ctx context.Context) ([]SkillDeploymentT
 	var result []SkillDeploymentTask
 	for rows.Next() {
 		var item SkillDeploymentTask
-		if err := rows.Scan(&item.DeploymentID, &item.NodeID, &item.Runtime, &item.SharedSourceName, &item.SkillSlug, &item.SkillID, &item.SourceID, &item.NodeGroup, &item.VersionID, &item.SHA256, &item.Enabled, &item.DesiredGeneration); err != nil {
+		if err := rows.Scan(&item.DeploymentID, &item.NodeID, &item.Runtime, &item.SkillSlug, &item.SkillID, &item.SourceID, &item.NodeGroup, &item.VersionID, &item.SHA256, &item.Enabled, &item.DesiredGeneration); err != nil {
 			return nil, err
 		}
 		result = append(result, item)
@@ -42,7 +41,10 @@ func (s *Store) PendingSkillDeployments(ctx context.Context) ([]SkillDeploymentT
 }
 
 func (s *Store) PendingMCPDeploymentIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx, "SELECT id::text FROM mcp_deployments WHERE state IN ('pending','drift','failed') ORDER BY updated_at")
+	rows, err := s.pool.Query(ctx, `SELECT d.id::text FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id
+		WHERE d.state IN ('pending','drift','failed') AND d.runtime_kind IN ('codex','claude')
+		AND p.source='toolhub' AND p.name='toolhub-'||d.runtime_kind AND p.origin->>'managedRuntime'=d.runtime_kind
+		ORDER BY d.updated_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -67,8 +69,10 @@ type MCPDeploymentRef struct {
 
 func (s *Store) PendingMCPDeployments(ctx context.Context) ([]MCPDeploymentRef, error) {
 	rows, err := s.pool.Query(ctx, `SELECT d.id::text,d.node_id::text,d.profile_id::text,coalesce(n.labels->>'group','')
-		FROM mcp_deployments d JOIN nodes n ON n.id=d.node_id
-		WHERE d.state IN ('pending','drift','failed') AND n.archived_at IS NULL ORDER BY d.updated_at`)
+		FROM mcp_deployments d JOIN nodes n ON n.id=d.node_id JOIN mcp_profiles p ON p.id=d.profile_id
+		WHERE d.state IN ('pending','drift','failed') AND d.runtime_kind IN ('codex','claude') AND n.archived_at IS NULL
+		AND p.source='toolhub' AND p.name='toolhub-'||d.runtime_kind AND p.origin->>'managedRuntime'=d.runtime_kind
+		ORDER BY d.updated_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -95,8 +99,7 @@ type Schedule struct {
 func (s *Store) Schedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.pool.Query(ctx, `SELECT 'update_check',scope_type,scope_id,schedule,timezone FROM update_policies WHERE enabled
 		UNION ALL SELECT 'sync',scope_type,scope_id,schedule,timezone FROM sync_policies WHERE enabled
-		UNION ALL SELECT 'mcp_sync',scope_type,scope_id,schedule,timezone FROM sync_policies WHERE enabled AND scope_type IN ('global','node_group')
-		UNION ALL SELECT 'shared_sync',scope_type,scope_id,schedule,timezone FROM sync_policies WHERE enabled AND scope_type IN ('global','node_group')`)
+		UNION ALL SELECT 'mcp_sync',scope_type,scope_id,schedule,timezone FROM sync_policies WHERE enabled AND scope_type IN ('global','node_group')`)
 	if err != nil {
 		return nil, err
 	}
