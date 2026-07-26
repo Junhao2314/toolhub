@@ -2,7 +2,7 @@
 
 Date: 2026-07-26
 
-Status: implementation complete; managed rollout pending operator approval
+Status: implementation complete; primary Claude/Codex managed rollout complete; optional consumers remain opt-in
 
 ## Execution record
 
@@ -10,9 +10,10 @@ Status: implementation complete; managed rollout pending operator approval
 - Default shared-source topology is optimized for the management platform's primary consumers: Claude and Codex are configured by default; Hermes, Grok, and OpenClaw remain supported as explicit optional consumers.
 - Focused and full Go tests, race tests, vet, Web typecheck/build/audit, OpenAPI YAML parsing, and Compose configuration validation passed.
 - Migration 004 was validated against both an empty isolated PostgreSQL 16 database and an isolated database preloaded with migrations 001/002/003; store integration tests passed on both paths.
-- Live-server validation used an observed-only temporary Agent config/data directory and `sync-shared --dry-run`. It detected 7 enabled and 2 disabled shared MCP servers, preserved Hermes `task-trellis` and `acemcp`, and made no live configuration or permission changes.
-- Managed rollout remains blocked until an operator reviews the locally owned Hermes `grok-search` conflict, decides how to handle the package-invalid `vibe` source entry, takes rollout backups, and explicitly changes the shared manifest from mode `0644` to `0600`.
-- The live Agent config was not edited, managed mode/auto-sync were not enabled, and the Docker control plane/database were not migrated or switched.
+- Live validation first ran observed/dry-run reconciliation, then backed up the Agent config, shared manifest, and Claude settings under `/var/lib/toolhub-agent/backups/shared-rollout-20260726-primary/`.
+- The live Agent now has an explicit `root-shared` source in `managed` mode with `autoSync: false` and only Claude/Codex consumers. The manifest is `0600`; MCP and Skill reconciliation completed with zero conflicts, and both consumers report `in_sync` on the follow-up dry-run.
+- Hermes `task-trellis`, `acemcp`, and its local MCP configuration were not touched. The source-level warning for the package-invalid `vibe` Skill remains visible and is skipped safely; optional Hermes/Grok/OpenClaw rollout is intentionally deferred.
+- The control-plane Docker image was rebuilt to the same source revision before reconnecting the Agent; `/healthz` is healthy and the Agent service is active.
 
 This plan supersedes the ownership assumption in plans/2026-07-26-runtime-discovery-auto-mcp-github.md for nodes that opt into shared-source mode. The existing ToolHub-managed behavior remains available for other nodes. In shared-source mode, the filesystem source is authoritative and PostgreSQL is an indexed, redacted control-plane mirror.
 
