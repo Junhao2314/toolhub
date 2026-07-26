@@ -33,7 +33,7 @@ func ApplyMCP(ctx context.Context, paths Paths, dataDir, runtimeKind string, pro
 		}
 		config := map[string]any{}
 		for key, value := range server {
-			if key != "id" && key != "name" && key != "envRefs" && key != "overrides" {
+			if key != "id" && key != "name" && key != "envRefs" && key != "headerRefs" && key != "overrides" {
 				config[key] = value
 			}
 		}
@@ -49,6 +49,20 @@ func ApplyMCP(ctx context.Context, paths Paths, dataDir, runtimeKind string, pro
 			}
 		}
 		config["env"] = environment
+		headers := map[string]any{}
+		if refs, ok := server["headerRefs"].(map[string]any); ok {
+			for headerName, rawID := range refs {
+				secretID, _ := rawID.(string)
+				value, err := resolve(ctx, secretID)
+				if err != nil {
+					return nil, fmt.Errorf("resolve MCP header reference: %w", err)
+				}
+				headers[headerName] = value
+			}
+		}
+		if len(headers) > 0 {
+			config["headers"] = headers
+		}
 		resolved[name] = config
 	}
 	payload := map[string]any{"mcpServers": resolved}
@@ -96,8 +110,12 @@ func mcpConfigPath(home, runtimeKind string) (string, string) {
 		return filepath.Join(home, ".codex", "config.toml"), "toml"
 	case "claude":
 		return filepath.Join(home, ".claude.json"), "json"
+	case "grok":
+		return filepath.Join(home, ".claude.json"), "json"
 	case "hermes":
 		return filepath.Join(home, ".hermes", "config.yaml"), "yaml"
+	case "openclaw":
+		return filepath.Join(home, ".openclaw", "workspace", "config", "mcporter.json"), "json"
 	default:
 		return "", ""
 	}

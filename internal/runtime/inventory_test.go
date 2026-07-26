@@ -33,7 +33,7 @@ TOKEN = "codex-secret"
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(scan.Runtimes) != 3 {
+	if len(scan.Runtimes) != 5 {
 		t.Fatalf("runtime count = %d", len(scan.Runtimes))
 	}
 	encoded, err := json.Marshal(scan.Runtimes)
@@ -46,6 +46,12 @@ TOKEN = "codex-secret"
 		}
 	}
 	for _, runtime := range scan.Runtimes {
+		if runtime.Kind == "grok" || runtime.Kind == "openclaw" {
+			if len(runtime.MCPServers) != 0 {
+				t.Fatalf("unexpected %s descriptors: %+v", runtime.Kind, runtime.MCPServers)
+			}
+			continue
+		}
 		if len(runtime.MCPServers) != 1 || runtime.MCPServers[0].ConfigFingerprint == "" || runtime.MCPServers[0].SecretFingerprint == "" {
 			t.Fatalf("unexpected %s descriptor: %+v", runtime.Kind, runtime.MCPServers)
 		}

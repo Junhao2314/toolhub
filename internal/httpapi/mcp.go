@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -45,6 +46,10 @@ func (a *API) updateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.store.UpdateMCPServer(r.Context(), chi.URLParam(r, "id"), input); err != nil {
+		if errors.Is(err, store.ErrSourceFileAuthoritative) {
+			handleStoreError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "mcp_update_failed", err.Error())
 		return
 	}
@@ -71,6 +76,10 @@ func (a *API) createMCPProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := a.store.CreateMCPProfile(r.Context(), input.Name, input.Description, principalFrom(r.Context()).ID, input.ServerIDs)
 	if err != nil {
+		if errors.Is(err, store.ErrSourceFileAuthoritative) {
+			handleStoreError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "mcp_profile_failed", err.Error())
 		return
 	}

@@ -26,9 +26,11 @@ type Paths struct {
 
 func DefaultPaths(home string) Paths {
 	return Paths{Home: home, RuntimeRoots: map[string]string{
-		"codex":  filepath.Join(home, ".codex", "skills"),
-		"claude": filepath.Join(home, ".claude", "skills"),
-		"hermes": filepath.Join(home, ".hermes", "skills"),
+		domain.RuntimeCodex:    filepath.Join(home, ".codex", "skills"),
+		domain.RuntimeClaude:   filepath.Join(home, ".claude", "skills"),
+		domain.RuntimeHermes:   filepath.Join(home, ".hermes", "skills"),
+		domain.RuntimeGrok:     filepath.Join(home, ".grok", "skills"),
+		domain.RuntimeOpenClaw: filepath.Join(home, ".openclaw", "workspace", "skills"),
 	}}
 }
 
@@ -38,16 +40,26 @@ func ScanAll(paths Paths) ([]domain.InventoryRuntime, error) {
 }
 
 type InventoryScan struct {
-	Runtimes   []domain.InventoryRuntime
-	MCPSecrets map[string]map[string]string
+	Runtimes      []domain.InventoryRuntime
+	SharedSources []domain.SharedSourceInventory
+	MCPSecrets    map[string]MCPSecretValues
+}
+
+type MCPSecretValues struct {
+	Env     map[string]string
+	Headers map[string]string
 }
 
 func ScanAllWithKey(paths Paths, fingerprintKey []byte) (InventoryScan, error) {
+	return ScanAllConfigured(paths, nil, "", fingerprintKey)
+}
+
+func ScanAllConfigured(paths Paths, sharedSources []SharedSourceConfig, dataDir string, fingerprintKey []byte) (InventoryScan, error) {
 	if paths.Home == "" {
 		return InventoryScan{}, errors.New("home directory is required")
 	}
-	result := InventoryScan{MCPSecrets: map[string]map[string]string{}}
-	for _, kind := range []string{"codex", "claude", "hermes"} {
+	result := InventoryScan{MCPSecrets: map[string]MCPSecretValues{}}
+	for _, kind := range []string{domain.RuntimeCodex, domain.RuntimeClaude, domain.RuntimeHermes, domain.RuntimeGrok, domain.RuntimeOpenClaw} {
 		root := paths.RuntimeRoots[kind]
 		if root == "" {
 			root = DefaultPaths(paths.Home).RuntimeRoots[kind]
@@ -67,11 +79,14 @@ func ScanAllWithKey(paths Paths, fingerprintKey []byte) (InventoryScan, error) {
 		for identity, values := range secrets {
 			result.MCPSecrets[identity] = values
 		}
-		if kind == "hermes" {
+		if kind == domain.RuntimeHermes {
 			inventory["hubLock"] = readJSONRedacted(filepath.Join(paths.Home, ".hermes", ".hub", "lock.json"))
 			inventory["taps"] = listNames(filepath.Join(paths.Home, ".hermes", "taps"))
 		}
 		result.Runtimes = append(result.Runtimes, domain.InventoryRuntime{Kind: kind, RootPath: root, Version: "", Config: config, Inventory: inventory, MCPServers: descriptors})
+	}
+	if len(sharedSources) > 0 {
+		result.SharedSources = ScanSharedSources(sharedSources, dataDir, fingerprintKey)
 	}
 	return result, nil
 }
@@ -130,16 +145,24 @@ func scanSkillRoot(root string) ([]any, []any, int, int, error) {
 	return discoveries, symlinks, managed, protected, err
 }
 
-func scanRuntimeConfig(home, kind string, fingerprintKey []byte) (map[string]any, []domain.MCPDescriptor, map[string]map[string]string) {
+func scanRuntimeConfig(home, kind string, fingerprintKey []byte) (map[string]any, []domain.MCPDescriptor, map[string]MCPSecretValues) {
 	paths := map[string][]string{
-		"codex":  {filepath.Join(home, ".codex", "config.toml")},
-		"claude": {filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "settings.json")},
-		"hermes": {filepath.Join(home, ".hermes", "config.yaml")},
+		domain.RuntimeCodex: {
+			filepath.Join(home, ".codex", "config.toml"),
+			filepath.Join(home, ".codex", ".tmp", "plugins", "plugins", "shared-mcp", ".mcp.json"),
+		},
+		domain.RuntimeClaude:   {filepath.Join(home, ".claude.json"), filepath.Join(home, ".claude", "settings.json")},
+		domain.RuntimeHermes:   {filepath.Join(home, ".hermes", "config.yaml")},
+		domain.RuntimeGrok:     {},
+		domain.RuntimeOpenClaw: {filepath.Join(home, ".openclaw", "workspace", "config", "mcporter.json")},
 	}
 	result := map[string]any{"platform": runtime.GOOS, "configFiles": []any{}}
+	if kind == domain.RuntimeGrok {
+		result["mcpInheritedFrom"] = domain.RuntimeClaude
+	}
 	var files []any
 	descriptorsByName := map[string]domain.MCPDescriptor{}
-	secrets := map[string]map[string]string{}
+	secrets := map[string]MCPSecretValues{}
 	for _, candidate := range paths[kind] {
 		if info, err := os.Stat(candidate); err == nil {
 			files = append(files, map[string]any{"path": candidate, "size": info.Size(), "modifiedAt": info.ModTime()})
@@ -167,7 +190,7 @@ func scanRuntimeConfig(home, kind string, fingerprintKey []byte) (map[string]any
 	for _, name := range names {
 		descriptor := descriptorsByName[name]
 		descriptors = append(descriptors, descriptor)
-		summaries[name] = map[string]any{"transport": descriptor.Transport, "command": descriptor.Command, "args": descriptor.Args, "url": descriptor.URL, "envKeys": descriptor.EnvKeys}
+		summaries[name] = map[string]any{"transport": descriptor.Transport, "command": descriptor.Command, "args": descriptor.Args, "url": descriptor.URL, "envKeys": descriptor.EnvKeys, "headerKeys": descriptor.HeaderKeys}
 	}
 	result["configFiles"] = files
 	result["mcpServers"] = summaries
@@ -175,13 +198,19 @@ func scanRuntimeConfig(home, kind string, fingerprintKey []byte) (map[string]any
 	return result, descriptors, secrets
 }
 
-func normalizeMCPServer(kind, name string, config map[string]any, fingerprintKey []byte) (domain.MCPDescriptor, map[string]string, error) {
+func normalizeMCPServer(kind, name string, config map[string]any, fingerprintKey []byte) (domain.MCPDescriptor, MCPSecretValues, error) {
 	descriptor := domain.MCPDescriptor{Name: name, Command: stringValue(config["command"]), URL: stringValue(config["url"]), Args: stringSlice(config["args"])}
+	if descriptor.URL == "" {
+		descriptor.URL = stringValue(config["baseUrl"])
+	}
 	descriptor.Transport = strings.ToLower(stringValue(config["transport"]))
 	if descriptor.Transport == "" {
 		descriptor.Transport = strings.ToLower(stringValue(config["type"]))
 	}
 	if descriptor.Transport == "http" {
+		descriptor.Transport = "streamable-http"
+	}
+	if descriptor.Transport == "streamablehttp" {
 		descriptor.Transport = "streamable-http"
 	}
 	if descriptor.Transport == "" {
@@ -198,15 +227,29 @@ func normalizeMCPServer(kind, name string, config map[string]any, fingerprintKey
 	for key := range environment {
 		descriptor.EnvKeys = append(descriptor.EnvKeys, key)
 	}
+	headers := stringMap(config["headers"])
+	canonicalHeaders := make(map[string]string, len(headers))
+	for key := range headers {
+		canonical, err := protocol.NormalizeHeaderName(key)
+		if err != nil {
+			return domain.MCPDescriptor{}, MCPSecretValues{}, err
+		}
+		if _, exists := canonicalHeaders[canonical]; exists {
+			return domain.MCPDescriptor{}, MCPSecretValues{}, errors.New("duplicate MCP HTTP header name")
+		}
+		canonicalHeaders[canonical] = headers[key]
+		descriptor.HeaderKeys = append(descriptor.HeaderKeys, canonical)
+	}
+	headers = canonicalHeaders
 	var err error
 	descriptor, err = protocol.NormalizeMCPDescriptor(kind, descriptor)
 	if err != nil {
-		return domain.MCPDescriptor{}, nil, err
+		return domain.MCPDescriptor{}, MCPSecretValues{}, err
 	}
-	if len(fingerprintKey) > 0 && len(environment) > 0 {
-		descriptor.SecretFingerprint = security.FingerprintSecretMap(fingerprintKey, environment)
+	if len(fingerprintKey) > 0 && (len(environment) > 0 || len(headers) > 0) {
+		descriptor.SecretFingerprint = security.FingerprintSecretMap(fingerprintKey, combinedSecretValues(environment, headers))
 	}
-	return descriptor, environment, nil
+	return descriptor, MCPSecretValues{Env: environment, Headers: headers}, nil
 }
 
 func stringValue(value any) string {
@@ -264,8 +307,8 @@ func readMCPConfig(configPath, kind string) map[string]any {
 	if err != nil {
 		return nil
 	}
-	keys := []string{"mcpServers", "mcp_servers"}
-	if kind == "codex" || kind == "hermes" {
+	keys := []string{"mcpServers", "mcp_servers", "servers"}
+	if kind == domain.RuntimeCodex || kind == domain.RuntimeHermes {
 		keys = []string{"mcp_servers", "mcpServers"}
 	}
 	for _, key := range keys {

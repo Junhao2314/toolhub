@@ -172,8 +172,8 @@ func (s *Store) UpdateHeartbeat(ctx context.Context, nodeID, hostname, platform,
 	return err
 }
 
-func (s *Store) ReplaceInventory(ctx context.Context, nodeID string, runtimes []domain.InventoryRuntime) error {
-	_, err := s.ProcessAgentInventory(ctx, nodeID, runtimes, false)
+func (s *Store) ReplaceInventory(ctx context.Context, nodeID string, inventory domain.AgentInventory) error {
+	_, err := s.ProcessAgentInventory(ctx, nodeID, inventory, false)
 	return err
 }
 
@@ -240,7 +240,24 @@ func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, res
 	if _, err := tx.Exec(ctx, "UPDATE node_tasks SET status=$3,result=$4,updated_at=now() WHERE id=$1 AND node_id=$2", id, nodeID, status, string(result)); err != nil {
 		return err
 	}
-	if status == "succeeded" && kind == "deploy_skill" {
+	var completedInventory *domain.AgentInventory
+	if status == "succeeded" && kind == "scan_inventory" {
+		var inventory domain.AgentInventory
+		if err := json.Unmarshal(result, &inventory); err != nil {
+			return errors.New("inventory task returned an invalid result")
+		}
+		completedInventory = &inventory
+	} else if (status == "succeeded" || status == "failed") && kind == "sync_shared" {
+		var task struct {
+			SourceID string `json:"sourceId"`
+		}
+		if json.Unmarshal(payload, &task) != nil || task.SourceID == "" {
+			return errors.New("shared sync task payload is invalid")
+		}
+		if err := projectSharedSyncResultTx(ctx, tx, nodeID, task.SourceID, result, status == "succeeded"); err != nil {
+			return err
+		}
+	} else if status == "succeeded" && kind == "deploy_skill" {
 		var task struct {
 			DeploymentID string `json:"deploymentId"`
 			VersionID    string `json:"versionId"`
@@ -291,5 +308,11 @@ func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, res
 			}
 		}
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if completedInventory != nil {
+		return s.ReplaceInventory(ctx, nodeID, *completedInventory)
+	}
+	return nil
 }

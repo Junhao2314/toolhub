@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
 func TestPackageDiscoveredSkillRejectsProtectedAndSymlinkedContent(t *testing.T) {
@@ -22,6 +24,43 @@ func TestPackageDiscoveredSkillRejectsProtectedAndSymlinkedContent(t *testing.T)
 	}
 	if _, err := PackageDiscoveredSkill(paths, "codex", target, "ignored"); err == nil {
 		t.Fatal("symlinked skill was accepted")
+	}
+}
+
+func TestPackageSharedDiscoveredSkillAllowsOnlyConfiguredTopLevelTargets(t *testing.T) {
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "shared", "skills")
+	allowedRoot := filepath.Join(root, "allowed")
+	allowedSkill := filepath.Join(allowedRoot, "example")
+	writeDiscoveredSkill(t, allowedSkill)
+	if err := os.MkdirAll(skillsRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(skillsRoot, "example")
+	if err := os.Symlink(allowedSkill, link); err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := skills.ScanDirectory(allowedSkill, skills.DefaultLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := SharedSourceConfig{Name: "shared", Mode: SharedModeObserved, SkillsRoot: skillsRoot, AllowedSkillRoots: []string{skillsRoot, allowedRoot}}
+	if _, err := PackageSharedDiscoveredSkill(source, link, pkg.SHA256); err != nil {
+		t.Fatalf("allowed top-level shared symlink was rejected: %v", err)
+	}
+
+	outside := filepath.Join(root, "outside", "blocked")
+	writeDiscoveredSkill(t, outside)
+	blocked := filepath.Join(skillsRoot, "blocked")
+	if err := os.Symlink(outside, blocked); err != nil {
+		t.Fatal(err)
+	}
+	outsidePkg, err := skills.ScanDirectory(outside, skills.DefaultLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PackageSharedDiscoveredSkill(source, blocked, outsidePkg.SHA256); err == nil {
+		t.Fatal("shared Skill symlink escaping allowed roots was accepted")
 	}
 }
 

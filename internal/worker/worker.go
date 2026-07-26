@@ -10,6 +10,7 @@ import (
 
 	"github.com/Junhao2314/toolhub/internal/agenthub"
 	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/protocol"
 	"github.com/Junhao2314/toolhub/internal/remote"
 	"github.com/Junhao2314/toolhub/internal/skills"
 	"github.com/Junhao2314/toolhub/internal/store"
@@ -86,6 +87,8 @@ func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
 		return w.syncSkills(ctx, job)
 	case "mcp_sync":
 		return w.syncMCP(ctx, job)
+	case "shared_sync":
+		return w.syncShared(ctx, job)
 	case "mcp_health":
 		return map[string]any{"status": "queued_on_next_reconcile"}, nil
 	case "archive_purge":
@@ -93,6 +96,77 @@ func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
 		return map[string]any{"purged": count}, err
 	default:
 		return nil, fmt.Errorf("unsupported job kind %q", job.Kind)
+	}
+}
+
+func (w *Worker) syncShared(ctx context.Context, job domain.Job) (any, error) {
+	var selectors struct {
+		SourceIDs []string `json:"sourceIds"`
+		NodeIDs   []string `json:"nodeIds"`
+		Scopes    []string `json:"scopes"`
+		ScopeType string   `json:"scopeType"`
+		ScopeID   string   `json:"scopeId"`
+	}
+	if err := json.Unmarshal(job.Payload, &selectors); err != nil {
+		return nil, err
+	}
+	if len(selectors.Scopes) == 0 {
+		selectors.Scopes = []string{"skills", "mcp"}
+	}
+	for _, scope := range selectors.Scopes {
+		if scope != "skills" && scope != "mcp" {
+			return nil, errors.New("shared sync scopes must contain only skills or mcp")
+		}
+	}
+	if selectors.ScopeType != "" && selectors.ScopeType != "global" && selectors.ScopeType != "node_group" && selectors.ScopeType != "shared_source" {
+		return nil, errors.New("shared sync has an invalid scopeType")
+	}
+	sourceIDs := makeSet(selectors.SourceIDs)
+	nodeIDs := makeSet(selectors.NodeIDs)
+	targets, err := w.store.SharedSyncTargets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	queued, delivered, skipped := 0, 0, 0
+	for _, target := range targets {
+		if !matchesSharedSelectors(target, sourceIDs, nodeIDs, selectors.ScopeType, selectors.ScopeID) {
+			skipped++
+			continue
+		}
+		if !job.DryRun && target.Mode != "managed" {
+			skipped++
+			continue
+		}
+		payload := protocol.SyncSharedPayload{SourceID: target.SourceID, SourceName: target.Name, Scopes: selectors.Scopes, DryRun: job.DryRun, ExpectedSourceFingerprint: target.SourceFingerprint}
+		task, err := w.store.CreateNodeTask(ctx, target.NodeID, job.ID, "sync_shared", payload)
+		if err != nil {
+			return nil, err
+		}
+		queued++
+		if w.deliver(ctx, target.NodeID, task) {
+			delivered++
+		}
+	}
+	return map[string]any{"queued": queued, "delivered": delivered, "pendingOffline": queued - delivered, "skipped": skipped, "dryRun": job.DryRun}, nil
+}
+
+func matchesSharedSelectors(target store.SharedSyncTarget, sourceIDs, nodeIDs map[string]bool, scopeType, scopeID string) bool {
+	if len(sourceIDs) > 0 && !sourceIDs[target.SourceID] {
+		return false
+	}
+	if len(nodeIDs) > 0 && !nodeIDs[target.NodeID] {
+		return false
+	}
+	if scopeID == "" {
+		return true
+	}
+	switch scopeType {
+	case "node_group":
+		return target.NodeGroup == scopeID
+	case "shared_source":
+		return target.SourceID == scopeID
+	default:
+		return true
 	}
 }
 
@@ -228,7 +302,7 @@ func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
 			skipped++
 			continue
 		}
-		payload := map[string]any{"deploymentId": deployment.DeploymentID, "runtime": deployment.Runtime, "skillSlug": deployment.SkillSlug, "versionId": deployment.VersionID, "sha256": deployment.SHA256, "enabled": deployment.Enabled}
+		payload := map[string]any{"deploymentId": deployment.DeploymentID, "runtime": deployment.Runtime, "sourceName": deployment.SharedSourceName, "skillSlug": deployment.SkillSlug, "versionId": deployment.VersionID, "sha256": deployment.SHA256, "enabled": deployment.Enabled}
 		if job.DryRun {
 			queued++
 			continue

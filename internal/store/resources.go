@@ -19,6 +19,8 @@ func (s *Store) ListNodes(ctx context.Context) (json.RawMessage, error) {
 		(SELECT count(*) FROM runtimes r WHERE r.node_id=n.id) AS "runtimeCount",
 		(SELECT max(r.scanned_at) FROM runtimes r WHERE r.node_id=n.id) AS "scannedAt",
 		(SELECT count(*) FROM mcp_runtime_bindings mb WHERE mb.node_id=n.id AND mb.desired_enabled) AS "autoManagedMcpCount",
+		(SELECT count(*) FROM shared_sources ss WHERE ss.node_id=n.id AND ss.status<>'missing') AS "sharedSourceCount",
+		EXISTS(SELECT 1 FROM shared_sources ss WHERE ss.node_id=n.id AND ss.mode='managed' AND ss.status<>'missing') AS "hasManagedSharedSource",
 		(SELECT count(*) FROM skill_discoveries sd WHERE sd.node_id=n.id AND sd.adopted_skill_id IS NULL AND NOT sd.missing AND NOT sd.protected) AS "pendingSkillCount",
 		(SELECT count(*) FROM skill_discoveries sd WHERE sd.node_id=n.id AND (sd.drift OR sd.missing)) +
 		(SELECT count(*) FROM mcp_runtime_bindings mb WHERE mb.node_id=n.id AND (mb.drift OR mb.missing)) AS "discoveryAttentionCount",
@@ -31,7 +33,10 @@ func (s *Store) GetNode(ctx context.Context, id string) (json.RawMessage, error)
 		n.connection_preference AS "connectionPreference",n.last_seen_at AS "lastSeenAt",n.created_at AS "createdAt",
 		(n.labels->>'scope'='local') AS "isLocal",
 		EXISTS(SELECT 1 FROM node_connections c WHERE c.node_id=n.id AND c.kind='ssh' AND c.enabled) AS "hasSsh",
-		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT r.id::text AS id,r.kind,r.root_path AS "rootPath",r.version,r.inventory,r.scanned_at AS "scannedAt" FROM runtimes r WHERE r.node_id=n.id ORDER BY r.kind) x),'[]') AS runtimes
+		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT r.id::text AS id,r.kind,r.root_path AS "rootPath",r.version,r.inventory,r.scanned_at AS "scannedAt" FROM runtimes r WHERE r.node_id=n.id ORDER BY r.kind) x),'[]') AS runtimes,
+		coalesce((SELECT jsonb_agg(jsonb_build_object('id',ss.id::text,'name',ss.name,'mode',ss.mode,'autoSync',ss.auto_sync,
+			'skillsRoot',ss.skills_root,'mcpManifestPath',ss.mcp_manifest_path,'status',ss.status,'lastScanAt',ss.last_scan_at,
+			'lastSyncAt',ss.last_sync_at,'lastError',ss.last_error) ORDER BY ss.name) FROM shared_sources ss WHERE ss.node_id=n.id),'[]'::jsonb) AS "sharedSources"
 		FROM nodes n WHERE n.id=$1 AND n.archived_at IS NULL`, id)
 }
 
@@ -73,7 +78,8 @@ func (s *Store) ListAudit(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (s *Store) ListMCPServers(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT id::text AS id,name,runtime_name AS "runtimeName",transport,command,args,url,env_refs AS "envRefs",enabled,source,origin,health_status AS "healthStatus",usage,update_policy AS "updatePolicy",created_at AS "createdAt",
+	return s.JSONList(ctx, `SELECT id::text AS id,name,runtime_name AS "runtimeName",transport,command,args,url,env_refs AS "envRefs",header_refs AS "headerRefs",enabled,source,origin,
+		authority,coalesce(shared_source_id::text,'') AS "sharedSourceId",credential_mode AS "credentialMode",health_status AS "healthStatus",usage,update_policy AS "updatePolicy",created_at AS "createdAt",
 		(SELECT count(*) FROM mcp_runtime_bindings b WHERE b.server_id=mcp_servers.id) AS "bindingCount",
 		EXISTS(SELECT 1 FROM mcp_runtime_bindings b WHERE b.server_id=mcp_servers.id AND (b.drift OR b.missing)) AS "hasDrift"
 		FROM mcp_servers ORDER BY name`)

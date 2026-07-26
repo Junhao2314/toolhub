@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
@@ -124,8 +125,17 @@ func (s *Store) SetSkillTargets(ctx context.Context, skillID, actor string, targ
 		return err
 	}
 	for _, target := range targets {
-		if target.Runtime != "codex" && target.Runtime != "claude" && target.Runtime != "hermes" {
+		if !domain.IsSkillRuntime(target.Runtime) {
 			return errors.New("invalid runtime target")
+		}
+		if target.Runtime == domain.RuntimeShared {
+			var managedSources int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM shared_sources WHERE node_id=$1 AND mode='managed' AND status<>'missing'`, target.NodeID).Scan(&managedSources); err != nil {
+				return err
+			}
+			if managedSources != 1 {
+				return errors.New("shared Skill targets require exactly one managed shared source on the node")
+			}
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO deployments(id,node_id,runtime_kind,skill_id,desired_version_id,desired_enabled,state)
 			VALUES($1,$2,$3,$4,$5,$6,'pending')

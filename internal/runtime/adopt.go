@@ -46,6 +46,39 @@ func PackageDiscoveredSkill(paths Paths, runtimeKind, discoveredPath, expectedSH
 	return pkg, nil
 }
 
+func PackageSharedDiscoveredSkill(source SharedSourceConfig, discoveredPath, expectedSHA256 string) (skills.Package, error) {
+	target, err := filepath.Abs(discoveredPath)
+	if err != nil {
+		return skills.Package{}, err
+	}
+	root, err := filepath.Abs(source.SkillsRoot)
+	if err != nil {
+		return skills.Package{}, err
+	}
+	relative, err := filepath.Rel(root, target)
+	if err != nil || relative == "." || relative == ".." || strings.Contains(filepath.ToSlash(relative), "/") {
+		return skills.Package{}, errors.New("shared Skill path must be a top-level source entry")
+	}
+	if err := validateSharedName(filepath.Base(target)); err != nil {
+		return skills.Package{}, err
+	}
+	resolved, err := filepath.EvalSymlinks(target)
+	if err != nil || !pathWithinAny(resolved, source.AllowedSkillRoots) {
+		return skills.Package{}, errors.New("shared Skill resolves outside configured allowed roots")
+	}
+	if fileExists(filepath.Join(target, ".toolhub-managed.json")) {
+		return skills.Package{}, errors.New("skill is already ToolHub-managed")
+	}
+	pkg, err := skills.ScanDirectory(resolved, skills.DefaultLimits)
+	if err != nil {
+		return skills.Package{}, fmt.Errorf("scan shared discovered skill: %w", err)
+	}
+	if expectedSHA256 == "" || pkg.SHA256 != expectedSHA256 {
+		return skills.Package{}, errors.New("shared discovered skill hash changed before adoption")
+	}
+	return pkg, nil
+}
+
 func MarkAdoptedSkill(paths Paths, runtimeKind, discoveredPath, expectedSHA256 string, marker AdoptedSkillMarker) error {
 	_, target, err := validateDiscoveredSkillPath(paths.RuntimeRoots[runtimeKind], discoveredPath)
 	if err != nil {

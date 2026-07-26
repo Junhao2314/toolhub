@@ -5,6 +5,32 @@ import (
 	"time"
 )
 
+const (
+	RuntimeCodex    = "codex"
+	RuntimeClaude   = "claude"
+	RuntimeHermes   = "hermes"
+	RuntimeGrok     = "grok"
+	RuntimeOpenClaw = "openclaw"
+	RuntimeShared   = "shared"
+)
+
+func IsConsumerRuntime(kind string) bool {
+	switch kind {
+	case RuntimeCodex, RuntimeClaude, RuntimeHermes, RuntimeGrok, RuntimeOpenClaw:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsSkillRuntime(kind string) bool {
+	return IsConsumerRuntime(kind) || kind == RuntimeShared
+}
+
+func IsMCPRuntime(kind string) bool {
+	return IsConsumerRuntime(kind)
+}
+
 type Principal struct {
 	ID                        string    `json:"id"`
 	Username                  string    `json:"username"`
@@ -65,6 +91,11 @@ type InventoryRuntime struct {
 	MCPServers []MCPDescriptor `json:"mcpServers,omitempty"`
 }
 
+type AgentInventory struct {
+	Runtimes      []InventoryRuntime      `json:"runtimes"`
+	SharedSources []SharedSourceInventory `json:"sharedSources,omitempty"`
+}
+
 type MCPDescriptor struct {
 	Name              string   `json:"name"`
 	Identity          string   `json:"identity"`
@@ -73,8 +104,90 @@ type MCPDescriptor struct {
 	Args              []string `json:"args,omitempty"`
 	URL               string   `json:"url,omitempty"`
 	EnvKeys           []string `json:"envKeys"`
+	HeaderKeys        []string `json:"headerKeys,omitempty"`
 	ConfigFingerprint string   `json:"configFingerprint"`
 	SecretFingerprint string   `json:"secretFingerprint,omitempty"`
+}
+
+type SharedSourceInventory struct {
+	Name              string                     `json:"name"`
+	Mode              string                     `json:"mode"`
+	AutoSync          bool                       `json:"autoSync"`
+	SkillsRoot        string                     `json:"skillsRoot"`
+	MCPManifestPath   string                     `json:"mcpManifestPath"`
+	ConfigFingerprint string                     `json:"configFingerprint"`
+	SourceFingerprint string                     `json:"sourceFingerprint"`
+	Status            string                     `json:"status"`
+	LastError         string                     `json:"lastError,omitempty"`
+	Skills            []SharedSkillInventory     `json:"skills"`
+	MCPServers        []SharedMCPServerInventory `json:"mcpServers"`
+	Consumers         []SharedConsumerInventory  `json:"consumers"`
+}
+
+type SharedMCPServerInventory struct {
+	Descriptor  MCPDescriptor `json:"descriptor"`
+	Description string        `json:"description,omitempty"`
+	Enabled     bool          `json:"enabled"`
+}
+
+type SharedSkillInventory struct {
+	Name               string `json:"name"`
+	SourcePath         string `json:"sourcePath"`
+	ResolvedSourcePath string `json:"resolvedSourcePath"`
+	SHA256             string `json:"sha256,omitempty"`
+	EntryType          string `json:"entryType"`
+	Managed            bool   `json:"managed"`
+	State              string `json:"state"`
+	LastError          string `json:"lastError,omitempty"`
+}
+
+type SharedConsumerInventory struct {
+	Kind                string                      `json:"kind"`
+	SkillsPath          string                      `json:"skillsPath,omitempty"`
+	MCPPath             string                      `json:"mcpPath,omitempty"`
+	MCPFormat           string                      `json:"mcpFormat,omitempty"`
+	InheritsFrom        string                      `json:"inheritsFrom,omitempty"`
+	SkillsEnabled       bool                        `json:"skillsEnabled"`
+	MCPEnabled          bool                        `json:"mcpEnabled"`
+	ExpectedFingerprint string                      `json:"expectedFingerprint,omitempty"`
+	ActualFingerprint   string                      `json:"actualFingerprint,omitempty"`
+	State               string                      `json:"state"`
+	LastError           string                      `json:"lastError,omitempty"`
+	SkillLinks          []SharedSkillLinkInventory  `json:"skillLinks"`
+	MCPBindings         []SharedMCPBindingInventory `json:"mcpBindings"`
+}
+
+type SharedSkillLinkInventory struct {
+	SkillName          string `json:"skillName"`
+	SourcePath         string `json:"sourcePath"`
+	ResolvedSourcePath string `json:"resolvedSourcePath"`
+	TargetPath         string `json:"targetPath"`
+	ExpectedTarget     string `json:"expectedTarget"`
+	ActualTarget       string `json:"actualTarget,omitempty"`
+	Managed            bool   `json:"managed"`
+	State              string `json:"state"`
+	LastError          string `json:"lastError,omitempty"`
+}
+
+type SharedMCPBindingInventory struct {
+	ServerName         string   `json:"serverName"`
+	DesiredFingerprint string   `json:"desiredFingerprint,omitempty"`
+	ActualFingerprint  string   `json:"actualFingerprint,omitempty"`
+	EnvKeys            []string `json:"envKeys,omitempty"`
+	HeaderKeys         []string `json:"headerKeys,omitempty"`
+	Enabled            bool     `json:"enabled"`
+	Missing            bool     `json:"missing"`
+	Drift              bool     `json:"drift"`
+	State              string   `json:"state"`
+	LastError          string   `json:"lastError,omitempty"`
+}
+
+type SharedSyncResult struct {
+	Source    SharedSourceInventory `json:"source"`
+	Changed   bool                  `json:"changed"`
+	DryRun    bool                  `json:"dryRun"`
+	Actions   []string              `json:"actions,omitempty"`
+	Conflicts []string              `json:"conflicts,omitempty"`
 }
 
 type MCPCaptureRequest struct {

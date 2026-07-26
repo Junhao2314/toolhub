@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -48,11 +49,45 @@ func main() {
 		runAgent(*configPath)
 	case "scan":
 		scan(os.Args[2:])
+	case "sync-shared":
+		syncShared(os.Args[2:])
 	case "run-task":
 		runTask(os.Args[2:])
 	default:
 		log.Fatalf("unknown command %q", os.Args[1])
 	}
+}
+
+func syncShared(args []string) {
+	flags := flag.NewFlagSet("sync-shared", flag.ExitOnError)
+	configPath := flags.String("config", "", "agent configuration path")
+	sourceName := flags.String("source", "", "configured shared source name")
+	scope := flags.String("scope", "all", "skills, mcp, or all")
+	dryRun := flags.Bool("dry-run", false, "report changes without writing")
+	_ = flags.Parse(args)
+	config, err := agentclient.LoadConfig(*configPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if strings.TrimSpace(*sourceName) == "" {
+		log.Fatal("sync-shared requires --source")
+	}
+	key, err := base64.StdEncoding.DecodeString(config.TaskKey)
+	if err != nil || len(key) != 32 {
+		log.Fatal("agent task key is invalid")
+	}
+	scopes := []string{strings.TrimSpace(*scope)}
+	if strings.Contains(*scope, ",") {
+		scopes = strings.Split(*scope, ",")
+	}
+	result, err := (runtimeadapter.SharedReconciler{DataDir: config.DataDir, Sources: config.SharedSources, FingerprintKey: key}).Reconcile(
+		context.Background(),
+		runtimeadapter.SharedSyncRequest{SourceName: strings.TrimSpace(*sourceName), Scopes: scopes, DryRun: *dryRun},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_ = json.NewEncoder(os.Stdout).Encode(result)
 }
 
 func enroll(args []string) {

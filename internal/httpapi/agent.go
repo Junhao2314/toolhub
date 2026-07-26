@@ -75,15 +75,13 @@ func (a *API) agentDiscoveryDescriptors(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "Invalid agent credentials")
 		return
 	}
-	var input struct {
-		Runtimes []domain.InventoryRuntime `json:"runtimes"`
-	}
+	var input domain.AgentInventory
 	if err := decodeJSON(w, r, &input, 2<<20); err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_discovery", "Invalid Agent discovery descriptor")
 		return
 	}
 	nodeID := strings.TrimSpace(r.Header.Get("X-ToolHub-Node-ID"))
-	requests, err := a.store.ProcessAgentInventory(r.Context(), nodeID, input.Runtimes, true)
+	requests, err := a.store.ProcessAgentInventory(r.Context(), nodeID, input, true)
 	if err != nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "discovery_rejected", "Agent discovery descriptor was rejected")
 		return

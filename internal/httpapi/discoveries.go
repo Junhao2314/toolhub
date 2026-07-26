@@ -31,6 +31,8 @@ func (a *API) reconcileNow(w http.ResponseWriter, r *http.Request) {
 		SkillIDs         []string `json:"skillIds"`
 		ProfileIDs       []string `json:"profileIds"`
 		MCPDeploymentIDs []string `json:"mcpDeploymentIds"`
+		SharedSourceIDs  []string `json:"sharedSourceIds"`
+		SharedScopes     []string `json:"sharedScopes"`
 		DryRun           bool     `json:"dryRun"`
 	}
 	if err := decodeJSON(w, r, &input, 256<<10); err != nil {
@@ -48,6 +50,16 @@ func (a *API) reconcileNow(w http.ResponseWriter, r *http.Request) {
 		handleStoreError(w, r, err)
 		return
 	}
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "reconcile", ResourceType: "runtime", Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"nodeIds": input.NodeIDs, "skillIds": input.SkillIDs, "profileIds": input.ProfileIDs, "mcpDeploymentIds": input.MCPDeploymentIDs, "dryRun": input.DryRun}})
-	writeJSON(w, http.StatusAccepted, map[string]any{"jobs": []any{skillJob, mcpJob}})
+	sharedScopes, err := normalizeSharedSyncScopes(input.SharedScopes)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_scope", err.Error())
+		return
+	}
+	sharedJob, err := a.store.EnqueueJob(r.Context(), "shared_sync", map[string]any{"nodeIds": input.NodeIDs, "sourceIds": input.SharedSourceIDs, "scopes": sharedScopes, "manual": true}, input.DryRun, principal.ID)
+	if err != nil {
+		handleStoreError(w, r, err)
+		return
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "reconcile", ResourceType: "runtime", Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"nodeIds": input.NodeIDs, "skillIds": input.SkillIDs, "profileIds": input.ProfileIDs, "mcpDeploymentIds": input.MCPDeploymentIDs, "sharedSourceIds": input.SharedSourceIDs, "sharedScopes": sharedScopes, "dryRun": input.DryRun}})
+	writeJSON(w, http.StatusAccepted, map[string]any{"jobs": []any{skillJob, mcpJob, sharedJob}})
 }

@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	ErrNotFound               = errors.New("not found")
-	ErrInvalidCurrentPassword = errors.New("current password is incorrect")
-	ErrUsernameUnavailable    = errors.New("username is unavailable")
-	ErrEmailUnavailable       = errors.New("email is unavailable")
+	ErrNotFound                = errors.New("not found")
+	ErrSourceFileAuthoritative = errors.New("source file is authoritative")
+	ErrInvalidCurrentPassword  = errors.New("current password is incorrect")
+	ErrUsernameUnavailable     = errors.New("username is unavailable")
+	ErrEmailUnavailable        = errors.New("email is unavailable")
 )
 
 func (s *Store) UserByIdentifier(ctx context.Context, identifier string) (domain.User, error) {

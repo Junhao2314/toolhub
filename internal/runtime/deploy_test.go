@@ -53,6 +53,37 @@ func TestDeployIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestSharedDeployRequiresManagedOwnedTarget(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	source := DefaultSharedSource(DefaultPaths(home))
+	source.Name = "shared"
+	source.Mode = SharedModeManaged
+	target := filepath.Join(source.SkillsRoot, "example")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	archive := testSkillZIP(t)
+	pkg, err := skills.ScanZIP(archive, skills.DefaultLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployer := Deployer{DataDir: filepath.Join(root, "data"), Paths: DefaultPaths(home), SharedSources: []SharedSourceConfig{source}}
+	_, err = deployer.Deploy(DeployRequest{Runtime: "shared", SourceName: source.Name, SkillSlug: "example", VersionID: "v1", SHA256: pkg.SHA256, Enabled: true, Artifact: pkg.CanonicalZIP})
+	if err == nil {
+		t.Fatal("unmanaged canonical shared Skill was overwritten")
+	}
+	source.Mode = SharedModeObserved
+	deployer.SharedSources = []SharedSourceConfig{source}
+	_, err = deployer.Deploy(DeployRequest{Runtime: "shared", SourceName: source.Name, SkillSlug: "new-skill", VersionID: "v1", SHA256: pkg.SHA256, Enabled: true, Artifact: pkg.CanonicalZIP})
+	if err == nil {
+		t.Fatal("observed-only shared source accepted a deployment")
+	}
+}
+
 func testSkillZIP(t *testing.T) []byte {
 	t.Helper()
 	var buffer bytes.Buffer

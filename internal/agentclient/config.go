@@ -3,6 +3,7 @@ package agentclient
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,14 +13,15 @@ import (
 )
 
 type Config struct {
-	ServerURL  string               `json:"serverUrl"`
-	NodeID     string               `json:"nodeId"`
-	AgentToken string               `json:"agentToken"`
-	TaskKey    string               `json:"taskKey"`
-	PrivateKey string               `json:"privateKey"`
-	DataDir    string               `json:"dataDir"`
-	Paths      runtimeadapter.Paths `json:"paths"`
-	ConfigPath string               `json:"-"`
+	ServerURL     string                              `json:"serverUrl"`
+	NodeID        string                              `json:"nodeId"`
+	AgentToken    string                              `json:"agentToken"`
+	TaskKey       string                              `json:"taskKey"`
+	PrivateKey    string                              `json:"privateKey"`
+	DataDir       string                              `json:"dataDir"`
+	Paths         runtimeadapter.Paths                `json:"paths"`
+	SharedSources []runtimeadapter.SharedSourceConfig `json:"sharedSources,omitempty"`
+	ConfigPath    string                              `json:"-"`
 }
 
 func DefaultConfigPath() (string, error) {
@@ -60,6 +62,9 @@ func LoadConfig(path string) (Config, error) {
 	if config.ServerURL == "" || config.NodeID == "" || config.AgentToken == "" || config.TaskKey == "" || config.DataDir == "" {
 		return Config{}, errors.New("agent configuration is incomplete")
 	}
+	if err := normalizeConfig(&config, config.SharedSources == nil); err != nil {
+		return Config{}, err
+	}
 	return config, nil
 }
 
@@ -70,6 +75,9 @@ func SaveConfig(path string, config Config) error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := normalizeConfig(&config, false); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
@@ -97,5 +105,33 @@ func SaveConfig(path string, config Config) error {
 		return err
 	}
 	_ = os.Remove(path + ".old")
+	return nil
+}
+
+func normalizeConfig(config *Config, autoProbe bool) error {
+	if strings.TrimSpace(config.Paths.Home) == "" {
+		return errors.New("agent runtime home is required")
+	}
+	defaults := runtimeadapter.DefaultPaths(config.Paths.Home)
+	if config.Paths.RuntimeRoots == nil {
+		config.Paths.RuntimeRoots = map[string]string{}
+	}
+	for kind, root := range defaults.RuntimeRoots {
+		if strings.TrimSpace(config.Paths.RuntimeRoots[kind]) == "" {
+			config.Paths.RuntimeRoots[kind] = root
+		}
+	}
+	if autoProbe {
+		config.SharedSources = runtimeadapter.AutoProbeSharedSources(config.Paths)
+	}
+	normalized, err := runtimeadapter.NormalizeSharedSources(config.Paths, config.SharedSources)
+	if err != nil {
+		return fmt.Errorf("invalid shared source configuration: %w", err)
+	}
+	config.SharedSources = normalized
+	config.DataDir = filepath.Clean(config.DataDir)
+	if !filepath.IsAbs(config.DataDir) {
+		return errors.New("agent data directory must be absolute")
+	}
 	return nil
 }

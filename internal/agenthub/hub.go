@@ -143,13 +143,11 @@ func (h *Hub) handleMessage(ctx context.Context, nodeID string, message domain.A
 		}
 		return h.store.UpdateHeartbeat(ctx, nodeID, payload.Hostname, payload.Platform, payload.Architecture)
 	case "inventory":
-		var payload struct {
-			Runtimes []domain.InventoryRuntime `json:"runtimes"`
-		}
+		var payload domain.AgentInventory
 		if err := json.Unmarshal(message.Payload, &payload); err != nil {
 			return err
 		}
-		return h.store.ReplaceInventory(ctx, nodeID, payload.Runtimes)
+		return h.store.ReplaceInventory(ctx, nodeID, payload)
 	case "task_result":
 		var payload struct {
 			ID     string          `json:"id"`

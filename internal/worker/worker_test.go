@@ -15,3 +15,19 @@ func TestMCPSelectorsUsePluralIDs(t *testing.T) {
 		t.Fatal("a different deployment selector was ignored")
 	}
 }
+
+func TestSharedSelectorsUsePluralSourceAndNodeIDs(t *testing.T) {
+	target := store.SharedSyncTarget{SourceID: "source-a", NodeID: "node-a", NodeGroup: "canary"}
+	if !matchesSharedSelectors(target, makeSet([]string{"source-a"}), makeSet([]string{"node-a"}), "node_group", "canary") {
+		t.Fatal("matching shared plural selectors were rejected")
+	}
+	if matchesSharedSelectors(target, makeSet([]string{"source-b"}), nil, "", "") {
+		t.Fatal("a different shared source selector was ignored")
+	}
+	if matchesSharedSelectors(target, nil, makeSet([]string{"node-b"}), "", "") {
+		t.Fatal("a different shared node selector was ignored")
+	}
+	if matchesSharedSelectors(target, nil, nil, "shared_source", "source-b") {
+		t.Fatal("shared_source policy selector was ignored")
+	}
+}

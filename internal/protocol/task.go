@@ -6,6 +6,14 @@ import (
 	"fmt"
 )
 
+type SyncSharedPayload struct {
+	SourceID                  string   `json:"sourceId"`
+	SourceName                string   `json:"sourceName"`
+	Scopes                    []string `json:"scopes"`
+	DryRun                    bool     `json:"dryRun"`
+	ExpectedSourceFingerprint string   `json:"expectedSourceFingerprint,omitempty"`
+}
+
 func TaskSigningBytes(id, kind string, payload json.RawMessage) ([]byte, error) {
 	var semantic any
 	decoder := json.NewDecoder(bytes.NewReader(payload))

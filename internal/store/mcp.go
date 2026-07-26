@@ -21,6 +21,7 @@ type MCPServerInput struct {
 	Args      []string          `json:"args"`
 	URL       string            `json:"url"`
 	Env       map[string]string `json:"env"`
+	Headers   map[string]string `json:"headers"`
 	Enabled   bool              `json:"enabled"`
 }
 
@@ -35,7 +36,19 @@ func (s *Store) CreateMCPServer(ctx context.Context, input MCPServerInput, actor
 	if input.Transport != "stdio" && strings.TrimSpace(input.URL) == "" {
 		return "", errors.New("network MCP servers require a URL")
 	}
-	descriptor, err := protocol.NormalizeMCPDescriptor("codex", domain.MCPDescriptor{Name: input.Name, Transport: input.Transport, Command: input.Command, Args: input.Args, URL: input.URL, EnvKeys: sortedKeys(input.Env)})
+	canonicalHeaders := make(map[string]string, len(input.Headers))
+	for key, value := range input.Headers {
+		canonical, err := protocol.NormalizeHeaderName(key)
+		if err != nil {
+			return "", err
+		}
+		if _, exists := canonicalHeaders[canonical]; exists {
+			return "", errors.New("duplicate MCP HTTP header name")
+		}
+		canonicalHeaders[canonical] = value
+	}
+	input.Headers = canonicalHeaders
+	descriptor, err := protocol.NormalizeMCPDescriptor("codex", domain.MCPDescriptor{Name: input.Name, Transport: input.Transport, Command: input.Command, Args: input.Args, URL: input.URL, EnvKeys: sortedKeys(input.Env), HeaderKeys: sortedKeys(input.Headers)})
 	if err != nil {
 		return "", err
 	}
@@ -63,10 +76,29 @@ func (s *Store) CreateMCPServer(ctx context.Context, input MCPServerInput, actor
 		}
 		envRefs[key] = secretID
 	}
+	headerRefs := map[string]string{}
+	for key, value := range input.Headers {
+		key = strings.TrimSpace(key)
+		if key == "" || value == "" || len(key) > 128 {
+			return "", errors.New("MCP header names and values cannot be empty")
+		}
+		secretID := uuid.NewString()
+		ciphertext, err := s.cipher.Encrypt([]byte(value), secretID)
+		if err != nil {
+			return "", err
+		}
+		metadata, _ := json.Marshal(map[string]any{"mcpServerId": serverID, "headerName": key})
+		if _, err := tx.Exec(ctx, `INSERT INTO encrypted_secrets(id,name,kind,ciphertext,metadata,created_by)
+			VALUES($1,$2,'mcp-header',$3,$4,$5)`, secretID, "mcp:"+serverID+":header:"+key, ciphertext, string(metadata), actor); err != nil {
+			return "", err
+		}
+		headerRefs[key] = secretID
+	}
 	args, _ := json.Marshal(input.Args)
 	refs, _ := json.Marshal(envRefs)
-	if _, err := tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,runtime_name,transport,command,args,url,env_refs,enabled,config_fingerprint,created_by)
-		VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, serverID, input.Name, descriptor.Transport, descriptor.Command, string(args), descriptor.URL, string(refs), input.Enabled, descriptor.ConfigFingerprint, actor); err != nil {
+	headerRefsJSON, _ := json.Marshal(headerRefs)
+	if _, err := tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,runtime_name,transport,command,args,url,env_refs,header_refs,enabled,config_fingerprint,created_by)
+		VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, serverID, input.Name, descriptor.Transport, descriptor.Command, string(args), descriptor.URL, string(refs), string(headerRefsJSON), input.Enabled, descriptor.ConfigFingerprint, actor); err != nil {
 		return "", err
 	}
 	return serverID, tx.Commit(ctx)
@@ -90,21 +122,26 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerP
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var currentName, runtimeName, source, transport, commandValue, urlValue string
-	var argsJSON, refsJSON []byte
+	var currentName, runtimeName, source, authority, transport, commandValue, urlValue string
+	var argsJSON, refsJSON, headerRefsJSON []byte
 	var enabled bool
-	err = tx.QueryRow(ctx, `SELECT name,runtime_name,source,transport,command,args,url,env_refs,enabled FROM mcp_servers WHERE id=$1 FOR UPDATE`, id).
-		Scan(&currentName, &runtimeName, &source, &transport, &commandValue, &argsJSON, &urlValue, &refsJSON, &enabled)
+	err = tx.QueryRow(ctx, `SELECT name,runtime_name,source,authority,transport,command,args,url,env_refs,header_refs,enabled FROM mcp_servers WHERE id=$1 FOR UPDATE`, id).
+		Scan(&currentName, &runtimeName, &source, &authority, &transport, &commandValue, &argsJSON, &urlValue, &refsJSON, &headerRefsJSON, &enabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
+	if authority == "shared-file" {
+		return ErrSourceFileAuthoritative
+	}
 	var args []string
 	var refs map[string]string
+	var headerRefs map[string]string
 	_ = json.Unmarshal(argsJSON, &args)
 	_ = json.Unmarshal(refsJSON, &refs)
+	_ = json.Unmarshal(headerRefsJSON, &headerRefs)
 	if patch.Transport != nil {
 		transport = *patch.Transport
 	}
@@ -126,7 +163,7 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerP
 	if patch.Enabled != nil {
 		enabled = *patch.Enabled
 	}
-	descriptor, err := protocol.NormalizeMCPDescriptor("codex", domain.MCPDescriptor{Name: runtimeName, Transport: transport, Command: commandValue, Args: args, URL: urlValue, EnvKeys: sortedKeys(refs)})
+	descriptor, err := protocol.NormalizeMCPDescriptor("codex", domain.MCPDescriptor{Name: runtimeName, Transport: transport, Command: commandValue, Args: args, URL: urlValue, EnvKeys: sortedKeys(refs), HeaderKeys: sortedKeys(headerRefs)})
 	if err != nil {
 		return err
 	}
@@ -153,6 +190,14 @@ func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var authority string
+	if err := tx.QueryRow(ctx, "SELECT authority FROM mcp_servers WHERE id=$1 FOR UPDATE", id).Scan(&authority); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	} else if authority == "shared-file" {
+		return ErrSourceFileAuthoritative
+	}
 	profileIDs, err := profileIDsForServer(ctx, tx, id)
 	if err != nil {
 		return err
@@ -187,6 +232,14 @@ func (s *Store) CreateMCPProfile(ctx context.Context, name, description, actor s
 		return "", err
 	}
 	for _, serverID := range serverIDs {
+		var authority string
+		if err := tx.QueryRow(ctx, "SELECT authority FROM mcp_servers WHERE id=$1", serverID).Scan(&authority); errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		} else if err != nil {
+			return "", err
+		} else if authority == "shared-file" {
+			return "", ErrSourceFileAuthoritative
+		}
 		if _, err := tx.Exec(ctx, "INSERT INTO mcp_profile_servers(profile_id,server_id) VALUES($1,$2)", id, serverID); err != nil {
 			return "", err
 		}
@@ -215,7 +268,7 @@ func (s *Store) SetMCPDeployments(ctx context.Context, profileID string, targets
 	}
 	deploymentIDs := make([]string, 0, len(targets))
 	for _, target := range targets {
-		if target.Runtime != "codex" && target.Runtime != "claude" && target.Runtime != "hermes" {
+		if !domain.IsMCPRuntime(target.Runtime) {
 			return nil, errors.New("invalid runtime target")
 		}
 		var deploymentID string
@@ -236,7 +289,7 @@ func (s *Store) MCPDeploymentPayload(ctx context.Context, deploymentID string) (
 	var raw []byte
 	err := s.pool.QueryRow(ctx, `SELECT d.node_id::text,d.runtime_kind,jsonb_build_object(
 		'profileId',p.id::text,'profileName',p.name,'enabled',d.desired_enabled,
-		'servers',CASE WHEN d.desired_enabled THEN coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",ps.overrides FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id WHERE ps.profile_id=p.id AND s.enabled ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) ELSE '[]'::jsonb END)
+		'servers',CASE WHEN d.desired_enabled THEN coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",s.header_refs AS "headerRefs",ps.overrides FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id WHERE ps.profile_id=p.id AND s.enabled AND s.authority='toolhub' ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) ELSE '[]'::jsonb END)
 		FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id WHERE d.id=$1`, deploymentID).Scan(&nodeID, &runtime, &raw)
 	if err != nil {
 		return "", "", nil, err

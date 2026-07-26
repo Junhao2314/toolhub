@@ -81,6 +81,8 @@ func (a *API) Router() http.Handler {
 			read.Get("/mcp/profiles", a.listMCPProfiles)
 			read.Get("/mcp/deployments", a.listMCPDeployments)
 			read.Get("/discoveries", a.listDiscoveries)
+			read.Get("/shared-sources", a.listSharedSources)
+			read.Get("/shared-sources/{id}", a.getSharedSource)
 		})
 
 		api.Group(func(ops chi.Router) {
@@ -106,6 +108,7 @@ func (a *API) Router() http.Handler {
 			ops.Post("/mcp/servers/{id}/health", a.checkMCPHealth)
 			ops.Post("/mcp/profiles", a.createMCPProfile)
 			ops.Post("/mcp/deployments", a.deployMCPProfile)
+			ops.Post("/shared-sources/{id}/sync", a.syncSharedSource)
 		})
 
 		api.Group(func(admin chi.Router) {
@@ -155,6 +158,10 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 func handleStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "not_found", "The requested resource was not found")
+		return
+	}
+	if errors.Is(err, store.ErrSourceFileAuthoritative) {
+		writeError(w, r, http.StatusConflict, "source_file_authoritative", "This MCP server is managed by its node-local shared source file")
 		return
 	}
 	writeError(w, r, http.StatusInternalServerError, "internal_error", "The operation failed")

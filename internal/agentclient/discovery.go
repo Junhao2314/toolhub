@@ -15,38 +15,40 @@ import (
 	runtimeadapter "github.com/Junhao2314/toolhub/internal/runtime"
 )
 
-func (e *Executor) discoverInventory(ctx context.Context) ([]domain.InventoryRuntime, error) {
+func (e *Executor) discoverInventory(ctx context.Context) (domain.AgentInventory, error) {
 	key, err := base64.StdEncoding.DecodeString(e.config.TaskKey)
 	if err != nil || len(key) != 32 {
-		return nil, errors.New("agent task key is invalid")
+		return domain.AgentInventory{}, errors.New("agent task key is invalid")
 	}
-	scan, err := runtimeadapter.ScanAllWithKey(e.config.Paths, key)
+	scan, err := runtimeadapter.ScanAllConfigured(e.config.Paths, e.config.SharedSources, e.config.DataDir, key)
 	if err != nil {
-		return nil, err
+		return domain.AgentInventory{}, err
 	}
+	inventory := domain.AgentInventory{Runtimes: scan.Runtimes, SharedSources: scan.SharedSources}
 	var response struct {
 		CaptureRequests []domain.MCPCaptureRequest `json:"captureRequests"`
 	}
-	if err := e.postAgentJSON(ctx, "/agent/v1/discoveries/descriptors", map[string]any{"runtimes": scan.Runtimes}, &response); err != nil {
-		return nil, err
+	if err := e.postAgentJSON(ctx, "/agent/v1/discoveries/descriptors", inventory, &response); err != nil {
+		return domain.AgentInventory{}, err
 	}
 	for _, request := range response.CaptureRequests {
 		secrets, ok := scan.MCPSecrets[request.Identity]
 		if !ok {
-			return nil, errors.New("control plane requested an unknown MCP secret identity")
+			return domain.AgentInventory{}, errors.New("control plane requested an unknown MCP secret identity")
 		}
 		capture := struct {
 			Token    string            `json:"token"`
 			Runtime  string            `json:"runtime"`
 			Name     string            `json:"name"`
 			Identity string            `json:"identity"`
-			Secrets  map[string]string `json:"secrets"`
-		}{request.Token, request.Runtime, request.Name, request.Identity, secrets}
+			Env      map[string]string `json:"env"`
+			Headers  map[string]string `json:"headers"`
+		}{request.Token, request.Runtime, request.Name, request.Identity, secrets.Env, secrets.Headers}
 		if err := e.postAgentJSON(ctx, "/agent/v1/discoveries/capture", capture, nil); err != nil {
-			return nil, err
+			return domain.AgentInventory{}, err
 		}
 	}
-	return scan.Runtimes, nil
+	return inventory, nil
 }
 
 func (e *Executor) postAgentJSON(ctx context.Context, endpoint string, payload any, target any) error {

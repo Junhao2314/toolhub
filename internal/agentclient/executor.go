@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/Junhao2314/toolhub/internal/protocol"
 	runtimeadapter "github.com/Junhao2314/toolhub/internal/runtime"
 	"github.com/Junhao2314/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
 type Executor struct {
@@ -39,15 +41,15 @@ func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, 
 	var err error
 	switch task.Kind {
 	case "scan_inventory":
-		var runtimes []domain.InventoryRuntime
-		runtimes, err = e.discoverInventory(ctx)
-		result = map[string]any{"runtimes": runtimes}
+		result, err = e.discoverInventory(ctx)
 	case "deploy_skill":
 		result, err = e.deploySkill(ctx, task.Payload)
 	case "apply_mcp":
 		result, err = e.applyMCP(ctx, task.Payload)
 	case "adopt_skill":
 		result, err = e.adoptSkill(ctx, task.ID, task.Payload)
+	case "sync_shared":
+		result, err = e.syncShared(ctx, task.Payload)
 	default:
 		err = fmt.Errorf("unsupported task kind %q", task.Kind)
 	}
@@ -59,6 +61,27 @@ func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, 
 	encoded := marshalResult(result)
 	_ = e.history.put(task.ID, taskRecord{Status: status, Result: encoded, CompletedAt: time.Now().UTC()})
 	return status, encoded
+}
+
+func (e *Executor) syncShared(ctx context.Context, raw json.RawMessage) (any, error) {
+	var payload protocol.SyncSharedPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	if payload.SourceID == "" || payload.SourceName == "" {
+		return nil, errors.New("shared sync task requires sourceId and sourceName")
+	}
+	key, err := base64.StdEncoding.DecodeString(e.config.TaskKey)
+	if err != nil || len(key) != 32 {
+		return nil, errors.New("agent task key is invalid")
+	}
+	reconciler := runtimeadapter.SharedReconciler{DataDir: e.config.DataDir, Sources: e.config.SharedSources, FingerprintKey: key}
+	return reconciler.Reconcile(ctx, runtimeadapter.SharedSyncRequest{
+		SourceName:                payload.SourceName,
+		Scopes:                    payload.Scopes,
+		DryRun:                    payload.DryRun,
+		ExpectedSourceFingerprint: payload.ExpectedSourceFingerprint,
+	})
 }
 
 func (e *Executor) verify(task domain.AgentTask) error {
@@ -78,11 +101,12 @@ func (e *Executor) verify(task domain.AgentTask) error {
 
 func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, error) {
 	var request struct {
-		Runtime   string `json:"runtime"`
-		SkillSlug string `json:"skillSlug"`
-		VersionID string `json:"versionId"`
-		SHA256    string `json:"sha256"`
-		Enabled   bool   `json:"enabled"`
+		Runtime    string `json:"runtime"`
+		SourceName string `json:"sourceName"`
+		SkillSlug  string `json:"skillSlug"`
+		VersionID  string `json:"versionId"`
+		SHA256     string `json:"sha256"`
+		Enabled    bool   `json:"enabled"`
 	}
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, err
@@ -95,8 +119,20 @@ func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, e
 			return nil, err
 		}
 	}
-	deployer := runtimeadapter.Deployer{DataDir: e.config.DataDir, Paths: e.config.Paths}
-	return deployer.Deploy(runtimeadapter.DeployRequest{Runtime: request.Runtime, SkillSlug: request.SkillSlug, VersionID: request.VersionID, SHA256: request.SHA256, Enabled: request.Enabled, Artifact: artifact})
+	deployer := runtimeadapter.Deployer{DataDir: e.config.DataDir, Paths: e.config.Paths, SharedSources: e.config.SharedSources}
+	result, err := deployer.Deploy(runtimeadapter.DeployRequest{Runtime: request.Runtime, SourceName: request.SourceName, SkillSlug: request.SkillSlug, VersionID: request.VersionID, SHA256: request.SHA256, Enabled: request.Enabled, Artifact: artifact})
+	if err != nil || request.Runtime != domain.RuntimeShared {
+		return result, err
+	}
+	key, decodeErr := base64.StdEncoding.DecodeString(e.config.TaskKey)
+	if decodeErr != nil || len(key) != 32 {
+		return nil, errors.New("agent task key is invalid")
+	}
+	syncResult, syncErr := (runtimeadapter.SharedReconciler{DataDir: e.config.DataDir, Sources: e.config.SharedSources, FingerprintKey: key}).Reconcile(ctx, runtimeadapter.SharedSyncRequest{SourceName: request.SourceName, Scopes: []string{"skills"}})
+	if syncErr != nil {
+		return nil, syncErr
+	}
+	return map[string]any{"deployment": result, "sharedSync": syncResult}, nil
 }
 
 func (e *Executor) applyMCP(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -155,7 +191,26 @@ func (e *Executor) adoptSkill(ctx context.Context, taskID string, raw json.RawMe
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, err
 	}
-	pkg, err := runtimeadapter.PackageDiscoveredSkill(e.config.Paths, request.Runtime, request.Path, request.SHA256)
+	paths := e.config.Paths
+	var pkg skills.Package
+	var err error
+	if request.Runtime == domain.RuntimeShared {
+		var sharedSource *runtimeadapter.SharedSourceConfig
+		for _, source := range e.config.SharedSources {
+			relative, relErr := filepath.Rel(source.SkillsRoot, request.Path)
+			if relErr == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				sourceCopy := source
+				sharedSource = &sourceCopy
+				break
+			}
+		}
+		if sharedSource == nil {
+			return nil, errors.New("shared Skill discovery is outside configured sources")
+		}
+		pkg, err = runtimeadapter.PackageSharedDiscoveredSkill(*sharedSource, request.Path, request.SHA256)
+	} else {
+		pkg, err = runtimeadapter.PackageDiscoveredSkill(paths, request.Runtime, request.Path, request.SHA256)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -188,10 +243,12 @@ func (e *Executor) adoptSkill(ctx context.Context, taskID string, raw json.RawMe
 		return nil, errors.New("control plane returned an invalid Skill adoption response")
 	}
 	marker := runtimeadapter.AdoptedSkillMarker{SkillID: imported.SkillID, VersionID: imported.VersionID, SHA256: imported.SHA256}
-	if err := runtimeadapter.MarkAdoptedSkill(e.config.Paths, request.Runtime, request.Path, request.SHA256, marker); err != nil {
-		return nil, err
+	if request.Runtime != domain.RuntimeShared {
+		if err := runtimeadapter.MarkAdoptedSkill(paths, request.Runtime, request.Path, request.SHA256, marker); err != nil {
+			return nil, err
+		}
 	}
-	return map[string]any{"discoveryId": request.DiscoveryID, "skillId": imported.SkillID, "versionId": imported.VersionID, "sha256": imported.SHA256, "markerWritten": true}, nil
+	return map[string]any{"discoveryId": request.DiscoveryID, "skillId": imported.SkillID, "versionId": imported.VersionID, "sha256": imported.SHA256, "markerWritten": request.Runtime != domain.RuntimeShared}, nil
 }
 
 func marshalResult(value any) json.RawMessage {

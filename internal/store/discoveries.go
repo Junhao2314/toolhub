@@ -27,7 +27,9 @@ type MCPSecretCapture struct {
 	Runtime  string            `json:"runtime"`
 	Name     string            `json:"name"`
 	Identity string            `json:"identity"`
-	Secrets  map[string]string `json:"secrets"`
+	Env      map[string]string `json:"env"`
+	Headers  map[string]string `json:"headers"`
+	Secrets  map[string]string `json:"secrets,omitempty"`
 }
 
 type MCPAdoptionResult struct {
@@ -70,7 +72,7 @@ func (grant captureGrant) validate(now time.Time, nodeID, runtimeKind, name, ide
 	}
 }
 
-func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, runtimes []domain.InventoryRuntime, issueCaptureTokens bool) ([]domain.MCPCaptureRequest, error) {
+func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, inventory domain.AgentInventory, issueCaptureTokens bool) ([]domain.MCPCaptureRequest, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -108,14 +110,17 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, runtim
 	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET missing=true,drift=desired_enabled,updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
 		return nil, err
 	}
+	if err := upsertSharedInventoryTx(ctx, tx, nodeID, inventory.SharedSources); err != nil {
+		return nil, err
+	}
 	var unknown []struct {
 		Runtime    string
 		Descriptor domain.MCPDescriptor
 	}
 	var drifted []string
 	seenBindings := map[string]bool{}
-	for _, runtime := range runtimes {
-		if runtime.Kind != "codex" && runtime.Kind != "claude" && runtime.Kind != "hermes" {
+	for _, runtime := range inventory.Runtimes {
+		if !domain.IsConsumerRuntime(runtime.Kind) {
 			return nil, errors.New("inventory contains an invalid runtime")
 		}
 		config, _ := json.Marshal(security.RedactMap(runtime.Config))
@@ -133,7 +138,7 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, runtim
 			if err != nil {
 				return nil, fmt.Errorf("normalize MCP descriptor: %w", err)
 			}
-			if len(descriptor.EnvKeys) > 0 {
+			if len(descriptor.EnvKeys) > 0 || len(descriptor.HeaderKeys) > 0 {
 				decoded, decodeErr := hex.DecodeString(descriptor.SecretFingerprint)
 				if decodeErr != nil || len(decoded) != 32 {
 					return nil, errors.New("MCP descriptor secret fingerprint is required")
@@ -186,8 +191,8 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, runtim
 	}
 	requests := make([]domain.MCPCaptureRequest, 0, len(unknown))
 	for _, item := range unknown {
-		if len(item.Descriptor.EnvKeys) == 0 {
-			result, adoptErr := s.adoptRuntimeMCP(ctx, nodeID, item.Runtime, item.Descriptor, nil)
+		if len(item.Descriptor.EnvKeys) == 0 && len(item.Descriptor.HeaderKeys) == 0 {
+			result, adoptErr := s.adoptRuntimeMCP(ctx, nodeID, item.Runtime, item.Descriptor, nil, nil)
 			if adoptErr != nil {
 				return nil, adoptErr
 			}
@@ -218,6 +223,16 @@ func upsertSkillDiscoveries(ctx context.Context, tx pgx.Tx, nodeID string, runti
 		disabled, _ := item["disabled"].(bool)
 		if strings.TrimSpace(pathValue) == "" || strings.TrimSpace(name) == "" {
 			continue
+		}
+		if runtime.Kind != domain.RuntimeShared {
+			var sharedConsumerLink bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM shared_skill_links l JOIN shared_sources ss ON ss.id=l.source_id
+				WHERE ss.node_id=$1 AND l.target_path=$2 AND ss.status<>'missing')`, nodeID, pathValue).Scan(&sharedConsumerLink); err != nil {
+				return err
+			}
+			if sharedConsumerLink {
+				continue
+			}
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO skill_discoveries(id,node_id,runtime_kind,canonical_path,name,directory_hash,managed,protected,disabled,last_seen_at)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
@@ -261,6 +276,10 @@ func (s *Store) createMCPCaptureToken(ctx context.Context, nodeID, runtimeKind s
 }
 
 func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MCPSecretCapture) (MCPAdoptionResult, error) {
+	legacySecrets := capture.Env == nil && capture.Secrets != nil
+	if capture.Env == nil && capture.Secrets != nil {
+		capture.Env = capture.Secrets
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return MCPAdoptionResult{}, err
@@ -287,17 +306,21 @@ func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MC
 	if err := json.Unmarshal(descriptorJSON, &descriptor); err != nil {
 		return MCPAdoptionResult{}, errors.New("capture descriptor is invalid")
 	}
-	if !sameStringSet(descriptor.EnvKeys, mapKeys(capture.Secrets)) {
-		return MCPAdoptionResult{}, errors.New("captured secret names do not match the descriptor")
+	if !sameStringSet(descriptor.EnvKeys, mapKeys(capture.Env)) || !sameStringSet(descriptor.HeaderKeys, mapKeys(capture.Headers)) {
+		return MCPAdoptionResult{}, errors.New("captured environment or header names do not match the descriptor")
 	}
 	key, err := agentTaskKeyTx(ctx, tx, nodeID, s.cipher)
 	if err != nil {
 		return MCPAdoptionResult{}, err
 	}
-	if subtle.ConstantTimeCompare([]byte(security.FingerprintSecretMap(key, capture.Secrets)), []byte(secretFingerprint)) != 1 {
+	fingerprintValues := captureFingerprintValues(capture.Env, capture.Headers)
+	if legacySecrets && len(capture.Headers) == 0 {
+		fingerprintValues = capture.Env
+	}
+	if subtle.ConstantTimeCompare([]byte(security.FingerprintSecretMap(key, fingerprintValues)), []byte(secretFingerprint)) != 1 {
 		return MCPAdoptionResult{}, errors.New("captured secrets do not match the descriptor fingerprint")
 	}
-	result, err := s.adoptRuntimeMCPTx(ctx, tx, nodeID, capture.Runtime, descriptor, capture.Secrets)
+	result, err := s.adoptRuntimeMCPTx(ctx, tx, nodeID, capture.Runtime, descriptor, capture.Env, capture.Headers)
 	if err != nil {
 		return MCPAdoptionResult{}, err
 	}
@@ -307,7 +330,7 @@ func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MC
 	if err := tx.Commit(ctx); err != nil {
 		return MCPAdoptionResult{}, err
 	}
-	_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_secret_capture", ResourceType: "mcp_binding", ResourceID: result.BindingID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "secretNames": mapKeys(capture.Secrets)}})
+	_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_secret_capture", ResourceType: "mcp_binding", ResourceID: result.BindingID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "envNames": mapKeys(capture.Env), "headerNames": mapKeys(capture.Headers)}})
 	_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_auto_adopt", ResourceType: "mcp_binding", ResourceID: result.BindingID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "reused": result.Reused}})
 	return result, nil
 }
@@ -321,20 +344,20 @@ func agentTaskKeyTx(ctx context.Context, tx pgx.Tx, nodeID string, cipher *secur
 	return cipher.Decrypt(ciphertext, secretID)
 }
 
-func (s *Store) adoptRuntimeMCP(ctx context.Context, nodeID, runtimeKind string, descriptor domain.MCPDescriptor, secrets map[string]string) (MCPAdoptionResult, error) {
+func (s *Store) adoptRuntimeMCP(ctx context.Context, nodeID, runtimeKind string, descriptor domain.MCPDescriptor, environment, headers map[string]string) (MCPAdoptionResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return MCPAdoptionResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	result, err := s.adoptRuntimeMCPTx(ctx, tx, nodeID, runtimeKind, descriptor, secrets)
+	result, err := s.adoptRuntimeMCPTx(ctx, tx, nodeID, runtimeKind, descriptor, environment, headers)
 	if err != nil {
 		return MCPAdoptionResult{}, err
 	}
 	return result, tx.Commit(ctx)
 }
 
-func (s *Store) adoptRuntimeMCPTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind string, descriptor domain.MCPDescriptor, secrets map[string]string) (MCPAdoptionResult, error) {
+func (s *Store) adoptRuntimeMCPTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind string, descriptor domain.MCPDescriptor, environment, headers map[string]string) (MCPAdoptionResult, error) {
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "runtime-binding:"+nodeID+":"+runtimeKind+":"+descriptor.Name); err != nil {
 		return MCPAdoptionResult{}, err
 	}
@@ -352,12 +375,12 @@ func (s *Store) adoptRuntimeMCPTx(ctx context.Context, tx pgx.Tx, nodeID, runtim
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return MCPAdoptionResult{}, err
 	}
-	serverID, reused, err := s.findRuntimeAutoServer(ctx, tx, descriptor, secrets)
+	serverID, reused, err := s.findRuntimeAutoServer(ctx, tx, descriptor, environment, headers)
 	if err != nil {
 		return MCPAdoptionResult{}, err
 	}
 	if serverID == "" {
-		serverID, err = s.createRuntimeAutoServer(ctx, tx, nodeID, runtimeKind, descriptor, secrets)
+		serverID, err = s.createRuntimeAutoServer(ctx, tx, nodeID, runtimeKind, descriptor, environment, headers)
 		if err != nil {
 			return MCPAdoptionResult{}, err
 		}
@@ -393,36 +416,39 @@ func (s *Store) adoptRuntimeMCPTx(ctx context.Context, tx pgx.Tx, nodeID, runtim
 	}
 	bindingID := uuid.NewString()
 	envKeys, _ := json.Marshal(descriptor.EnvKeys)
+	headerKeys, _ := json.Marshal(descriptor.HeaderKeys)
 	if _, err := tx.Exec(ctx, `INSERT INTO mcp_runtime_bindings(id,node_id,runtime_kind,server_name,identity,server_id,profile_id,deployment_id,env_keys,
-		observed_config_fingerprint,observed_secret_fingerprint,desired_config_fingerprint,desired_secret_fingerprint,desired_enabled,missing,drift,last_seen_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$11,true,false,false,now())`, bindingID, nodeID, runtimeKind, descriptor.Name, descriptor.Identity, serverID, profileID, deploymentID, string(envKeys), descriptor.ConfigFingerprint, descriptor.SecretFingerprint); err != nil {
+		observed_config_fingerprint,observed_secret_fingerprint,desired_config_fingerprint,desired_secret_fingerprint,desired_enabled,missing,drift,last_seen_at,header_keys)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$11,true,false,false,now(),$12)`, bindingID, nodeID, runtimeKind, descriptor.Name, descriptor.Identity, serverID, profileID, deploymentID, string(envKeys), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, string(headerKeys)); err != nil {
 		return MCPAdoptionResult{}, err
 	}
 	return MCPAdoptionResult{BindingID: bindingID, ServerID: serverID, ProfileID: profileID, DeploymentID: deploymentID, Reused: reused}, nil
 }
 
-func (s *Store) findRuntimeAutoServer(ctx context.Context, tx pgx.Tx, descriptor domain.MCPDescriptor, secrets map[string]string) (string, bool, error) {
-	rows, err := tx.Query(ctx, `SELECT id::text,env_refs FROM mcp_servers WHERE source='runtime-auto' AND enabled AND runtime_name=$1 AND config_fingerprint=$2 ORDER BY created_at`, descriptor.Name, descriptor.ConfigFingerprint)
+func (s *Store) findRuntimeAutoServer(ctx context.Context, tx pgx.Tx, descriptor domain.MCPDescriptor, environment, headers map[string]string) (string, bool, error) {
+	rows, err := tx.Query(ctx, `SELECT id::text,env_refs,header_refs FROM mcp_servers WHERE source='runtime-auto' AND enabled AND runtime_name=$1 AND config_fingerprint=$2 ORDER BY created_at`, descriptor.Name, descriptor.ConfigFingerprint)
 	if err != nil {
 		return "", false, err
 	}
 	type candidate struct {
-		id   string
-		refs map[string]string
+		id         string
+		envRefs    map[string]string
+		headerRefs map[string]string
 	}
 	var candidates []candidate
 	for rows.Next() {
 		var id string
-		var refsJSON []byte
-		if err := rows.Scan(&id, &refsJSON); err != nil {
+		var envRefsJSON, headerRefsJSON []byte
+		if err := rows.Scan(&id, &envRefsJSON, &headerRefsJSON); err != nil {
 			rows.Close()
 			return "", false, err
 		}
-		var refs map[string]string
-		if json.Unmarshal(refsJSON, &refs) != nil || !sameStringSet(mapKeys(refs), mapKeys(secrets)) {
+		var envRefs, headerRefs map[string]string
+		if json.Unmarshal(envRefsJSON, &envRefs) != nil || json.Unmarshal(headerRefsJSON, &headerRefs) != nil ||
+			!sameStringSet(mapKeys(envRefs), mapKeys(environment)) || !sameStringSet(mapKeys(headerRefs), mapKeys(headers)) {
 			continue
 		}
-		candidates = append(candidates, candidate{id: id, refs: refs})
+		candidates = append(candidates, candidate{id: id, envRefs: envRefs, headerRefs: headerRefs})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -431,7 +457,7 @@ func (s *Store) findRuntimeAutoServer(ctx context.Context, tx pgx.Tx, descriptor
 	rows.Close()
 	for _, candidate := range candidates {
 		matches := true
-		for name, secretID := range candidate.refs {
+		for name, secretID := range candidate.envRefs {
 			var ciphertext []byte
 			if err := tx.QueryRow(ctx, "SELECT ciphertext FROM encrypted_secrets WHERE id=$1", secretID).Scan(&ciphertext); err != nil {
 				return "", false, err
@@ -440,7 +466,20 @@ func (s *Store) findRuntimeAutoServer(ctx context.Context, tx pgx.Tx, descriptor
 			if err != nil {
 				return "", false, err
 			}
-			if subtle.ConstantTimeCompare(plaintext, []byte(secrets[name])) != 1 {
+			if subtle.ConstantTimeCompare(plaintext, []byte(environment[name])) != 1 {
+				matches = false
+			}
+		}
+		for name, secretID := range candidate.headerRefs {
+			var ciphertext []byte
+			if err := tx.QueryRow(ctx, "SELECT ciphertext FROM encrypted_secrets WHERE id=$1", secretID).Scan(&ciphertext); err != nil {
+				return "", false, err
+			}
+			plaintext, err := s.cipher.Decrypt(ciphertext, secretID)
+			if err != nil {
+				return "", false, err
+			}
+			if subtle.ConstantTimeCompare(plaintext, []byte(headers[name])) != 1 {
 				matches = false
 			}
 		}
@@ -451,25 +490,34 @@ func (s *Store) findRuntimeAutoServer(ctx context.Context, tx pgx.Tx, descriptor
 	return "", false, nil
 }
 
-func (s *Store) createRuntimeAutoServer(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind string, descriptor domain.MCPDescriptor, secrets map[string]string) (string, error) {
+func (s *Store) createRuntimeAutoServer(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind string, descriptor domain.MCPDescriptor, environment, headers map[string]string) (string, error) {
 	serverID := uuid.NewString()
 	name, err := uniqueRuntimeAutoServerName(ctx, tx, descriptor.Name, nodeID, runtimeKind)
 	if err != nil {
 		return "", err
 	}
-	refs := map[string]string{}
+	envRefs := map[string]string{}
 	for _, key := range descriptor.EnvKeys {
-		secretID, err := s.createSecret(ctx, tx, "mcp:"+serverID+":"+key, "mcp-env", []byte(secrets[key]), map[string]any{"mcpServerId": serverID, "envName": key, "source": "runtime-auto"}, "")
+		secretID, err := s.createSecret(ctx, tx, "mcp:"+serverID+":"+key, "mcp-env", []byte(environment[key]), map[string]any{"mcpServerId": serverID, "envName": key, "source": "runtime-auto"}, "")
 		if err != nil {
 			return "", err
 		}
-		refs[key] = secretID
+		envRefs[key] = secretID
+	}
+	headerRefs := map[string]string{}
+	for _, key := range descriptor.HeaderKeys {
+		secretID, err := s.createSecret(ctx, tx, "mcp:"+serverID+":header:"+key, "mcp-header", []byte(headers[key]), map[string]any{"mcpServerId": serverID, "headerName": key, "source": "runtime-auto"}, "")
+		if err != nil {
+			return "", err
+		}
+		headerRefs[key] = secretID
 	}
 	args, _ := json.Marshal(descriptor.Args)
-	refsJSON, _ := json.Marshal(refs)
+	envRefsJSON, _ := json.Marshal(envRefs)
+	headerRefsJSON, _ := json.Marshal(headerRefs)
 	origin, _ := json.Marshal(map[string]any{"nodeId": nodeID, "runtime": runtimeKind, "serverName": descriptor.Name})
-	if _, err := tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,runtime_name,transport,command,args,url,env_refs,enabled,source,origin,config_fingerprint)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,true,'runtime-auto',$9,$10)`, serverID, name, descriptor.Name, descriptor.Transport, descriptor.Command, string(args), descriptor.URL, string(refsJSON), string(origin), descriptor.ConfigFingerprint); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,runtime_name,transport,command,args,url,env_refs,header_refs,enabled,source,origin,config_fingerprint)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,true,'runtime-auto',$10,$11)`, serverID, name, descriptor.Name, descriptor.Transport, descriptor.Command, string(args), descriptor.URL, string(envRefsJSON), string(headerRefsJSON), string(origin), descriptor.ConfigFingerprint); err != nil {
 		return "", err
 	}
 	return serverID, nil
@@ -526,7 +574,7 @@ func ensureRuntimeAutoProfile(ctx context.Context, tx pgx.Tx, nodeID, runtimeKin
 func profileHashTx(ctx context.Context, tx pgx.Tx, profileID string) (string, error) {
 	var profile []byte
 	err := tx.QueryRow(ctx, `SELECT to_jsonb(q) FROM (SELECT p.id::text AS id,p.name,p.description,
-		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",ps.overrides FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id WHERE ps.profile_id=p.id AND s.enabled ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) AS servers
+		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",s.header_refs AS "headerRefs",ps.overrides FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id WHERE ps.profile_id=p.id AND s.enabled AND s.authority='toolhub' ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) AS servers
 		FROM mcp_profiles p WHERE p.id=$1 AND p.enabled) q`, profileID).Scan(&profile)
 	if err != nil {
 		return "", err
@@ -540,14 +588,16 @@ func (s *Store) ListDiscoveries(ctx context.Context) (json.RawMessage, error) {
 		SELECT sd.id::text AS id,'skill'::text AS kind,sd.node_id::text AS "nodeId",n.name AS "nodeName",sd.runtime_kind AS runtime,
 			sd.name,sd.canonical_path AS path,sd.directory_hash AS sha256,sd.managed,sd.protected,sd.disabled,sd.missing,sd.drift,
 			sd.adoption_status AS status,sd.adoption_error AS "lastError",coalesce(sd.adopted_skill_id::text,'') AS "adoptedSkillId",sd.last_seen_at AS "lastSeenAt",
-			''::text AS source,''::text AS "serverId",''::text AS "profileId",''::text AS "deploymentId"
+			''::text AS source,''::text AS "serverId",''::text AS "profileId",''::text AS "deploymentId",
+			coalesce((SELECT jsonb_object_agg(c.consumer_kind,l.state) FROM shared_skill_links l JOIN shared_consumers c ON c.id=l.consumer_id
+				WHERE l.source_path=sd.canonical_path),'{}'::jsonb) AS "linkCoverage"
 		FROM skill_discoveries sd JOIN nodes n ON n.id=sd.node_id
 		UNION ALL
 		SELECT mb.id::text AS id,'mcp'::text AS kind,mb.node_id::text AS "nodeId",n.name AS "nodeName",mb.runtime_kind AS runtime,
 			mb.server_name AS name,''::text AS path,''::text AS sha256,false AS managed,false AS protected,false AS disabled,mb.missing,mb.drift,
 			CASE WHEN mb.drift THEN 'drift' WHEN mb.missing THEN 'missing' ELSE 'managed' END AS status,''::text AS "lastError",''::text AS "adoptedSkillId",mb.last_seen_at AS "lastSeenAt",
-			'runtime-auto'::text AS source,coalesce(mb.server_id::text,'') AS "serverId",coalesce(mb.profile_id::text,'') AS "profileId",coalesce(mb.deployment_id::text,'') AS "deploymentId"
-		FROM mcp_runtime_bindings mb JOIN nodes n ON n.id=mb.node_id
+			coalesce(ms.authority,'runtime-auto')::text AS source,coalesce(mb.server_id::text,'') AS "serverId",coalesce(mb.profile_id::text,'') AS "profileId",coalesce(mb.deployment_id::text,'') AS "deploymentId",'{}'::jsonb AS "linkCoverage"
+		FROM mcp_runtime_bindings mb JOIN nodes n ON n.id=mb.node_id LEFT JOIN mcp_servers ms ON ms.id=mb.server_id
 	) discoveries ORDER BY kind,"nodeName",runtime,name`)
 }
 
@@ -713,4 +763,15 @@ func sameStringSet(first, second []string) bool {
 		}
 	}
 	return true
+}
+
+func captureFingerprintValues(environment, headers map[string]string) map[string]string {
+	values := make(map[string]string, len(environment)+len(headers))
+	for key, value := range environment {
+		values["env:"+key] = value
+	}
+	for key, value := range headers {
+		values["header:"+key] = value
+	}
+	return values
 }

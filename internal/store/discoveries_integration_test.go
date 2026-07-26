@@ -47,8 +47,8 @@ func TestRuntimeMCPAutoAdoptionIntegration(t *testing.T) {
 	for _, schedule := range schedules {
 		kinds[schedule.Kind] = true
 	}
-	if !kinds["update_check"] || !kinds["sync"] || !kinds["mcp_sync"] {
-		t.Fatalf("default dual reconciliation schedules missing: %+v", schedules)
+	if !kinds["update_check"] || !kinds["sync"] || !kinds["mcp_sync"] || !kinds["shared_sync"] {
+		t.Fatalf("default reconciliation schedules missing: %+v", schedules)
 	}
 	var adminID string
 	if err := st.pool.QueryRow(ctx, "SELECT id::text FROM users WHERE username='admin'").Scan(&adminID); err != nil {
@@ -57,7 +57,8 @@ func TestRuntimeMCPAutoAdoptionIntegration(t *testing.T) {
 
 	firstNode, firstKey := enrollTestNode(t, st, adminID, "node-one")
 	firstDescriptor := testDescriptor(t, firstKey, "example", "npx", "shared-secret")
-	requests, err := st.ProcessAgentInventory(ctx, firstNode, testInventory(firstDescriptor), true)
+	firstDescriptor.SecretFingerprint = security.FingerprintSecretMap(firstKey, map[string]string{"TOKEN": "shared-secret"})
+	requests, err := st.ProcessAgentInventory(ctx, firstNode, domain.AgentInventory{Runtimes: testInventory(firstDescriptor)}, true)
 	if err != nil || len(requests) != 1 {
 		t.Fatalf("first discovery: requests=%+v err=%v", requests, err)
 	}
@@ -70,11 +71,11 @@ func TestRuntimeMCPAutoAdoptionIntegration(t *testing.T) {
 
 	secondNode, secondKey := enrollTestNode(t, st, adminID, "node-two")
 	secondDescriptor := testDescriptor(t, secondKey, "example", "npx", "shared-secret")
-	requests, err = st.ProcessAgentInventory(ctx, secondNode, testInventory(secondDescriptor), true)
+	requests, err = st.ProcessAgentInventory(ctx, secondNode, domain.AgentInventory{Runtimes: testInventory(secondDescriptor)}, true)
 	if err != nil || len(requests) != 1 {
 		t.Fatalf("second discovery: requests=%+v err=%v", requests, err)
 	}
-	if _, err := st.CaptureRuntimeMCP(ctx, secondNode, MCPSecretCapture{Token: requests[0].Token, Runtime: "codex", Name: "example", Identity: secondDescriptor.Identity, Secrets: map[string]string{"TOKEN": "shared-secret"}}); err != nil {
+	if _, err := st.CaptureRuntimeMCP(ctx, secondNode, MCPSecretCapture{Token: requests[0].Token, Runtime: "codex", Name: "example", Identity: secondDescriptor.Identity, Env: map[string]string{"TOKEN": "shared-secret"}}); err != nil {
 		t.Fatal(err)
 	}
 	var serverCount int
@@ -84,11 +85,11 @@ func TestRuntimeMCPAutoAdoptionIntegration(t *testing.T) {
 
 	thirdNode, thirdKey := enrollTestNode(t, st, adminID, "node-three")
 	thirdDescriptor := testDescriptor(t, thirdKey, "example", "npx", "different-secret")
-	requests, err = st.ProcessAgentInventory(ctx, thirdNode, testInventory(thirdDescriptor), true)
+	requests, err = st.ProcessAgentInventory(ctx, thirdNode, domain.AgentInventory{Runtimes: testInventory(thirdDescriptor)}, true)
 	if err != nil || len(requests) != 1 {
 		t.Fatalf("third discovery: requests=%+v err=%v", requests, err)
 	}
-	if _, err := st.CaptureRuntimeMCP(ctx, thirdNode, MCPSecretCapture{Token: requests[0].Token, Runtime: "codex", Name: "example", Identity: thirdDescriptor.Identity, Secrets: map[string]string{"TOKEN": "different-secret"}}); err != nil {
+	if _, err := st.CaptureRuntimeMCP(ctx, thirdNode, MCPSecretCapture{Token: requests[0].Token, Runtime: "codex", Name: "example", Identity: thirdDescriptor.Identity, Env: map[string]string{"TOKEN": "different-secret"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.pool.QueryRow(ctx, "SELECT count(*) FROM mcp_servers WHERE source='runtime-auto'").Scan(&serverCount); err != nil || serverCount != 2 {
@@ -116,7 +117,7 @@ func TestRuntimeMCPAutoAdoptionIntegration(t *testing.T) {
 	}
 
 	drifted := testDescriptor(t, firstKey, "example", "different-command", "shared-secret")
-	if requests, err = st.ProcessAgentInventory(ctx, firstNode, testInventory(drifted), true); err != nil || len(requests) != 0 {
+	if requests, err = st.ProcessAgentInventory(ctx, firstNode, domain.AgentInventory{Runtimes: testInventory(drifted)}, true); err != nil || len(requests) != 0 {
 		t.Fatalf("known drift requested capture: requests=%+v err=%v", requests, err)
 	}
 	var drift bool
@@ -145,7 +146,7 @@ func TestRuntimeMCPAutoAdoptionIntegration(t *testing.T) {
 
 	pkg := testDiscoveredSkillPackage(t)
 	skillInventory := []domain.InventoryRuntime{{Kind: "codex", RootPath: "/tmp/codex/skills", Config: map[string]any{}, Inventory: map[string]any{"skills": []any{map[string]any{"name": "local-skill", "path": "/tmp/codex/skills/local-skill", "sha256": pkg.SHA256, "managed": false, "protected": false, "disabled": false}}}}}
-	if _, err := st.ProcessAgentInventory(ctx, firstNode, skillInventory, false); err != nil {
+	if _, err := st.ProcessAgentInventory(ctx, firstNode, domain.AgentInventory{Runtimes: skillInventory}, false); err != nil {
 		t.Fatal(err)
 	}
 	var missing bool
@@ -201,7 +202,7 @@ func testDescriptor(t *testing.T, key []byte, name, command, secret string) doma
 	if err != nil {
 		t.Fatal(err)
 	}
-	descriptor.SecretFingerprint = security.FingerprintSecretMap(key, map[string]string{"TOKEN": secret})
+	descriptor.SecretFingerprint = security.FingerprintSecretMap(key, map[string]string{"env:TOKEN": secret})
 	return descriptor
 }
 
