@@ -22,7 +22,7 @@ func (s *Store) EnqueueJob(ctx context.Context, kind string, payload any, dryRun
 	if createdBy != "" {
 		actor = createdBy
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO jobs(id,kind,payload,dry_run,created_by) VALUES($1,$2,$3,$4,$5)`, job.ID, job.Kind, job.Payload, dryRun, actor)
+	_, err = s.pool.Exec(ctx, `INSERT INTO jobs(id,kind,payload,dry_run,created_by) VALUES($1,$2,$3,$4,$5)`, job.ID, job.Kind, string(job.Payload), dryRun, actor)
 	return job, err
 }
 
@@ -51,7 +51,7 @@ func (s *Store) ClaimJob(ctx context.Context) (domain.Job, error) {
 
 func (s *Store) FinishJob(ctx context.Context, id string, result any) error {
 	encoded, _ := json.Marshal(result)
-	_, err := s.pool.Exec(ctx, "UPDATE jobs SET status='succeeded',result=$2,finished_at=now() WHERE id=$1", id, encoded)
+	_, err := s.pool.Exec(ctx, "UPDATE jobs SET status='succeeded',result=$2,finished_at=now() WHERE id=$1", id, string(encoded))
 	return err
 }
 

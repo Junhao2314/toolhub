@@ -11,8 +11,9 @@ ToolHub assumes the host and Tailnet are trusted administrative infrastructure. 
 - Random temporary passwords use the operating system CSPRNG, are returned once, and are never written to audit metadata or logs. Username/password changes revoke all sessions for the target user.
 - Session and Agent bearer tokens are stored only as SHA-256 hashes.
 - AI keys, MCP environment values, SSH keys, and Agent task keys use XChaCha20-Poly1305 with record ID associated data.
+- MCP inventory contains normalized non-secret descriptors and environment key names only. Secret comparison uses HMAC-SHA256 under the per-node task key; unknown MCP values are requested through an expiring, one-time, node/identity-bound capture token and encrypted immediately.
 - Agent secret resolution is authorized against the node's desired MCP deployments. An Agent cannot fetch AI keys, SSH keys, or another node's MCP values.
-- API responses and audit metadata recursively redact credential-shaped fields.
+- Audit metadata, persisted inventory, and AI inputs recursively redact credential-shaped fields. Secret-bearing browser responses are prevented at their specific store/handler boundaries; there is no universal response-redaction middleware.
 
 ## Remote Execution
 
@@ -26,8 +27,12 @@ The Nodes page never reads SSH private keys back. Saving a replacement disables 
 
 Archives reject absolute paths, traversal, backslashes, duplicate paths, symlinks, oversized files, and multiple package roots. Review reports expose scripts, executables, URLs, allowed tools, possible credentials, and license presence. Imported content is immutable and remains Library-only until an administrator approves it and assigns targets.
 
+Discovered runtime Skills remain read-only until an administrator queues adoption. The Agent rejects `.system`, escaped, or symlinked paths; the backend rescans the uploaded canonical ZIP and verifies its discovery hash. The Agent writes the managed marker only after that import succeeds.
+
 ## Deployment Safety
 
 Managed content is cached under `~/.toolhub/artifacts/<sha256>`. Activation stages a full directory, backs up the previous managed directory, and uses rename-based replacement. Existing unmanaged directories and `.system` targets are conflicts, not overwrite candidates.
+
+MCP is the intentional exception to manual onboarding: newly discovered MCP servers are automatically baselined without rewriting the node. After baseline, ToolHub owns desired state and local edits/deletion are drift restored by manual or scheduled reconciliation.
 
 Before production use, rotate every example credential, enable secure cookies, configure Tailnet ACLs, back up PostgreSQL, and review high-risk Skill findings manually.

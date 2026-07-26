@@ -17,6 +17,11 @@ func (s *Store) ListNodes(ctx context.Context) (json.RawMessage, error) {
 		(n.labels->>'scope'='local') AS "isLocal",
 		EXISTS(SELECT 1 FROM node_connections c WHERE c.node_id=n.id AND c.kind='ssh' AND c.enabled) AS "hasSsh",
 		(SELECT count(*) FROM runtimes r WHERE r.node_id=n.id) AS "runtimeCount",
+		(SELECT max(r.scanned_at) FROM runtimes r WHERE r.node_id=n.id) AS "scannedAt",
+		(SELECT count(*) FROM mcp_runtime_bindings mb WHERE mb.node_id=n.id AND mb.desired_enabled) AS "autoManagedMcpCount",
+		(SELECT count(*) FROM skill_discoveries sd WHERE sd.node_id=n.id AND sd.adopted_skill_id IS NULL AND NOT sd.missing AND NOT sd.protected) AS "pendingSkillCount",
+		(SELECT count(*) FROM skill_discoveries sd WHERE sd.node_id=n.id AND (sd.drift OR sd.missing)) +
+		(SELECT count(*) FROM mcp_runtime_bindings mb WHERE mb.node_id=n.id AND (mb.drift OR mb.missing)) AS "discoveryAttentionCount",
 		coalesce((SELECT array_agg(DISTINCT r.kind ORDER BY r.kind) FROM runtimes r WHERE r.node_id=n.id),ARRAY[]::text[]) AS "runtimeKinds"
 		FROM nodes n WHERE n.archived_at IS NULL ORDER BY (n.labels->>'scope'='local') DESC,n.name`)
 }
@@ -68,15 +73,20 @@ func (s *Store) ListAudit(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (s *Store) ListMCPServers(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT id::text AS id,name,transport,command,args,url,env_refs AS "envRefs",enabled,source,health_status AS "healthStatus",usage,update_policy AS "updatePolicy",created_at AS "createdAt" FROM mcp_servers ORDER BY name`)
+	return s.JSONList(ctx, `SELECT id::text AS id,name,runtime_name AS "runtimeName",transport,command,args,url,env_refs AS "envRefs",enabled,source,origin,health_status AS "healthStatus",usage,update_policy AS "updatePolicy",created_at AS "createdAt",
+		(SELECT count(*) FROM mcp_runtime_bindings b WHERE b.server_id=mcp_servers.id) AS "bindingCount",
+		EXISTS(SELECT 1 FROM mcp_runtime_bindings b WHERE b.server_id=mcp_servers.id AND (b.drift OR b.missing)) AS "hasDrift"
+		FROM mcp_servers ORDER BY name`)
 }
 
 func (s *Store) ListMCPProfiles(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT p.id::text AS id,p.name,p.description,p.enabled,p.created_at AS "createdAt",coalesce(array_agg(ps.server_id::text) FILTER (WHERE ps.server_id IS NOT NULL),ARRAY[]::text[]) AS "serverIds" FROM mcp_profiles p LEFT JOIN mcp_profile_servers ps ON ps.profile_id=p.id GROUP BY p.id ORDER BY p.name`)
+	return s.JSONList(ctx, `SELECT p.id::text AS id,p.name,p.description,p.enabled,p.source,p.origin,p.created_at AS "createdAt",coalesce(array_agg(ps.server_id::text) FILTER (WHERE ps.server_id IS NOT NULL),ARRAY[]::text[]) AS "serverIds" FROM mcp_profiles p LEFT JOIN mcp_profile_servers ps ON ps.profile_id=p.id GROUP BY p.id ORDER BY p.name`)
 }
 
 func (s *Store) ListMCPDeployments(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT d.id::text AS id,d.profile_id::text AS "profileId",p.name AS "profileName",d.node_id::text AS "nodeId",n.name AS "nodeName",d.runtime_kind AS runtime,d.desired_enabled AS "desiredEnabled",d.actual_hash AS "actualHash",d.desired_hash AS "desiredHash",d.state,d.last_error AS "lastError",d.updated_at AS "updatedAt" FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id JOIN nodes n ON n.id=d.node_id ORDER BY p.name,n.name`)
+	return s.JSONList(ctx, `SELECT d.id::text AS id,d.profile_id::text AS "profileId",p.name AS "profileName",p.source,d.node_id::text AS "nodeId",n.name AS "nodeName",d.runtime_kind AS runtime,d.desired_enabled AS "desiredEnabled",d.actual_hash AS "actualHash",d.desired_hash AS "desiredHash",d.state,d.last_error AS "lastError",d.updated_at AS "updatedAt",
+		coalesce((SELECT jsonb_agg(jsonb_build_object('id',b.id::text,'serverName',b.server_name,'missing',b.missing,'drift',b.drift) ORDER BY b.server_name) FROM mcp_runtime_bindings b WHERE b.deployment_id=d.id),'[]'::jsonb) AS bindings
+		FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id JOIN nodes n ON n.id=d.node_id ORDER BY p.name,n.name`)
 }
 
 func (s *Store) ListAIProviders(ctx context.Context) (json.RawMessage, error) {

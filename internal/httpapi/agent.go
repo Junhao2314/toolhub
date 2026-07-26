@@ -2,10 +2,15 @@ package httpapi
 
 import (
 	"encoding/base64"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/toolhub-dev/toolhub/internal/domain"
+	"github.com/toolhub-dev/toolhub/internal/skills"
+	"github.com/toolhub-dev/toolhub/internal/store"
 )
 
 func (a *API) enrollAgent(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +68,72 @@ func (a *API) agentSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"value": string(value)})
+}
+
+func (a *API) agentDiscoveryDescriptors(w http.ResponseWriter, r *http.Request) {
+	if !a.verifyAgentRequest(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "Invalid agent credentials")
+		return
+	}
+	var input struct {
+		Runtimes []domain.InventoryRuntime `json:"runtimes"`
+	}
+	if err := decodeJSON(w, r, &input, 2<<20); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_discovery", "Invalid Agent discovery descriptor")
+		return
+	}
+	nodeID := strings.TrimSpace(r.Header.Get("X-ToolHub-Node-ID"))
+	requests, err := a.store.ProcessAgentInventory(r.Context(), nodeID, input.Runtimes, true)
+	if err != nil {
+		writeError(w, r, http.StatusUnprocessableEntity, "discovery_rejected", "Agent discovery descriptor was rejected")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"captureRequests": requests})
+}
+
+func (a *API) agentDiscoveryCapture(w http.ResponseWriter, r *http.Request) {
+	if !a.verifyAgentRequest(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "Invalid agent credentials")
+		return
+	}
+	var input store.MCPSecretCapture
+	if err := decodeJSON(w, r, &input, 2<<20); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_capture", "Invalid MCP secret capture")
+		return
+	}
+	nodeID := strings.TrimSpace(r.Header.Get("X-ToolHub-Node-ID"))
+	result, err := a.store.CaptureRuntimeMCP(r.Context(), nodeID, input)
+	if err != nil {
+		writeError(w, r, http.StatusForbidden, "capture_rejected", "MCP secret capture was rejected")
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (a *API) agentSkillAdoptionUpload(w http.ResponseWriter, r *http.Request) {
+	if !a.verifyAgentRequest(r) {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "Invalid agent credentials")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, skills.DefaultLimits.MaxArchiveBytes+1)
+	body, err := io.ReadAll(io.LimitReader(r.Body, skills.DefaultLimits.MaxArchiveBytes+1))
+	if err != nil || int64(len(body)) > skills.DefaultLimits.MaxArchiveBytes {
+		writeError(w, r, http.StatusRequestEntityTooLarge, "archive_too_large", "The Skill snapshot exceeds the upload limit")
+		return
+	}
+	pkg, err := skills.ScanZIP(body, skills.DefaultLimits)
+	if err != nil || r.Header.Get("X-Content-SHA256") != pkg.SHA256 {
+		writeError(w, r, http.StatusUnprocessableEntity, "skill_scan_failed", "The Skill snapshot failed validation")
+		return
+	}
+	nodeID := strings.TrimSpace(r.Header.Get("X-ToolHub-Node-ID"))
+	result, err := a.store.ImportDiscoveredSkill(r.Context(), nodeID, chi.URLParam(r, "id"), strings.TrimSpace(r.Header.Get("X-ToolHub-Task-ID")), pkg)
+	if err != nil {
+		writeError(w, r, http.StatusConflict, "skill_adoption_failed", "The Skill snapshot could not be imported")
+		return
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "runtime_skill_snapshot", ResourceType: "skill_discovery", ResourceID: chi.URLParam(r, "id"), Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "sha256": result.SHA256, "riskLevel": result.RiskLevel}})
+	writeJSON(w, http.StatusCreated, result)
 }
 
 func (a *API) verifyAgentRequest(r *http.Request) bool {

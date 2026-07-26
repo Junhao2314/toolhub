@@ -39,15 +39,12 @@ func (a *API) createMCPServer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) updateMCPServer(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Name    string `json:"name"`
-		Enabled *bool  `json:"enabled"`
-	}
+	var input store.MCPServerPatch
 	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := a.store.UpdateMCPServer(r.Context(), chi.URLParam(r, "id"), input.Enabled, input.Name); err != nil {
+	if err := a.store.UpdateMCPServer(r.Context(), chi.URLParam(r, "id"), input); err != nil {
 		writeError(w, r, http.StatusBadRequest, "mcp_update_failed", err.Error())
 		return
 	}
@@ -90,11 +87,12 @@ func (a *API) deployMCPProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := a.store.SetMCPDeployments(r.Context(), input.ProfileID, input.Targets); err != nil {
+	deploymentIDs, err := a.store.SetMCPDeployments(r.Context(), input.ProfileID, input.Targets)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "mcp_deploy_failed", err.Error())
 		return
 	}
-	job, err := a.store.EnqueueJob(r.Context(), "mcp_sync", map[string]string{"profileId": input.ProfileID}, input.DryRun, principalFrom(r.Context()).ID)
+	job, err := a.store.EnqueueJob(r.Context(), "mcp_sync", map[string]any{"profileIds": []string{input.ProfileID}, "deploymentIds": deploymentIDs}, input.DryRun, principalFrom(r.Context()).ID)
 	if err != nil {
 		handleStoreError(w, r, err)
 		return

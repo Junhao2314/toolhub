@@ -85,6 +85,24 @@ paths:
     post: {operationId: approveUpdate, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
   /sync:
     post: {operationId: sync, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /reconcile:
+    post:
+      operationId: reconcileSkillsAndMCP
+      description: Queues scoped Skill and MCP reconciliation jobs. Job success means orchestration completed, not that every Agent task has completed.
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}}
+  /discoveries:
+    get:
+      operationId: listRuntimeDiscoveries
+      description: Lists read-only Skill discoveries and automatically managed MCP runtime bindings. Secret fingerprints and values are omitted.
+      responses: {'200': {$ref: '#/components/responses/JSON'}}
+  /discoveries/{id}/adopt-skill:
+    post:
+      operationId: adoptDiscoveredSkill
+      description: Administrator-only request that queues a signed Agent adoption task. The imported snapshot remains pending review.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {$ref: '#/components/requestBodies/JSON'}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
   /jobs:
     get: {operationId: listJobs, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /jobs/{id}/cancel:

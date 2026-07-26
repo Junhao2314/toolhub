@@ -48,9 +48,9 @@ Use these project skills when their trigger matches:
 - Deployments track desired, actual, and previous versions. Rollback is a new desired-state transition (store swaps previous↔desired), not an in-place edit of managed runtime files.
 - Imported Skill artifacts are immutable and identified by source commit, canonical SHA-256, provenance, manifest, and scan report.
 - Agent tasks use a closed typed protocol and HMAC signatures over canonical JSON (`TaskSigningBytes` in package `internal/protocol` plus `SignPayload` in package `internal/security`). Do not add arbitrary shell execution.
-- Agent task kinds accepted by the agent `Executor` are only: `scan_inventory`, `deploy_skill`, `apply_mcp`.
-- Worker job kinds in `internal/worker/worker.go` are: `inventory_scan`, `skill_import`, `update_check`, `sync`, `rollback` (same handler as sync), `mcp_sync`, `mcp_health` (currently a no-op stub), `archive_purge`.
-- Existing Codex/Claude/Hermes runtime content is read-only during inventory/onboarding. Managed activation requires ToolHub's marker and uses content-addressed cache, staging, backup, and rename replacement.
+- Agent task kinds accepted by the agent `Executor` are only: `scan_inventory`, `deploy_skill`, `apply_mcp`, `adopt_skill`.
+- Worker job kinds in `internal/worker/worker.go` are: `inventory_scan`, `skill_import`, `skill_adopt`, `update_check`, `sync`, `rollback` (same handler as sync), `mcp_sync`, `mcp_health` (currently a no-op stub), `archive_purge`.
+- Existing Skills are read-only during inventory and require explicit administrator adoption before ToolHub writes its marker. Existing MCP configuration is automatically captured and baselined without a first-run rewrite; later local changes are drift.
 - Secrets are encrypted at rest, referenced by ID, and must not be returned in ordinary browser API responses or logs. The intentional plaintext exception is the authorized `/agent/v1/secrets/{secretID}` response for an enabled MCP deployment on that node.
 - The control plane binds to loopback by default; Tailscale Serve/ACL is external infrastructure. Do not expose the container port publicly.
 
@@ -58,12 +58,7 @@ Jobs, `node_tasks`, and deployments are separate state machines. A job marked su
 
 When changing a task or reconciliation flow, trace the producer, worker consumer, Agent executor, `CompleteTask` projection, and both WSS and SSH paths. The WSS send/mark-delivered and SSH fallback paths are not one atomic transaction.
 
-**Selector field names are a real contract.** Worker skill sync reads `nodeIds`, `skillIds`, `scopeType`, and `scopeId`. Today:
-
-- `setSkillTargets` enqueues `{"skillId": ...}` (singular) — **ignored** by the worker → can reconcile **all** pending skill deployments.
-- `rollbackDeployment` enqueues `{"deploymentId": ...}` — **ignored** → broader pending-set reconcile (state `rolling_back` still helps the row that was swapped).
-- `mcp_sync` enqueues `{"profileId": ...}` — **ignored**; worker processes all pending MCP deployment IDs.
-- Manual `POST /sync` with plural `nodeIds`/`skillIds` **is** consumed.
+**Selector field names are a real contract.** Worker Skill sync consumes `nodeIds`, `skillIds`, `scopeType`, and `scopeId`. MCP sync consumes `nodeIds`, `profileIds`, `deploymentIds`, `scopeType`, and `scopeId`. Producers use these plural fields for target updates, rollback, manual reconcile, and MCP deployment.
 
 Verify producer payload keys against `internal/worker/worker.go` before assuming an operation is scoped.
 
@@ -131,7 +126,7 @@ The local HTTP smoke profile must set `TOOLHUB_SECURE_COOKIES=false`. The normal
 - The OpenAPI file currently describes the `/api/v1` browser API, not `/healthz` or the `/agent/v1` enrollment, WebSocket, artifact, and secret endpoints.
 - HTTP coverage is mostly focused unit coverage; there is no broad router/auth/CSRF/role integration suite or real database fixture in the repository. Packages without `*_test.go` include most of `store`/`httpapi`/`worker`/`agenthub`/`agentclient`/`remote`/`ai`.
 - Existing `internal/httpapi/resources.go` and `settings.go` still contain direct `Pool().Exec` calls. Do not expand that pattern; move new persistence behavior into `internal/store`, and treat refactoring those paths as a separate risk-reviewed change.
-- Some handlers update state and enqueue a job in separate operations (`setSkillTargets`, `rollbackDeployment`, `deployMCPProfile`). When changing those flows, verify the failure semantics instead of assuming atomicity.
+- Some handlers update state and enqueue a job in separate operations (`setSkillTargets`, `rollbackDeployment`, `deployMCPProfile`). Their selectors are scoped, but the state/enqueue pair is still not atomic; verify failure semantics when changing those flows.
 - Playwright has no webServer setting. The backend must already be running; tests use `TOOLHUB_E2E_EMAIL` and `TOOLHUB_E2E_PASSWORD`, pin Chrome at `/usr/bin/google-chrome`, and run workers=1 (desktop + mobile projects).
 - Compose healthchecks only Postgres; app readiness is `GET /healthz`. Compose publishes only `127.0.0.1:18480`.
 - CI (`.github/workflows/ci.yml`): `go-test`, matrix `agent-build` (linux/mac/windows), `web` (audit+typecheck+build), `container-smoke` (compose + `scripts/smoke-api.sh` + Playwright). Race tests are not gated. Prefer Makefile/CI over historical `docs/workflows/**` for current gates.

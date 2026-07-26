@@ -1,6 +1,7 @@
 package agentclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -39,12 +40,14 @@ func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, 
 	switch task.Kind {
 	case "scan_inventory":
 		var runtimes []domain.InventoryRuntime
-		runtimes, err = runtimeadapter.ScanAll(e.config.Paths)
+		runtimes, err = e.discoverInventory(ctx)
 		result = map[string]any{"runtimes": runtimes}
 	case "deploy_skill":
 		result, err = e.deploySkill(ctx, task.Payload)
 	case "apply_mcp":
 		result, err = e.applyMCP(ctx, task.Payload)
+	case "adopt_skill":
+		result, err = e.adoptSkill(ctx, task.ID, task.Payload)
 	default:
 		err = fmt.Errorf("unsupported task kind %q", task.Kind)
 	}
@@ -123,8 +126,7 @@ func (e *Executor) fetchBytes(ctx context.Context, endpoint string, max int64) (
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+e.config.AgentToken)
-	request.Header.Set("X-ToolHub-Node-ID", e.config.NodeID)
+	e.authorizeAgentRequest(request)
 	response, err := e.http.Do(request)
 	if err != nil {
 		return nil, err
@@ -141,6 +143,55 @@ func (e *Executor) fetchBytes(ctx context.Context, endpoint string, max int64) (
 		return nil, errors.New("control plane response exceeds size limit")
 	}
 	return body, nil
+}
+
+func (e *Executor) adoptSkill(ctx context.Context, taskID string, raw json.RawMessage) (any, error) {
+	var request struct {
+		DiscoveryID string `json:"discoveryId"`
+		Runtime     string `json:"runtime"`
+		Path        string `json:"path"`
+		SHA256      string `json:"sha256"`
+	}
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return nil, err
+	}
+	pkg, err := runtimeadapter.PackageDiscoveredSkill(e.config.Paths, request.Runtime, request.Path, request.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.config.ServerURL, "/")+"/agent/v1/discoveries/"+request.DiscoveryID+"/skill", bytes.NewReader(pkg.CanonicalZIP))
+	if err != nil {
+		return nil, err
+	}
+	e.authorizeAgentRequest(httpRequest)
+	httpRequest.Header.Set("Content-Type", "application/zip")
+	httpRequest.Header.Set("X-ToolHub-Task-ID", taskID)
+	httpRequest.Header.Set("X-Content-SHA256", pkg.SHA256)
+	response, err := e.http.Do(httpRequest)
+	if err != nil {
+		return nil, fmt.Errorf("upload discovered Skill: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("control plane rejected discovered Skill with HTTP %d", response.StatusCode)
+	}
+	var imported struct {
+		SkillID   string `json:"skillId"`
+		VersionID string `json:"versionId"`
+		SHA256    string `json:"sha256"`
+	}
+	if err := json.Unmarshal(body, &imported); err != nil {
+		return nil, errors.New("control plane returned an invalid Skill adoption response")
+	}
+	marker := runtimeadapter.AdoptedSkillMarker{SkillID: imported.SkillID, VersionID: imported.VersionID, SHA256: imported.SHA256}
+	if err := runtimeadapter.MarkAdoptedSkill(e.config.Paths, request.Runtime, request.Path, request.SHA256, marker); err != nil {
+		return nil, err
+	}
+	return map[string]any{"discoveryId": request.DiscoveryID, "skillId": imported.SkillID, "versionId": imported.VersionID, "sha256": imported.SHA256, "markerWritten": true}, nil
 }
 
 func marshalResult(value any) json.RawMessage {

@@ -1,4 +1,4 @@
-import { Archive, Check, Download, FileUp, GitBranch, RefreshCw, RotateCcw, Search, ShieldAlert } from 'lucide-react'
+import { Archive, Check, Download, FileUp, GitBranch, RefreshCw, RotateCcw, Search, ShieldAlert, WandSparkles } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
@@ -6,8 +6,9 @@ import { useData } from '../hooks/useData'
 
 interface Skill { id: string; name: string; slug: string; description: string; reviewStatus: string; riskLevel?: string; sourceKind?: string; sourceCommit?: string; sha256?: string; deploymentCount: number; protected: boolean }
 interface Deployment { id: string; skillId: string; skillName: string; nodeName: string; runtime: string; state: string; desiredEnabled: boolean }
+interface Discovery { id: string; kind: string; nodeName: string; runtime: string; name: string; path: string; sha256: string; managed: boolean; protected: boolean; missing: boolean; drift: boolean; status: string; lastError: string }
 
-export default function Skills() {
+export default function Skills({ canAdopt }: { canAdopt: boolean }) {
   const [view, setView] = useState('Library')
   const [query, setQuery] = useState('')
   const [modal, setModal] = useState<'git' | 'targets' | null>(null)
@@ -16,8 +17,8 @@ export default function Skills() {
   const [notice, setNotice] = useState('')
   const upload = useRef<HTMLInputElement>(null)
   const state = useData(async () => {
-    const [skills, deployments] = await Promise.all([api.list<Skill>('/skills'), api.list<Deployment>('/deployments')])
-    return { skills: skills.items, deployments: deployments.items }
+    const [skills, deployments, discoveries] = await Promise.all([api.list<Skill>('/skills'), api.list<Deployment>('/deployments'), api.list<Discovery>('/discoveries')])
+    return { skills: skills.items, deployments: deployments.items, discoveries: discoveries.items.filter((item) => item.kind === 'skill') }
   }, [])
   const act = async (key: string, task: () => Promise<unknown>) => {
     setBusy(key); setNotice('')
@@ -27,11 +28,16 @@ export default function Skills() {
   return <>
     <PageHeader title="Skills" detail="Immutable packages, review decisions, targets, and actual state." actions={<><input ref={upload} hidden type="file" accept=".zip,application/zip" onChange={(event) => { const file = event.target.files?.[0]; if (file) act('upload', () => api.uploadSkill(file)) }} /><Button variant="secondary" onClick={() => upload.current?.click()} disabled={busy === 'upload'}><FileUp size={16} />Upload</Button><Button onClick={() => setModal('git')}><GitBranch size={16} />Import</Button></>} />
     {notice && <ErrorNotice message={notice} />}
-    <div className="toolbar"><Segments options={['Library', 'Review', 'Deployments']} value={view} onChange={setView} /><label className="search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search skills" /></label><IconButton label="Refresh" onClick={state.reload}><RefreshCw size={17} /></IconButton></div>
-    {state.loading ? <Loading label="Loading skills" /> : state.error ? <ErrorNotice message={state.error} retry={state.reload} /> : view === 'Deployments' ? <DeploymentTable deployments={state.data?.deployments ?? []} rollback={(id) => act(id, () => api.post(`/deployments/${id}/rollback`))} /> : filtered.length === 0 ? <Empty title={view === 'Review' ? 'Review queue is empty' : 'No skills in the library'} detail={view === 'Review' ? 'New imports requiring approval appear here.' : 'Import a Git package, SkillsMP entry, or ZIP.'} /> : <div className="table-scroll"><table><thead><tr><th>Skill</th><th>Source</th><th>Risk</th><th>Review</th><th>Targets</th><th aria-label="Actions" /></tr></thead><tbody>{filtered.map((skill) => <tr key={skill.id}><td><strong>{skill.name}</strong><small>{skill.description || skill.slug}</small></td><td>{skill.sourceKind ?? 'upload'}<small>{skill.sourceCommit?.slice(0, 9) || skill.sha256?.slice(0, 9)}</small></td><td><Status value={skill.riskLevel ?? 'unscored'} /></td><td><Status value={skill.reviewStatus} /></td><td>{skill.deploymentCount}</td><td className="row-actions">{skill.reviewStatus === 'pending' && <Button variant="secondary" disabled={busy === skill.id} onClick={() => act(skill.id, () => api.post(`/skills/${skill.id}/review`, { decision: 'approved' }))}><Check size={15} />Approve</Button>}<IconButton label="Set deployment targets" disabled={skill.reviewStatus !== 'approved'} onClick={() => { setSelected(skill); setModal('targets') }}><Download size={16} /></IconButton><IconButton label="Archive skill" disabled={skill.protected} onClick={() => act(skill.id, () => api.delete(`/skills/${skill.id}`))}><Archive size={16} /></IconButton></td></tr>)}</tbody></table></div>}
+    <div className="toolbar"><Segments options={['Library', 'Discovered', 'Review', 'Deployments']} value={view} onChange={setView} /><label className="search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search skills" /></label><IconButton label="Refresh" onClick={state.reload}><RefreshCw size={17} /></IconButton></div>
+    {state.loading ? <Loading label="Loading skills" /> : state.error ? <ErrorNotice message={state.error} retry={state.reload} /> : view === 'Deployments' ? <DeploymentTable deployments={state.data?.deployments ?? []} rollback={(id) => act(id, () => api.post(`/deployments/${id}/rollback`))} /> : view === 'Discovered' ? <DiscoveredTable items={state.data?.discoveries ?? []} busy={busy} canAdopt={canAdopt} adopt={(id) => act(id, () => api.post(`/discoveries/${id}/adopt-skill`))} /> : filtered.length === 0 ? <Empty title={view === 'Review' ? 'Review queue is empty' : 'No skills in the library'} detail={view === 'Review' ? 'New imports requiring approval appear here.' : 'Import a Git package, SkillsMP entry, or ZIP.'} /> : <div className="table-scroll"><table><thead><tr><th>Skill</th><th>Source</th><th>Risk</th><th>Review</th><th>Targets</th><th aria-label="Actions" /></tr></thead><tbody>{filtered.map((skill) => <tr key={skill.id}><td><strong>{skill.name}</strong><small>{skill.description || skill.slug}</small></td><td>{skill.sourceKind ?? 'upload'}<small>{skill.sourceCommit?.slice(0, 9) || skill.sha256?.slice(0, 9)}</small></td><td><Status value={skill.riskLevel ?? 'unscored'} /></td><td><Status value={skill.reviewStatus} /></td><td>{skill.deploymentCount}</td><td className="row-actions">{skill.reviewStatus === 'pending' && <Button variant="secondary" disabled={busy === skill.id} onClick={() => act(skill.id, () => api.post(`/skills/${skill.id}/review`, { decision: 'approved' }))}><Check size={15} />Approve</Button>}<IconButton label="Set deployment targets" disabled={skill.reviewStatus !== 'approved'} onClick={() => { setSelected(skill); setModal('targets') }}><Download size={16} /></IconButton><IconButton label="Archive skill" disabled={skill.protected} onClick={() => act(skill.id, () => api.delete(`/skills/${skill.id}`))}><Archive size={16} /></IconButton></td></tr>)}</tbody></table></div>}
     {modal === 'git' && <ImportModal close={() => setModal(null)} imported={() => { setModal(null); state.reload() }} />}
     {modal === 'targets' && selected && <TargetModal skill={selected} close={() => setModal(null)} saved={() => { setModal(null); state.reload() }} />}
   </>
+}
+
+function DiscoveredTable({ items, busy, canAdopt, adopt }: { items: Discovery[]; busy: string; canAdopt: boolean; adopt: (id: string) => void }) {
+  if (!items.length) return <Empty title="No discovered Skills" detail="Unmanaged runtime Skills appear after the next inventory scan." />
+  return <div className="table-scroll"><table><thead><tr><th>Skill</th><th>Node / runtime</th><th>Hash</th><th>State</th><th /></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.path}</small></td><td>{item.nodeName}<small>{item.runtime}</small></td><td><code>{item.sha256?.slice(0, 12) || 'unavailable'}</code></td><td><Status value={item.missing ? 'missing' : item.drift ? 'drift' : item.status} />{item.lastError && <small>{item.lastError}</small>}</td><td className="row-actions">{canAdopt && <Button variant="secondary" disabled={busy === item.id || item.managed || item.protected || item.missing || !item.sha256} onClick={() => adopt(item.id)}><WandSparkles size={15} />Adopt</Button>}</td></tr>)}</tbody></table></div>
 }
 
 function DeploymentTable({ deployments, rollback }: { deployments: Deployment[]; rollback: (id: string) => void }) {

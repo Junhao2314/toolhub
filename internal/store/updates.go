@@ -61,7 +61,7 @@ func (s *Store) AddUpdateCandidate(ctx context.Context, source UpdateSource, sou
 	if errors.Is(err, pgx.ErrNoRows) {
 		artifactID = uuid.NewString()
 		report, _ := json.Marshal(pkg.Report)
-		if _, err := tx.Exec(ctx, "INSERT INTO skill_artifacts(id,sha256,size_bytes,content,scan_report) VALUES($1,$2,$3,$4,$5)", artifactID, pkg.SHA256, len(pkg.CanonicalZIP), pkg.CanonicalZIP, report); err != nil {
+		if _, err := tx.Exec(ctx, "INSERT INTO skill_artifacts(id,sha256,size_bytes,content,scan_report) VALUES($1,$2,$3,$4,$5)", artifactID, pkg.SHA256, len(pkg.CanonicalZIP), pkg.CanonicalZIP, string(report)); err != nil {
 			return "", err
 		}
 	} else if err != nil {
@@ -71,7 +71,7 @@ func (s *Store) AddUpdateCandidate(ctx context.Context, source UpdateSource, sou
 	manifest, _ := json.Marshal(pkg.Manifest)
 	provenance, _ := json.Marshal(map[string]any{"sourceKind": source.SourceKind, "sourceURL": source.URL, "subdirectory": source.Subdirectory, "sourceCommit": sourceCommit, "contentSHA256": pkg.SHA256, "updateCandidate": true})
 	if _, err := tx.Exec(ctx, `INSERT INTO skill_versions(id,skill_id,source_commit,content_sha256,artifact_id,provenance,manifest,risk_level)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(skill_id,source_commit,content_sha256) DO NOTHING`, versionID, source.SkillID, sourceCommit, pkg.SHA256, artifactID, provenance, manifest, pkg.Report.RiskLevel); err != nil {
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(skill_id,source_commit,content_sha256) DO NOTHING`, versionID, source.SkillID, sourceCommit, pkg.SHA256, artifactID, string(provenance), string(manifest), pkg.Report.RiskLevel); err != nil {
 		return "", err
 	}
 	diff, _ := json.Marshal(map[string]any{"fromSHA256": source.CurrentSHA256, "toSHA256": pkg.SHA256, "fromFiles": source.CurrentReport["fileCount"], "toFiles": pkg.Report.FileCount, "fromBytes": source.CurrentReport["sizeBytes"], "toBytes": pkg.Report.SizeBytes})
@@ -79,7 +79,7 @@ func (s *Store) AddUpdateCandidate(ctx context.Context, source UpdateSource, sou
 	licenseChange, _ := json.Marshal(map[string]any{"from": source.CurrentReport["license"], "to": pkg.Report.License})
 	updateID := uuid.NewString()
 	if _, err := tx.Exec(ctx, `UPDATE updates SET status='superseded' WHERE skill_id=$1 AND status='available';
-		INSERT INTO updates(id,skill_id,candidate_commit,candidate_sha256,diff,risk_change,license_change) VALUES($2,$1,$3,$4,$5,$6,$7)`, source.SkillID, updateID, sourceCommit, pkg.SHA256, diff, riskChange, licenseChange); err != nil {
+		INSERT INTO updates(id,skill_id,candidate_commit,candidate_sha256,diff,risk_change,license_change) VALUES($2,$1,$3,$4,$5,$6,$7)`, source.SkillID, updateID, sourceCommit, pkg.SHA256, string(diff), string(riskChange), string(licenseChange)); err != nil {
 		return "", err
 	}
 	return updateID, tx.Commit(ctx)

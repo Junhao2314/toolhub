@@ -9,7 +9,7 @@ ToolHub is a modular monolith: one Go control-plane binary embeds the compiled R
 - Reconciliation writes only previously approved desired state and is idempotent per node/runtime/version.
 - Imported packages are immutable and identified by source commit, canonical SHA-256, and provenance.
 - Agent tasks use a fixed typed protocol, are HMAC-signed, and never expose arbitrary shell execution.
-- Existing runtime files are read-only during onboarding. ToolHub-owned deployment uses content-addressed cache plus atomic directory replacement.
+- Existing Skills are read-only until explicit adoption; adoption uploads a verified immutable snapshot before writing the managed marker. MCP discovery is automatically baselined without a first-run rewrite, then reconciled from central desired state.
 - Secrets are encrypted with a master key and redacted at every API/log boundary.
 
 ## Boundaries

@@ -120,7 +120,7 @@ func (a *API) setSkillTargets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "target_update_failed", err.Error())
 		return
 	}
-	job, err := a.store.EnqueueJob(r.Context(), "sync", map[string]any{"skillId": chi.URLParam(r, "id"), "manual": input.Sync}, input.DryRun, principal.ID)
+	job, err := a.store.EnqueueJob(r.Context(), "sync", map[string]any{"skillIds": []string{chi.URLParam(r, "id")}, "manual": input.Sync}, input.DryRun, principal.ID)
 	if err != nil {
 		handleStoreError(w, r, err)
 		return
@@ -187,11 +187,12 @@ func (a *API) syncNow(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) rollbackDeployment(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := a.store.RollbackDeployment(r.Context(), id); err != nil {
+	nodeID, skillID, err := a.store.RollbackDeployment(r.Context(), id)
+	if err != nil {
 		handleStoreError(w, r, err)
 		return
 	}
-	job, err := a.store.EnqueueJob(r.Context(), "rollback", map[string]string{"deploymentId": id}, false, principalFrom(r.Context()).ID)
+	job, err := a.store.EnqueueJob(r.Context(), "rollback", map[string]any{"nodeIds": []string{nodeID}, "skillIds": []string{skillID}, "deploymentIds": []string{id}}, false, principalFrom(r.Context()).ID)
 	if err != nil {
 		handleStoreError(w, r, err)
 		return

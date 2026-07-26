@@ -21,9 +21,9 @@ Read `AGENTS.md`, `.builder/architecture.md`, `README.md`, `cmd/toolhub/main.go`
 
 ## Closed kind lists (do not invent silently)
 
-**Worker job kinds** (`Worker.execute`): `inventory_scan`, `skill_import`, `update_check`, `sync`, `rollback` (same path as sync), `mcp_sync`, `mcp_health` (stub), `archive_purge`.
+**Worker job kinds** (`Worker.execute`): `inventory_scan`, `skill_import`, `skill_adopt`, `update_check`, `sync`, `rollback` (same path as sync), `mcp_sync`, `mcp_health` (stub), `archive_purge`.
 
-**Agent task kinds** (`Executor.Execute`): `scan_inventory`, `deploy_skill`, `apply_mcp` only.
+**Agent task kinds** (`Executor.Execute`): `scan_inventory`, `deploy_skill`, `apply_mcp`, `adopt_skill` only.
 
 Job kinds ≠ task kinds. Map carefully through worker → `CreateNodeTask` → executor → `CompleteTask`.
 
@@ -37,7 +37,7 @@ Job kinds ≠ task kinds. Map carefully through worker → `CreateNodeTask` → 
 
 Worker often marks a Job successful after task creation/delivery, before the Agent result arrives. Offline delivery yields `pendingOffline` while the job can still succeed. A node task that reaches `running` and then loses the connection is **not** auto-requeued; reconnect redelivers only `pending`/`delivered`. Do not use Job status as the deployment health signal.
 
-## Selector contract (verified gotcha)
+## Selector contract
 
 Before changing targets/sync/rollback/MCP deploy, diff HTTP enqueue payloads against worker JSON structs in `worker.go`:
 
@@ -45,9 +45,9 @@ Before changing targets/sync/rollback/MCP deploy, diff HTTP enqueue payloads aga
 |----------|--------------|--------------|--------------|
 | `POST /sync` | `nodeIds`, `skillIds` | yes | Scoped |
 | Scheduler | `scopeType`, `scopeId` | yes | Scoped |
-| `setSkillTargets` | `skillId` (singular) | only `skillIds` | **Ignored → all pending skill deploys** |
-| `rollbackDeployment` | `deploymentId` | no | **Broader pending-set reconcile** |
-| `mcp_sync` | `profileId` | no | **All pending MCP IDs** |
+| `setSkillTargets` | `skillIds` | yes | Scoped Skill sync |
+| `rollbackDeployment` | `nodeIds`, `skillIds`, `deploymentIds` | node/skill filters | Scoped rollback reconciliation |
+| `mcp_sync` | `nodeIds`, `profileIds`, `deploymentIds` | yes | Scoped MCP reconciliation |
 
 ## Place changes by responsibility
 
@@ -63,7 +63,7 @@ Before changing targets/sync/rollback/MCP deploy, diff HTTP enqueue payloads aga
 
 - Update discovery does not mutate desired state. Only approval advances desired state; sync reconciles approved state.
 - Deployments keep desired, actual, and previous versions. Rollback is a new desired transition.
-- Existing runtime directories are onboarding inputs, not overwrite targets. Managed activation requires `.toolhub-managed.json` and uses cache, staging, backup, and rename.
+- Existing Skill directories are onboarding inputs until explicit adoption. Adoption verifies/uploads the snapshot before writing `.toolhub-managed.json`; managed activation uses cache, staging, backup, and rename. MCP discovery is automatically baselined and later reconciled from central desired state.
 - Agent tasks are typed and HMAC-signed over canonical JSON; no arbitrary remote shell.
 - Secrets stay encrypted and scoped. Redaction is opt-in per call site (audit/inventory/AI), not global middleware.
 - WebSocket delivery, task status persistence, and SSH fallback are separate operations; design for duplicate delivery and stale status.

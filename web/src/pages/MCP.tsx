@@ -4,9 +4,9 @@ import { api, type Dict } from '../api/client'
 import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
 import { useData } from '../hooks/useData'
 
-interface MCPServer extends Dict { id: string; name: string; transport: string; command: string; url: string; enabled: boolean; healthStatus: string; source: string; envRefs: Record<string, string> }
-interface Profile { id: string; name: string; description: string; enabled: boolean; serverIds: string[] }
-interface Deployment { id: string; profileName: string; nodeName: string; runtime: string; state: string; lastError: string }
+interface MCPServer extends Dict { id: string; name: string; runtimeName: string; transport: string; command: string; url: string; enabled: boolean; healthStatus: string; source: string; envRefs: Record<string, string>; bindingCount: number; hasDrift: boolean }
+interface Profile { id: string; name: string; description: string; enabled: boolean; source: string; serverIds: string[] }
+interface Deployment { id: string; profileName: string; source: string; nodeName: string; runtime: string; state: string; lastError: string; bindings: { id: string; serverName: string; missing: boolean; drift: boolean }[] }
 
 export default function MCP() {
   const [tab, setTab] = useState('Servers')
@@ -30,7 +30,7 @@ export default function MCP() {
 
 function ServerTable({ items, toggle, health }: { items: MCPServer[]; toggle: (item: MCPServer) => void; health: (id: string) => void }) {
   if (!items.length) return <Empty title="No MCP servers" detail="Add a stdio, SSE, or Streamable HTTP server." />
-  return <div className="table-scroll"><table><thead><tr><th>Server</th><th>Transport</th><th>Endpoint</th><th>Secrets</th><th>Health</th><th /></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.source}</small></td><td>{item.transport}</td><td><code>{item.command || item.url}</code></td><td>{Object.keys(item.envRefs ?? {}).length} refs</td><td><Status value={item.healthStatus} /></td><td className="row-actions"><IconButton label="Run health check" onClick={() => health(item.id)}><Activity size={16} /></IconButton><IconButton label={item.enabled ? 'Disable server' : 'Enable server'} onClick={() => toggle(item)}>{item.enabled ? <ToggleRight size={19} /> : <ToggleLeft size={19} />}</IconButton></td></tr>)}</tbody></table></div>
+  return <div className="table-scroll"><table><thead><tr><th>Server</th><th>Transport</th><th>Endpoint</th><th>Bindings</th><th>State</th><th /></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><strong>{item.name}</strong><small>{item.source === 'runtime-auto' ? `Auto-managed · runtime name ${item.runtimeName}` : item.source}</small></td><td>{item.transport}</td><td><code>{item.command || item.url}</code></td><td>{item.bindingCount ?? 0}<small>{Object.keys(item.envRefs ?? {}).length} encrypted refs</small></td><td><Status value={item.hasDrift ? 'drift' : item.healthStatus} /></td><td className="row-actions"><IconButton label="Run health check" onClick={() => health(item.id)}><Activity size={16} /></IconButton><IconButton label={item.enabled ? 'Disable server' : 'Enable server'} onClick={() => toggle(item)}>{item.enabled ? <ToggleRight size={19} /> : <ToggleLeft size={19} />}</IconButton></td></tr>)}</tbody></table></div>
 }
 
 function ProfileTable({ items }: { items: Profile[] }) {
@@ -38,7 +38,7 @@ function ProfileTable({ items }: { items: Profile[] }) {
 }
 
 function DeploymentTable({ items }: { items: Deployment[] }) {
-  return items.length ? <div className="table-scroll"><table><thead><tr><th>Profile</th><th>Node</th><th>Runtime</th><th>State</th><th>Last error</th></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><strong>{item.profileName}</strong></td><td>{item.nodeName}</td><td>{item.runtime}</td><td><Status value={item.state} /></td><td>{item.lastError || '—'}</td></tr>)}</tbody></table></div> : <Empty title="No MCP deployments" detail="Deploy a profile to a node and runtime target." />
+  return items.length ? <div className="table-scroll"><table><thead><tr><th>Profile</th><th>Node / runtime</th><th>Bindings</th><th>State</th><th>Last error</th></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><strong>{item.profileName}</strong><small>{item.source === 'runtime-auto' ? 'Auto-managed' : item.source}</small></td><td>{item.nodeName}<small>{item.runtime}</small></td><td>{item.bindings?.length ?? 0}{item.bindings?.some((binding) => binding.drift || binding.missing) && <small>drift / missing detected</small>}</td><td><Status value={item.bindings?.some((binding) => binding.drift || binding.missing) ? 'drift' : item.state} /></td><td>{item.lastError || '—'}</td></tr>)}</tbody></table></div> : <Empty title="No MCP deployments" detail="Discovered MCP servers are automatically baselined; manual profiles can also be deployed." />
 }
 
 function ServerModal({ close, saved }: { close: () => void; saved: () => void }) {

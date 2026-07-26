@@ -43,7 +43,7 @@ func (d *Deployer) Deploy(request DeployRequest) (DeployResult, error) {
 	if root == "" {
 		return DeployResult{}, errors.New("unknown runtime")
 	}
-	if request.SkillSlug == "" || strings.ContainsAny(request.SkillSlug, `/\\`) || request.SkillSlug == ".system" {
+	if request.SkillSlug == "" || request.SkillSlug == "." || request.SkillSlug == ".." || strings.ContainsAny(request.SkillSlug, `/\\`) || request.SkillSlug == ".system" {
 		return DeployResult{}, errors.New("invalid or protected skill slug")
 	}
 	target := filepath.Join(root, request.SkillSlug)

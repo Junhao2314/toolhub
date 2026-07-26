@@ -27,9 +27,12 @@ func (s *Store) CreateEnrollmentToken(ctx context.Context, nodeName string, labe
 		return "", time.Time{}, err
 	}
 	expires := time.Now().UTC().Add(30 * time.Minute)
+	if labels == nil {
+		labels = map[string]string{}
+	}
 	encodedLabels, _ := json.Marshal(labels)
 	_, err = s.pool.Exec(ctx, `INSERT INTO enrollment_tokens(id,token_hash,node_name,labels,expires_at,created_by)
-		VALUES($1,$2,$3,$4,$5,$6)`, uuid.NewString(), security.TokenHash(token), nodeName, encodedLabels, expires, createdBy)
+		VALUES($1,$2,$3,$4,$5,$6)`, uuid.NewString(), security.TokenHash(token), nodeName, string(encodedLabels), expires, createdBy)
 	return token, expires, err
 }
 
@@ -115,11 +118,11 @@ func (s *Store) EnrollAgent(ctx context.Context, token, hostname, platform, arch
 	if errors.Is(err, pgx.ErrNoRows) {
 		nodeID = uuid.NewString()
 		_, err = tx.Exec(ctx, `INSERT INTO nodes(id,name,hostname,platform,architecture,tailscale_ip,status,labels,agent_public_key,agent_token_hash,task_key_secret_id,last_seen_at)
-			VALUES($1,$2,$3,$4,$5,$6,'online',$7,$8,$9,$10,now())`, nodeID, nodeName, hostname, platform, architecture, ipValue, labels, publicKey, security.TokenHash(agentToken), secretID)
+			VALUES($1,$2,$3,$4,$5,$6,'online',$7,$8,$9,$10,now())`, nodeID, nodeName, hostname, platform, architecture, ipValue, string(labels), publicKey, security.TokenHash(agentToken), secretID)
 	} else if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE nodes SET hostname=$2,platform=$3,architecture=$4,tailscale_ip=$5,status='online',
 			labels=labels || $6::jsonb,agent_public_key=$7,agent_token_hash=$8,task_key_secret_id=$9,last_seen_at=now(),updated_at=now()
-			WHERE id=$1`, nodeID, hostname, platform, architecture, ipValue, labels, publicKey, security.TokenHash(agentToken), secretID)
+			WHERE id=$1`, nodeID, hostname, platform, architecture, ipValue, string(labels), publicKey, security.TokenHash(agentToken), secretID)
 	}
 	if err != nil {
 		return domain.EnrollmentResult{}, fmt.Errorf("claim node: %w", err)
@@ -170,26 +173,8 @@ func (s *Store) UpdateHeartbeat(ctx context.Context, nodeID, hostname, platform,
 }
 
 func (s *Store) ReplaceInventory(ctx context.Context, nodeID string, runtimes []domain.InventoryRuntime) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	for _, runtime := range runtimes {
-		config, _ := json.Marshal(security.RedactMap(runtime.Config))
-		inventory, _ := json.Marshal(security.RedactMap(runtime.Inventory))
-		_, err := tx.Exec(ctx, `INSERT INTO runtimes(id,node_id,kind,root_path,version,config,inventory,scanned_at)
-			VALUES($1,$2,$3,$4,$5,$6,$7,now())
-			ON CONFLICT(node_id,kind,root_path) DO UPDATE SET version=excluded.version,config=excluded.config,inventory=excluded.inventory,scanned_at=now()`, uuid.NewString(), nodeID, runtime.Kind, runtime.RootPath, runtime.Version, config, inventory)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = tx.Exec(ctx, "UPDATE nodes SET last_seen_at=now(),status='online',updated_at=now() WHERE id=$1", nodeID)
-	if err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	_, err := s.ProcessAgentInventory(ctx, nodeID, runtimes, false)
+	return err
 }
 
 func (s *Store) CreateNodeTask(ctx context.Context, nodeID, jobID, kind string, payload any) (domain.AgentTask, error) {
@@ -211,7 +196,7 @@ func (s *Store) CreateNodeTask(ctx context.Context, nodeID, jobID, kind string, 
 	if jobID != "" {
 		job = jobID
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO node_tasks(id,node_id,job_id,kind,payload,signature) VALUES($1,$2,$3,$4,$5,$6)`, task.ID, nodeID, job, kind, encoded, task.Signature)
+	_, err = s.pool.Exec(ctx, `INSERT INTO node_tasks(id,node_id,job_id,kind,payload,signature) VALUES($1,$2,$3,$4,$5,$6)`, task.ID, nodeID, job, kind, string(encoded), task.Signature)
 	return task, err
 }
 
@@ -252,7 +237,7 @@ func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, res
 	if err := tx.QueryRow(ctx, "SELECT kind,payload FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE", id, nodeID).Scan(&kind, &payload); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, "UPDATE node_tasks SET status=$3,result=$4,updated_at=now() WHERE id=$1 AND node_id=$2", id, nodeID, status, result); err != nil {
+	if _, err := tx.Exec(ctx, "UPDATE node_tasks SET status=$3,result=$4,updated_at=now() WHERE id=$1 AND node_id=$2", id, nodeID, status, string(result)); err != nil {
 		return err
 	}
 	if status == "succeeded" && kind == "deploy_skill" {
@@ -271,6 +256,13 @@ func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, res
 		if json.Unmarshal(payload, &task) == nil {
 			_, _ = tx.Exec(ctx, "UPDATE mcp_deployments SET actual_hash=desired_hash,state='in_sync',last_error='',updated_at=now() WHERE id=$1", task.DeploymentID)
 		}
+	} else if status == "succeeded" && kind == "adopt_skill" {
+		var task struct {
+			DiscoveryID string `json:"discoveryId"`
+		}
+		if json.Unmarshal(payload, &task) == nil {
+			_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET managed=true,missing=false,drift=false,adoption_status='adopted',adoption_error='',updated_at=now() WHERE id=$1", task.DiscoveryID)
+		}
 	} else if status == "failed" {
 		var task struct {
 			DeploymentID string `json:"deploymentId"`
@@ -284,6 +276,18 @@ func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, res
 				_, _ = tx.Exec(ctx, "UPDATE deployments SET state='failed',last_error=$2,updated_at=now() WHERE id=$1", task.DeploymentID, message)
 			} else if kind == "apply_mcp" {
 				_, _ = tx.Exec(ctx, "UPDATE mcp_deployments SET state='failed',last_error=$2,updated_at=now() WHERE id=$1", task.DeploymentID, message)
+			}
+		}
+		if kind == "adopt_skill" {
+			var adoption struct {
+				DiscoveryID string `json:"discoveryId"`
+			}
+			if json.Unmarshal(payload, &adoption) == nil && adoption.DiscoveryID != "" {
+				message := string(result)
+				if len(message) > 2000 {
+					message = message[:2000]
+				}
+				_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET adoption_status='failed',adoption_error=$2,updated_at=now() WHERE id=$1 AND NOT managed", adoption.DiscoveryID, message)
 			}
 		}
 	}

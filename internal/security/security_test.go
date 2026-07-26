@@ -98,3 +98,17 @@ func TestRedactionIsRecursive(t *testing.T) {
 		t.Fatalf("secret leaked: %s", encoded)
 	}
 }
+
+func TestFingerprintSecretMapIsStableAndNodeScoped(t *testing.T) {
+	valuesA := map[string]string{"TOKEN": "secret-value", "REGION": "test"}
+	valuesB := map[string]string{"REGION": "test", "TOKEN": "secret-value"}
+	first := FingerprintSecretMap(bytes.Repeat([]byte{1}, 32), valuesA)
+	second := FingerprintSecretMap(bytes.Repeat([]byte{1}, 32), valuesB)
+	if first != second {
+		t.Fatalf("fingerprints depend on map order: %s != %s", first, second)
+	}
+	otherNode := FingerprintSecretMap(bytes.Repeat([]byte{2}, 32), valuesA)
+	if first == otherNode {
+		t.Fatal("fingerprint was reusable across node task keys")
+	}
+}

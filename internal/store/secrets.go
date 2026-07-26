@@ -35,7 +35,7 @@ func (s *Store) createSecret(ctx context.Context, executor secretExecutor, name,
 		actor = createdBy
 	}
 	_, err = executor.Exec(ctx, `INSERT INTO encrypted_secrets(id,name,kind,ciphertext,metadata,created_by)
-		VALUES($1,$2,$3,$4,$5,$6)`, id, name, kind, ciphertext, encoded, actor)
+		VALUES($1,$2,$3,$4,$5,$6)`, id, name, kind, ciphertext, string(encoded), actor)
 	return id, err
 }
 

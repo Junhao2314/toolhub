@@ -17,17 +17,19 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/toolhub-dev/toolhub/internal/domain"
-	runtimeadapter "github.com/toolhub-dev/toolhub/internal/runtime"
 )
 
 type Runner struct {
-	config   Config
-	executor *Executor
-	mu       sync.Mutex
+	config            Config
+	executor          *Executor
+	inventoryInterval time.Duration
+	mu                sync.Mutex
 }
 
+const DefaultInventoryInterval = 6 * time.Hour
+
 func NewRunner(config Config) *Runner {
-	return &Runner{config: config, executor: NewExecutor(config)}
+	return &Runner{config: config, executor: NewExecutor(config), inventoryInterval: DefaultInventoryInterval}
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -107,7 +109,7 @@ func (r *Runner) runConnection(ctx context.Context) error {
 
 func (r *Runner) heartbeatLoop(ctx context.Context, socket *websocket.Conn) {
 	heartbeat := time.NewTicker(30 * time.Second)
-	inventory := time.NewTicker(10 * time.Minute)
+	inventory := time.NewTicker(r.inventoryInterval)
 	defer heartbeat.Stop()
 	defer inventory.Stop()
 	for {
@@ -128,7 +130,7 @@ func (r *Runner) heartbeatLoop(ctx context.Context, socket *websocket.Conn) {
 }
 
 func (r *Runner) sendInventory(ctx context.Context, socket *websocket.Conn) error {
-	runtimes, err := runtimeadapter.ScanAll(r.config.Paths)
+	runtimes, err := r.executor.discoverInventory(ctx)
 	if err != nil {
 		return err
 	}

@@ -78,6 +78,8 @@ func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
 		return w.inventoryScan(ctx, job)
 	case "skill_import":
 		return w.importSkill(ctx, job)
+	case "skill_adopt":
+		return w.adoptSkill(ctx, job)
 	case "update_check":
 		return w.checkUpdates(ctx, job)
 	case "sync", "rollback":
@@ -92,6 +94,27 @@ func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
 	default:
 		return nil, fmt.Errorf("unsupported job kind %q", job.Kind)
 	}
+}
+
+func (w *Worker) adoptSkill(ctx context.Context, job domain.Job) (any, error) {
+	var input struct {
+		DiscoveryID string `json:"discoveryId"`
+	}
+	if err := json.Unmarshal(job.Payload, &input); err != nil || input.DiscoveryID == "" {
+		return nil, errors.New("skill adoption requires discoveryId")
+	}
+	target, err := w.store.SkillDiscoveryForAdoption(ctx, input.DiscoveryID)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{"discoveryId": target.DiscoveryID, "runtime": target.Runtime, "path": target.Path, "sha256": target.SHA256}
+	task, err := w.store.CreateNodeTask(ctx, target.NodeID, job.ID, "adopt_skill", payload)
+	if err != nil {
+		w.store.FailSkillAdoption(ctx, input.DiscoveryID, err)
+		return nil, err
+	}
+	delivered := w.deliver(ctx, target.NodeID, task)
+	return map[string]any{"taskId": task.ID, "delivered": delivered, "pendingOffline": !delivered}, nil
 }
 
 func (w *Worker) inventoryScan(ctx context.Context, job domain.Job) (any, error) {
@@ -223,17 +246,32 @@ func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
 }
 
 func (w *Worker) syncMCP(ctx context.Context, job domain.Job) (any, error) {
-	ids, err := w.store.PendingMCPDeploymentIDs(ctx)
+	var selectors struct {
+		NodeIDs       []string `json:"nodeIds"`
+		ProfileIDs    []string `json:"profileIds"`
+		DeploymentIDs []string `json:"deploymentIds"`
+		ScopeType     string   `json:"scopeType"`
+		ScopeID       string   `json:"scopeId"`
+	}
+	_ = json.Unmarshal(job.Payload, &selectors)
+	nodes := makeSet(selectors.NodeIDs)
+	profiles := makeSet(selectors.ProfileIDs)
+	deploymentIDs := makeSet(selectors.DeploymentIDs)
+	deployments, err := w.store.PendingMCPDeployments(ctx)
 	if err != nil {
 		return nil, err
 	}
-	queued, delivered := 0, 0
-	for _, id := range ids {
-		nodeID, _, payload, err := w.store.MCPDeploymentPayload(ctx, id)
+	queued, delivered, skipped := 0, 0, 0
+	for _, deployment := range deployments {
+		if !matchesMCPSelectors(deployment, nodes, profiles, deploymentIDs, selectors.ScopeType, selectors.ScopeID) {
+			skipped++
+			continue
+		}
+		nodeID, _, payload, err := w.store.MCPDeploymentPayload(ctx, deployment.DeploymentID)
 		if err != nil {
 			return nil, err
 		}
-		payload["deploymentId"] = id
+		payload["deploymentId"] = deployment.DeploymentID
 		if job.DryRun {
 			queued++
 			continue
@@ -247,7 +285,20 @@ func (w *Worker) syncMCP(ctx context.Context, job domain.Job) (any, error) {
 			delivered++
 		}
 	}
-	return map[string]any{"queued": queued, "delivered": delivered, "pendingOffline": queued - delivered, "dryRun": job.DryRun}, nil
+	return map[string]any{"queued": queued, "delivered": delivered, "pendingOffline": queued - delivered, "skipped": skipped, "dryRun": job.DryRun}, nil
+}
+
+func matchesMCPSelectors(deployment store.MCPDeploymentRef, nodes, profiles, deploymentIDs map[string]bool, scopeType, scopeID string) bool {
+	if len(nodes) > 0 && !nodes[deployment.NodeID] {
+		return false
+	}
+	if len(profiles) > 0 && !profiles[deployment.ProfileID] {
+		return false
+	}
+	if len(deploymentIDs) > 0 && !deploymentIDs[deployment.DeploymentID] {
+		return false
+	}
+	return scopeType != "node_group" || scopeID == "" || deployment.NodeGroup == scopeID
 }
 
 func (w *Worker) deliver(ctx context.Context, nodeID string, task domain.AgentTask) bool {

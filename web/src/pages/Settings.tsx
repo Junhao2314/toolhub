@@ -1,22 +1,23 @@
-import { KeyRound, Plus, Save, ShieldCheck } from 'lucide-react'
+import { KeyRound, Plus, RefreshCw, Save, ShieldCheck } from 'lucide-react'
 import { useState } from 'react'
 import { api, type Dict } from '../api/client'
 import { Button, ErrorNotice, Field, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
 import { useData } from '../hooks/useData'
 
-interface SettingsData extends Dict { publicUrl: string; listenPort: number; timezone: string; localNodeName: string; marketApiKeyConfigured: boolean; policies: { updatePolicy?: { schedule: string; timezone: string }; syncPolicy?: { schedule: string; timezone: string } } }
+interface SettingsData extends Dict { publicUrl: string; listenPort: number; timezone: string; localNodeName: string; inventoryIntervalHours: number; marketApiKeyConfigured: boolean; policies: { updatePolicy?: { schedule: string; timezone: string }; syncPolicy?: { schedule: string; timezone: string } } }
 interface Provider { id: string; name: string; baseUrl: string; model: string; isDefault: boolean; enabled: boolean }
 
 export default function SettingsPage() {
   const [tab, setTab] = useState('Policies')
   const [addProvider, setAddProvider] = useState(false)
   const [message, setMessage] = useState('')
+  const [reconciling, setReconciling] = useState(false)
   const state = useData(async () => {
     const [settings, providers] = await Promise.all([api.get<SettingsData>('/settings'), api.list<Provider>('/settings/ai-providers')])
     return { settings, providers: providers.items }
   }, [])
   return <>
-    <PageHeader title="Settings" detail="Schedules, encrypted provider credentials, and Tailnet exposure." actions={tab === 'AI Providers' ? <Button onClick={() => setAddProvider(true)}><Plus size={16} />Add provider</Button> : undefined} />
+    <PageHeader title="Settings" detail="Schedules, encrypted provider credentials, and Tailnet exposure." actions={tab === 'AI Providers' ? <Button onClick={() => setAddProvider(true)}><Plus size={16} />Add provider</Button> : tab === 'Policies' ? <Button disabled={reconciling} onClick={() => { setReconciling(true); api.post('/reconcile', {}).then(() => setMessage('Skill and MCP reconciliation queued.')).catch((reason: Error) => setMessage(reason.message)).finally(() => setReconciling(false)) }}><RefreshCw size={16} />{reconciling ? 'Queuing...' : 'Reconcile now'}</Button> : undefined} />
     {message && <div className="inline-notice">{message}</div>}
     <div className="toolbar"><Segments options={['Policies', 'AI Providers', 'Security']} value={tab} onChange={setTab} /></div>
     {state.loading ? <Loading label="Loading settings" /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : tab === 'Policies' ? <Policies value={state.data.settings} saved={() => { setMessage('Schedules updated. The worker reloads policies within five minutes.'); state.reload() }} /> : tab === 'AI Providers' ? <Providers items={state.data.providers} /> : <Security value={state.data.settings} />}
@@ -30,7 +31,7 @@ function Policies({ value, saved }: { value: SettingsData; saved: () => void }) 
   const [timezone, setTimezone] = useState(value.timezone)
   const [error, setError] = useState('')
   const submit = () => api.patch('/settings', { updateSchedule, syncSchedule, timezone }).then(saved).catch((reason: Error) => setError(reason.message))
-  return <section className="settings-form"><header><h2>Global schedules</h2><p>Source, skill, and node-group overrides take precedence over these defaults.</p></header>{error && <ErrorNotice message={error} />}<div className="form-grid"><Field label="Update check"><input value={updateSchedule} onChange={(event) => setUpdate(event.target.value)} /><small>Discovery only. It never changes desired versions.</small></Field><Field label="Approved-state sync"><input value={syncSchedule} onChange={(event) => setSync(event.target.value)} /><small>Default is 03:30 daily.</small></Field><Field label="Timezone"><input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></Field></div><Button onClick={submit}><Save size={16} />Save policies</Button></section>
+  return <section className="settings-form"><header><h2>Global schedules</h2><p>Inventory runs on connection and every {value.inventoryIntervalHours} hours. Source, skill, and node-group overrides take precedence over these defaults.</p></header>{error && <ErrorNotice message={error} />}<div className="form-grid"><Field label="Update check"><input value={updateSchedule} onChange={(event) => setUpdate(event.target.value)} /><small>Default 02:00. Discovery only; no automatic approval.</small></Field><Field label="Skill + MCP reconcile"><input value={syncSchedule} onChange={(event) => setSync(event.target.value)} /><small>Default 03:30. Enqueues both sync pipelines.</small></Field><Field label="Timezone"><input value={timezone} onChange={(event) => setTimezone(event.target.value)} /></Field></div><Button onClick={submit}><Save size={16} />Save policies</Button></section>
 }
 
 function Providers({ items }: { items: Provider[] }) {

@@ -141,6 +141,9 @@ func ScanDirectory(root string, limits Limits) (Package, error) {
 		if item.IsDir() {
 			return nil
 		}
+		if item.Name() == ".toolhub-managed.json" {
+			return nil
+		}
 		if len(entries)+1 > limits.MaxFiles || info.Size() > limits.MaxFileBytes {
 			return errors.New("package exceeds file limits")
 		}

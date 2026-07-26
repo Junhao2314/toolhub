@@ -59,7 +59,7 @@ export default function App() {
   if (checking) return <div className="boot"><div className="brand-mark"><Boxes /></div><Loading label="Opening ToolHub" /></div>
   if (!session) return <Login onLogin={setSession} />
 
-  const page = path.startsWith('/skills') ? <Skills />
+  const page = path.startsWith('/skills') ? <Skills canAdopt={isAdmin} />
     : path.startsWith('/marketplace') ? <Marketplace />
     : path.startsWith('/nodes') ? <Nodes />
     : path.startsWith('/jobs') ? <Jobs />

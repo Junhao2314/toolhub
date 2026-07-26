@@ -48,11 +48,13 @@ Login accepts **username or email** (`identifier`). CSRF: GET/HEAD/OPTIONS skip;
 |-------|---------|----------|-------|
 | `POST /nodes/{id}/scan` | `scanNode` | `inventory_scan` | |
 | `POST /skills` | `importSkill` | `skill_import` | |
-| `POST /skills/{id}/deployments` | `setSkillTargets` | `sync` | after `SetSkillTargets`; payload uses **`skillId` singular** (worker expects `skillIds`) |
+| `POST /discoveries/{id}/adopt-skill` | `adoptDiscoveredSkill` | `skill_adopt` | administrator-only |
+| `POST /skills/{id}/deployments` | `setSkillTargets` | `sync` | plural `skillIds` selector |
 | `POST /updates` | `checkUpdates` | `update_check` | |
 | `POST /sync` | `syncNow` | `sync` | plural `nodeIds`/`skillIds` **are** read by worker |
-| `POST /deployments/{id}/rollback` | `rollbackDeployment` | `rollback` | after store swap; **`deploymentId` ignored** by worker filter |
-| `POST /mcp/deployments` | `deployMCPProfile` | `mcp_sync` | **`profileId` ignored** by worker |
+| `POST /deployments/{id}/rollback` | `rollbackDeployment` | `rollback` | scoped node/skill selectors after store swap |
+| `POST /mcp/deployments` | `deployMCPProfile` | `mcp_sync` | plural profile/deployment selectors |
+| `POST /reconcile` | `reconcileNow` | `sync` + `mcp_sync` | queues both pipelines |
 | `POST /mcp/servers/{id}/health` | `checkMCPHealth` | `mcp_health` | stub in worker |
 
 **Exceptions:** `uploadSkill` → **201** sync import (not a job). `approveUpdate` → **202** but **only** `ApproveUpdate` (no enqueue).

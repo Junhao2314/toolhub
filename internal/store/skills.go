@@ -52,7 +52,7 @@ func (s *Store) ImportSkill(ctx context.Context, source SourceInput, pkg skills.
 	err = tx.QueryRow(ctx, "SELECT id::text FROM skill_artifacts WHERE sha256=$1", pkg.SHA256).Scan(&artifactID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		artifactID = uuid.NewString()
-		if _, err := tx.Exec(ctx, `INSERT INTO skill_artifacts(id,sha256,size_bytes,content,scan_report) VALUES($1,$2,$3,$4,$5)`, artifactID, pkg.SHA256, len(pkg.CanonicalZIP), pkg.CanonicalZIP, report); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO skill_artifacts(id,sha256,size_bytes,content,scan_report) VALUES($1,$2,$3,$4,$5)`, artifactID, pkg.SHA256, len(pkg.CanonicalZIP), pkg.CanonicalZIP, string(report)); err != nil {
 			return ImportedSkill{}, err
 		}
 	} else if err != nil {
@@ -66,7 +66,7 @@ func (s *Store) ImportSkill(ctx context.Context, source SourceInput, pkg skills.
 	provenance["contentSHA256"] = pkg.SHA256
 	provenanceJSON, _ := json.Marshal(provenance)
 	if _, err := tx.Exec(ctx, `INSERT INTO skill_versions(id,skill_id,source_commit,content_sha256,artifact_id,provenance,manifest,risk_level)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, result.VersionID, result.SkillID, source.Commit, pkg.SHA256, artifactID, provenanceJSON, manifest, pkg.Report.RiskLevel); err != nil {
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, result.VersionID, result.SkillID, source.Commit, pkg.SHA256, artifactID, string(provenanceJSON), string(manifest), pkg.Report.RiskLevel); err != nil {
 		return ImportedSkill{}, err
 	}
 	return result, tx.Commit(ctx)
@@ -181,16 +181,17 @@ func (s *Store) ApproveUpdate(ctx context.Context, updateID, actor string) error
 	return tx.Commit(ctx)
 }
 
-func (s *Store) RollbackDeployment(ctx context.Context, deploymentID string) error {
-	command, err := s.pool.Exec(ctx, `UPDATE deployments SET desired_version_id=previous_version_id,previous_version_id=desired_version_id,state='rolling_back',updated_at=now()
-		WHERE id=$1 AND previous_version_id IS NOT NULL`, deploymentID)
+func (s *Store) RollbackDeployment(ctx context.Context, deploymentID string) (string, string, error) {
+	var nodeID, skillID string
+	err := s.pool.QueryRow(ctx, `UPDATE deployments SET desired_version_id=previous_version_id,previous_version_id=desired_version_id,state='rolling_back',updated_at=now()
+		WHERE id=$1 AND previous_version_id IS NOT NULL RETURNING node_id::text,skill_id::text`, deploymentID).Scan(&nodeID, &skillID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
 	if err != nil {
-		return err
+		return "", "", err
 	}
-	if command.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return nodeID, skillID, nil
 }
 
 func (s *Store) Artifact(ctx context.Context, versionID string) ([]byte, string, error) {

@@ -50,6 +50,9 @@ func (a *API) Router() http.Handler {
 	router.Get("/agent/v1/connect", a.hub.ServeConnect)
 	router.Get("/agent/v1/artifacts/{versionID}", a.agentArtifact)
 	router.Get("/agent/v1/secrets/{secretID}", a.agentSecret)
+	router.Post("/agent/v1/discoveries/descriptors", a.agentDiscoveryDescriptors)
+	router.Post("/agent/v1/discoveries/capture", a.agentDiscoveryCapture)
+	router.Post("/agent/v1/discoveries/{id}/skill", a.agentSkillAdoptionUpload)
 	router.Post("/api/v1/auth/login", a.login)
 	router.Get("/api/v1/auth/session", a.session)
 
@@ -77,6 +80,7 @@ func (a *API) Router() http.Handler {
 			read.Get("/mcp/servers", a.listMCPServers)
 			read.Get("/mcp/profiles", a.listMCPProfiles)
 			read.Get("/mcp/deployments", a.listMCPDeployments)
+			read.Get("/discoveries", a.listDiscoveries)
 		})
 
 		api.Group(func(ops chi.Router) {
@@ -93,6 +97,7 @@ func (a *API) Router() http.Handler {
 			ops.Post("/deployments/{id}/rollback", a.rollbackDeployment)
 			ops.Post("/updates", a.checkUpdates)
 			ops.Post("/sync", a.syncNow)
+			ops.Post("/reconcile", a.reconcileNow)
 			ops.Post("/jobs/{id}/cancel", a.cancelJob)
 			ops.Post("/recommendations", a.recommend)
 			ops.Post("/mcp/servers", a.createMCPServer)
@@ -110,6 +115,7 @@ func (a *API) Router() http.Handler {
 			admin.Post("/users/{id}/password", a.resetUserPassword)
 			admin.Get("/audit", a.listAudit)
 			admin.Post("/skills/{id}/review", a.reviewSkill)
+			admin.Post("/discoveries/{id}/adopt-skill", a.adoptDiscoveredSkill)
 			admin.Post("/updates/{id}/approve", a.approveUpdate)
 			admin.Get("/settings", a.getSettings)
 			admin.Patch("/settings", a.updateSettings)

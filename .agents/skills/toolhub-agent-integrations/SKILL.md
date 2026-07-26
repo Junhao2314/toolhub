@@ -28,7 +28,7 @@ Auth: `X-ToolHub-Node-ID` + `Bearer` agent token. On connect: mark online, deliv
 
 **Signatures:** `id + "\n" + kind + "\n" + canonicalJSON(payload)` then HMAC-SHA256 hex (`protocol.TaskSigningBytes` + `security.SignPayload`/`VerifyPayload`). Per-node 32-byte task key from enroll. Local agent history (`task-history.json`, 30-day prune) returns prior result for repeated task IDs.
 
-**Closed agent task kinds** (`Executor.Execute`): `scan_inventory`, `deploy_skill`, `apply_mcp` only.
+**Closed agent task kinds** (`Executor.Execute`): `scan_inventory`, `deploy_skill`, `apply_mcp`, `adopt_skill` only.
 
 ## SSH fallback
 
@@ -40,6 +40,7 @@ Auth: `X-ToolHub-Node-ID` + `Bearer` agent token. On connect: mark online, deliv
 |----------|----------|
 | `inventory_scan` | Create `scan_inventory` task; finish after deliver attempt |
 | `skill_import` | Git import via `skills.ImportGit` + store import |
+| `skill_adopt` | Signed `adopt_skill` task; Agent safely packages/uploads a discovered Skill and writes the marker only after import |
 | `update_check` | Discover candidates only (no desired mutation); respects `skillIds` / scope |
 | `sync` / `rollback` | `syncSkills` over pending skill deployments |
 | `mcp_sync` | All pending MCP deployment IDs → `apply_mcp` |
@@ -54,9 +55,9 @@ Default seeded schedules: update `0 2 * * *`, sync `30 3 * * *`, timezone `Asia/
 |------------------|--------------------|--------|
 | `POST /sync` `nodeIds`/`skillIds` | filters both | **Used** |
 | Scheduled `scopeType`/`scopeId` | skill→skillIds; source/node_group filters | **Used** |
-| `setSkillTargets` `{"skillId": id}` | only `skillIds` | **Ignored → full pending skill sync** |
-| `rollback` `{"deploymentId": id}` | no deploymentId filter | **Broader pending-set reconcile** |
-| `mcp_sync` `{"profileId": …}` | payload unused | **All pending MCP** |
+| `setSkillTargets` `{"skillIds": [id]}` | `skillIds` | Scoped Skill sync |
+| `rollback` plural node/skill/deployment IDs | node/skill filters | Scoped rollback reconcile |
+| `mcp_sync` plural node/profile/deployment IDs | all three | Scoped MCP reconcile |
 | `mcp_health` `serverId` | stub only | **Ignored** |
 
 Evidence: `internal/httpapi/skills.go` (enqueue), `internal/httpapi/mcp.go`, `internal/worker/worker.go` `syncSkills`/`syncMCP`. When changing selectors, align field names end-to-end or document the broad reconcile.

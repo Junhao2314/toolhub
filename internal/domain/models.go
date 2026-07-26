@@ -57,11 +57,31 @@ type EnrollmentResult struct {
 }
 
 type InventoryRuntime struct {
-	Kind      string         `json:"kind"`
-	RootPath  string         `json:"rootPath"`
-	Version   string         `json:"version"`
-	Config    map[string]any `json:"config"`
-	Inventory map[string]any `json:"inventory"`
+	Kind       string          `json:"kind"`
+	RootPath   string          `json:"rootPath"`
+	Version    string          `json:"version"`
+	Config     map[string]any  `json:"config"`
+	Inventory  map[string]any  `json:"inventory"`
+	MCPServers []MCPDescriptor `json:"mcpServers,omitempty"`
+}
+
+type MCPDescriptor struct {
+	Name              string   `json:"name"`
+	Identity          string   `json:"identity"`
+	Transport         string   `json:"transport"`
+	Command           string   `json:"command,omitempty"`
+	Args              []string `json:"args,omitempty"`
+	URL               string   `json:"url,omitempty"`
+	EnvKeys           []string `json:"envKeys"`
+	ConfigFingerprint string   `json:"configFingerprint"`
+	SecretFingerprint string   `json:"secretFingerprint,omitempty"`
+}
+
+type MCPCaptureRequest struct {
+	Token    string `json:"token"`
+	Runtime  string `json:"runtime"`
+	Name     string `json:"name"`
+	Identity string `json:"identity"`
 }
 
 type AgentMessage struct {
