@@ -14,7 +14,7 @@ Rollback is always a new desired-state transition to the recorded previous appro
 
 ## Shared-source staged rollout
 
-Shared-source support is node-scoped. Omitting `sharedSources` allows read-only auto-probe when the default shared directory or manifest exists; it does not authorize writes. Before enabling reconciliation, add an explicit source to the Agent configuration with the real enrolled home and paths. Start with:
+Shared-source support is node-scoped. Omitting `sharedSources` allows read-only auto-probe when the default shared directory or manifest exists; it does not authorize writes. Before enabling reconciliation, add an explicit source to the Agent configuration with the real enrolled home and paths. The minimum managed set is Claude + Codex; add Hermes, Grok, or OpenClaw only when those runtimes are intentionally part of the rollout. Start with:
 
 ```json
 {
@@ -40,20 +40,6 @@ Shared-source support is node-scoped. Omitting `sharedSources` allows read-only 
           "skillsPath": "/root/.claude/skills",
           "mcpPath": "/root/.claude/settings.json",
           "mcpFormat": "claude-settings-json"
-        },
-        "hermes": {
-          "skillsPath": "/root/.hermes/skills",
-          "mcpPath": "/root/.hermes/config.yaml",
-          "mcpFormat": "hermes-yaml"
-        },
-        "grok": {
-          "skillsPath": "/root/.grok/skills",
-          "mcpInherits": "claude"
-        },
-        "openclaw": {
-          "skillsPath": "/root/.openclaw/workspace/skills",
-          "mcpPath": "/root/.openclaw/workspace/config/mcporter.json",
-          "mcpFormat": "openclaw-mcporter-json"
         }
       }
     }
@@ -64,7 +50,7 @@ Shared-source support is node-scoped. Omitting `sharedSources` allows read-only 
 Merge that block into the existing JSON; do not replace enrollment credentials or runtime paths. Then use this sequence:
 
 1. Record hashes, modes, owners, and symlink targets for the manifest and all consumers. Make secure, timestamped backups without following Skill links, and confirm no cron, timer, or legacy generator is writing concurrently.
-2. Restart the Agent in `observed` mode and confirm the shared source, five Skill consumers, four concrete MCP outputs, and Grok inheritance appear in inventory. No filesystem write is allowed in this mode.
+2. Restart the Agent in `observed` mode and confirm the shared source plus the configured Claude/Codex consumers appear in inventory. Optional consumers appear only when explicitly configured; no filesystem write is allowed in this mode.
 3. Run the same reconciler locally in dry-run mode:
 
    ```bash
@@ -85,7 +71,7 @@ Merge that block into the existing JSON; do not replace enrollment credentials o
    toolhub-agent sync-shared --config /etc/toolhub-agent/agent.json --source root-shared --scope skills
    ```
 
-6. Verify all five consumer link sets and review the shared-source status in ToolHub. A whole-file compare-and-swap or managed-entry mismatch is a conflict; inspect the local edit and rerun rather than forcing an overwrite.
+6. Verify the Claude/Codex link sets and any explicitly configured optional consumers, then review the shared-source status in ToolHub. A whole-file compare-and-swap or managed-entry mismatch is a conflict; inspect the local edit and rerun rather than forcing an overwrite.
 7. After one manual canary and at least one periodic inventory cycle, set `"autoSync": true` and restart the Agent. The existing Agent process watches only the manifest and the top level of the shared Skills directory, debounces events, serializes each source with a lock, and reports a fresh redacted inventory after successful reconciliation.
 
 Existing MCP target replacements create `0600` last-known-good backups under `<dataDir>/backups/shared/<source>/<consumer>/`; the five newest files are retained per consumer. Shared ownership state lives under `<dataDir>/shared/` and must be included in Agent data backups.

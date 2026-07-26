@@ -18,10 +18,29 @@ func TestDefaultSharedSourceUsesConfiguredHome(t *testing.T) {
 	if source.SkillsRoot != filepath.Join(home, ".shared", "skills") || source.MCPManifest != filepath.Join(home, ".shared", "mcp", "servers.json") {
 		t.Fatalf("defaults did not follow home %q: %+v", home, source)
 	}
-	for _, kind := range []string{domain.RuntimeCodex, domain.RuntimeClaude, domain.RuntimeHermes, domain.RuntimeGrok, domain.RuntimeOpenClaw} {
+	for _, kind := range []string{domain.RuntimeCodex, domain.RuntimeClaude} {
 		if _, ok := source.Consumers[kind]; !ok {
 			t.Fatalf("missing default consumer %q", kind)
 		}
+	}
+	for _, kind := range []string{domain.RuntimeHermes, domain.RuntimeGrok, domain.RuntimeOpenClaw} {
+		if _, ok := source.Consumers[kind]; ok {
+			t.Fatalf("optional consumer %q should require explicit configuration", kind)
+		}
+	}
+}
+
+func TestDefaultSharedSourceUsesConfiguredRuntimeRoots(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "agent-home")
+	paths := DefaultPaths(home)
+	paths.RuntimeRoots[domain.RuntimeCodex] = filepath.Join(home, "custom", "codex-skills")
+	paths.RuntimeRoots[domain.RuntimeClaude] = filepath.Join(home, "custom", "claude-skills")
+	source := DefaultSharedSource(paths)
+	if got := source.Consumers[domain.RuntimeCodex].SkillsPath; got != paths.RuntimeRoots[domain.RuntimeCodex] {
+		t.Fatalf("Codex default Skills path = %q, want %q", got, paths.RuntimeRoots[domain.RuntimeCodex])
+	}
+	if got := source.Consumers[domain.RuntimeClaude].SkillsPath; got != paths.RuntimeRoots[domain.RuntimeClaude] {
+		t.Fatalf("Claude default Skills path = %q, want %q", got, paths.RuntimeRoots[domain.RuntimeClaude])
 	}
 }
 
@@ -62,11 +81,16 @@ func TestNormalizeSharedSourcesRejectsUnsafeTopology(t *testing.T) {
 		}},
 		{name: "duplicate consumer target", mutate: func(source *SharedSourceConfig) {
 			claude := source.Consumers[domain.RuntimeClaude]
-			hermes := source.Consumers[domain.RuntimeHermes]
+			hermes := SharedConsumerConfig{
+				SkillsPath: filepath.Join(filepath.Dir(source.SkillsRoot), "hermes", "skills"),
+				MCPPath:    filepath.Join(filepath.Dir(source.SkillsRoot), "hermes", "config.yaml"),
+				MCPFormat:  MCPFormatHermesYAML,
+			}
 			hermes.SkillsPath = claude.SkillsPath
 			source.Consumers[domain.RuntimeHermes] = hermes
 		}},
 		{name: "inheritance without concrete parent", mutate: func(source *SharedSourceConfig) {
+			source.Consumers[domain.RuntimeGrok] = SharedConsumerConfig{MCPInherits: domain.RuntimeClaude}
 			claude := source.Consumers[domain.RuntimeClaude]
 			claude.MCPPath = ""
 			claude.MCPFormat = ""

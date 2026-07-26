@@ -149,6 +149,20 @@ func TestSharedMCPReconcileRendersAllFormatsAndPreservesLocalEntries(t *testing.
 	source.Name = "test-shared"
 	source.Mode = SharedModeManaged
 	source.AutoSync = false
+	source.Consumers[domain.RuntimeHermes] = SharedConsumerConfig{
+		SkillsPath: filepath.Join(home, ".hermes", "skills"),
+		MCPPath:    filepath.Join(home, ".hermes", "config.yaml"),
+		MCPFormat:  MCPFormatHermesYAML,
+	}
+	source.Consumers[domain.RuntimeGrok] = SharedConsumerConfig{
+		SkillsPath:  filepath.Join(home, ".grok", "skills"),
+		MCPInherits: domain.RuntimeClaude,
+	}
+	source.Consumers[domain.RuntimeOpenClaw] = SharedConsumerConfig{
+		SkillsPath: filepath.Join(home, ".openclaw", "workspace", "skills"),
+		MCPPath:    filepath.Join(home, ".openclaw", "workspace", "config", "mcporter.json"),
+		MCPFormat:  MCPFormatOpenClawJSON,
+	}
 	writeTestFile(t, source.MCPManifest, `{
   "version": 1,
   "servers": {

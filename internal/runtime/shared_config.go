@@ -51,6 +51,18 @@ func DefaultSharedSource(paths Paths) SharedSourceConfig {
 		name = "home"
 	}
 	name += "-shared"
+	consumers := map[string]SharedConsumerConfig{
+		domain.RuntimeCodex: {
+			SkillsPath: runtimeSkillsPath(paths, domain.RuntimeCodex, filepath.Join(home, ".codex", "skills")),
+			MCPPath:    filepath.Join(home, ".codex", ".tmp", "plugins", "plugins", "shared-mcp", ".mcp.json"),
+			MCPFormat:  MCPFormatCodexPluginJSON,
+		},
+		domain.RuntimeClaude: {
+			SkillsPath: runtimeSkillsPath(paths, domain.RuntimeClaude, filepath.Join(home, ".claude", "skills")),
+			MCPPath:    filepath.Join(home, ".claude", "settings.json"),
+			MCPFormat:  MCPFormatClaudeSettingsJSON,
+		},
+	}
 	return SharedSourceConfig{
 		Name:        name,
 		Mode:        SharedModeObserved,
@@ -61,33 +73,15 @@ func DefaultSharedSource(paths Paths) SharedSourceConfig {
 			filepath.Join(home, ".agents", "skills"),
 			filepath.Join(home, ".shared", "vibe-skills"),
 		},
-		Consumers: map[string]SharedConsumerConfig{
-			domain.RuntimeCodex: {
-				SkillsPath: filepath.Join(home, ".codex", "skills"),
-				MCPPath:    filepath.Join(home, ".codex", ".tmp", "plugins", "plugins", "shared-mcp", ".mcp.json"),
-				MCPFormat:  MCPFormatCodexPluginJSON,
-			},
-			domain.RuntimeClaude: {
-				SkillsPath: filepath.Join(home, ".claude", "skills"),
-				MCPPath:    filepath.Join(home, ".claude", "settings.json"),
-				MCPFormat:  MCPFormatClaudeSettingsJSON,
-			},
-			domain.RuntimeHermes: {
-				SkillsPath: filepath.Join(home, ".hermes", "skills"),
-				MCPPath:    filepath.Join(home, ".hermes", "config.yaml"),
-				MCPFormat:  MCPFormatHermesYAML,
-			},
-			domain.RuntimeGrok: {
-				SkillsPath:  filepath.Join(home, ".grok", "skills"),
-				MCPInherits: domain.RuntimeClaude,
-			},
-			domain.RuntimeOpenClaw: {
-				SkillsPath: filepath.Join(home, ".openclaw", "workspace", "skills"),
-				MCPPath:    filepath.Join(home, ".openclaw", "workspace", "config", "mcporter.json"),
-				MCPFormat:  MCPFormatOpenClawJSON,
-			},
-		},
+		Consumers: consumers,
 	}
+}
+
+func runtimeSkillsPath(paths Paths, kind, fallback string) string {
+	if configured := strings.TrimSpace(paths.RuntimeRoots[kind]); configured != "" {
+		return configured
+	}
+	return fallback
 }
 
 func AutoProbeSharedSources(paths Paths) []SharedSourceConfig {

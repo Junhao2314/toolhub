@@ -7,6 +7,7 @@ Status: implementation complete; managed rollout pending operator approval
 ## Execution record
 
 - Repository phases 1-5 and the Phase 6 watcher/locking implementation were completed on 2026-07-26. Phase 7 native control-plane migration was intentionally not performed.
+- Default shared-source topology is optimized for the management platform's primary consumers: Claude and Codex are configured by default; Hermes, Grok, and OpenClaw remain supported as explicit optional consumers.
 - Focused and full Go tests, race tests, vet, Web typecheck/build/audit, OpenAPI YAML parsing, and Compose configuration validation passed.
 - Migration 004 was validated against both an empty isolated PostgreSQL 16 database and an isolated database preloaded with migrations 001/002/003; store integration tests passed on both paths.
 - Live-server validation used an observed-only temporary Agent config/data directory and `sync-shared --dry-run`. It detected 7 enabled and 2 disabled shared MCP servers, preserved Hermes `task-trellis` and `acemcp`, and made no live configuration or permission changes.
@@ -19,8 +20,8 @@ This plan supersedes the ownership assumption in plans/2026-07-26-runtime-discov
 
 Make /root/.shared the single source of truth on this server:
 
-- Skills are discovered once from /root/.shared/skills and linked into Codex, Claude, Hermes, Grok, and OpenClaw.
-- MCP desired state is read from /root/.shared/mcp/servers.json and rendered into each Agent's native format.
+- Skills are discovered once from /root/.shared/skills and linked into Codex and Claude by default; Hermes, Grok, and OpenClaw can be added without changing the source model.
+- MCP desired state is read from /root/.shared/mcp/servers.json and rendered into each configured consumer's native format.
 - Both manual sync and low-resource automatic sync use the same Go implementation.
 - Existing Agent-local Skills and MCP entries remain visible but are not overwritten.
 - Hermes local-only task-trellis and acemcp entries are preserved.
@@ -33,17 +34,19 @@ The implementation must be tested against this exact topology before enabling wr
 
 - Agent home: /root
 - Canonical Skills: /root/.shared/skills
-- Skill consumers:
+- Primary shared-source Skill consumers:
   - Codex: /root/.codex/skills
   - Claude: /root/.claude/skills
+- Optional shared-source Skill consumers:
   - Hermes: /root/.hermes/skills
   - Grok: /root/.grok/skills
   - OpenClaw: /root/.openclaw/workspace/skills
 - Canonical MCP manifest: /root/.shared/mcp/servers.json
-- MCP consumers:
-  - Hermes YAML: /root/.hermes/config.yaml, mcp_servers mapping
-  - Claude JSON: /root/.claude/settings.json, mcpServers mapping
+- Primary shared-source MCP consumers:
   - Codex plugin JSON: /root/.codex/.tmp/plugins/plugins/shared-mcp/.mcp.json
+  - Claude JSON: /root/.claude/settings.json, mcpServers mapping
+- Optional shared-source MCP consumers:
+  - Hermes YAML: /root/.hermes/config.yaml, mcp_servers mapping
   - OpenClaw JSON: /root/.openclaw/workspace/config/mcporter.json
   - Grok Build: inherits Claude MCP configuration and has no separate output file
 - Allowed shared Skill link targets currently include:
@@ -112,7 +115,7 @@ Before implementation rollout, re-read the live files and produce redacted fixtu
 - Auto-detection without local config is read-only observed mode.
 - Filesystem writes require an explicit Agent configuration mode of managed.
 
-Suggested Agent configuration shape:
+Suggested Agent configuration shape (the minimum managed set is Codex + Claude; the other consumers below are optional):
 
     "sharedSources": [
       {
@@ -325,9 +328,9 @@ Constraint migration must preserve current rows and use named constraints. Verif
 - Nodes: show shared source path, observed/managed mode, auto-sync status, last scan/sync, and conflicts.
 - Skills:
   - show canonical shared entries once
-  - label consumer link coverage across five Agents
+  - label consumer link coverage across the configured primary and optional Agents
   - keep runtime-local discoveries separate
-  - offer one Shared source target instead of five duplicate deployment targets on this node
+  - offer one Shared source target instead of duplicate per-consumer deployment targets on this node
 - MCP:
   - label shared-file authority and node-local credentials
   - show the seven enabled source servers and per-consumer render state
@@ -521,8 +524,8 @@ For integrated validation:
 ### Live-server acceptance matrix
 
 - Dry-run reports no unexpected overwrite or removal.
-- Shared Skills appear once as canonical entries; all five consumer link states are visible.
-- Grok and OpenClaw Skills links are created without changing local-only entries.
+- Shared Skills appear once as canonical entries; Claude and Codex link states are always visible, with optional consumer states shown when configured.
+- Grok and OpenClaw Skills links are created without changing local-only entries when explicitly configured.
 - The seven enabled MCP servers render to the intended consumers.
 - Disabled playwright and github stay absent from generated managed blocks.
 - Hermes retains task-trellis and acemcp byte-for-byte at the semantic mapping level.
@@ -555,8 +558,8 @@ For integrated validation:
 ## Completion criteria
 
 - /root/.shared is the only authoritative Skill/MCP source on this server.
-- Codex, Claude, Hermes, Grok, and OpenClaw consume the shared Skills topology.
-- Claude, Codex, Hermes, and OpenClaw receive valid native MCP output; Grok inherits Claude.
+- Codex and Claude consume the shared Skills topology by default; Hermes, Grok, and OpenClaw are opt-in consumers.
+- Claude and Codex receive valid native MCP output by default; optional renderers remain available and Grok inherits Claude when configured.
 - Manual CLI/API sync and automatic event-driven sync share one safe implementation.
 - Local exceptions and unowned files are preserved; conflicts are visible instead of overwritten.
 - ToolHub stores only redacted shared-source metadata and fingerprints.
