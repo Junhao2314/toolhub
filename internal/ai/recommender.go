@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/toolhub-dev/toolhub/internal/security"
-	"github.com/toolhub-dev/toolhub/internal/store"
+	"github.com/Junhao2314/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 type Recommender struct {

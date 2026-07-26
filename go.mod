@@ -1,4 +1,4 @@
-module github.com/toolhub-dev/toolhub
+module github.com/Junhao2314/toolhub
 
 go 1.22
 

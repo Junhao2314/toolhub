@@ -6,8 +6,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	"github.com/toolhub-dev/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/security"
 )
 
 func (s *Store) Audit(ctx context.Context, event domain.AuditEvent) error {

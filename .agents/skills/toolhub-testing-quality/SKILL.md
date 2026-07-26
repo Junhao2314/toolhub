@@ -82,7 +82,7 @@ Framework: stdlib `testing` only (no testify/sqlmock/testcontainers). No shared 
 - Job `succeeded` is orchestration success; **no automated test** currently enforces that distinction.
 - Smoke CSRF check is only bare POST `/sync` → 403, not a full middleware matrix.
 - E2E is layout/nav smoke, not RBAC, import, deploy, MCP secrets, or Agent WSS.
-- `make lint` mutates sources (`gofmt -w`); `make web` rewrites `cmd/toolhub/dist`.
+- `make lint` mutates sources (`gofmt -w`); `make web` rewrites ignored generated files under `cmd/toolhub/dist`.
 - Local smoke needs `TOOLHUB_SECURE_COOKIES=false`.
 - Playwright requires system Chrome at the pinned path.
 

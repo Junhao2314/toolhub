@@ -4,7 +4,8 @@ web/dist/
 web/*.tsbuildinfo
 web/vite.config.js
 web/vite.config.d.ts
-cmd/toolhub/dist/assets/
+cmd/toolhub/dist/*
+!cmd/toolhub/dist/placeholder.txt
 bin/
 coverage/
 playwright-report/

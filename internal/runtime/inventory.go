@@ -13,10 +13,10 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	"github.com/toolhub-dev/toolhub/internal/protocol"
-	"github.com/toolhub-dev/toolhub/internal/security"
-	"github.com/toolhub-dev/toolhub/internal/skills"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/protocol"
+	"github.com/Junhao2314/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
 type Paths struct {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/toolhub-dev/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/security"
 )
 
 type Config struct {

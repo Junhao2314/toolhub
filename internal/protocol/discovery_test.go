@@ -3,7 +3,7 @@ package protocol
 import (
 	"testing"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/domain"
 )
 
 func TestNormalizeMCPDescriptorCanonicalizesKeys(t *testing.T) {

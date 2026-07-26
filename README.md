@@ -58,6 +58,8 @@ cd .. && make docker-config
 
 The Vite development server uses `127.0.0.1:18481` and proxies API requests to the control plane on `18480`.
 
+`cmd/toolhub/dist/placeholder.txt` is tracked only so clean Go builds satisfy `go:embed`. The generated `index.html` and hashed assets are ignored and are produced by `make web` or the Docker build.
+
 ## Operations
 
 - Update checks discover upstream commit/content changes and build a reviewable candidate. They never change desired state.

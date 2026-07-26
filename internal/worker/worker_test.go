@@ -3,7 +3,7 @@ package worker
 import (
 	"testing"
 
-	"github.com/toolhub-dev/toolhub/internal/store"
+	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 func TestMCPSelectorsUsePluralIDs(t *testing.T) {

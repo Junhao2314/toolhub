@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	runtimeadapter "github.com/toolhub-dev/toolhub/internal/runtime"
+	runtimeadapter "github.com/Junhao2314/toolhub/internal/runtime"
 )
 
 type Config struct {

@@ -9,10 +9,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	"github.com/toolhub-dev/toolhub/internal/protocol"
-	"github.com/toolhub-dev/toolhub/internal/security"
-	"github.com/toolhub-dev/toolhub/internal/skills"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/protocol"
+	"github.com/Junhao2314/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
 func TestRuntimeMCPAutoAdoptionIntegration(t *testing.T) {

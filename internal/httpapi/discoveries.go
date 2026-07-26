@@ -5,7 +5,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/domain"
 )
 
 func (a *API) listDiscoveries(w http.ResponseWriter, r *http.Request) {

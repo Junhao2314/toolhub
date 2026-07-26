@@ -8,9 +8,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	"github.com/toolhub-dev/toolhub/internal/skills"
-	"github.com/toolhub-dev/toolhub/internal/store"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/skills"
+	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 func (a *API) enrollAgent(w http.ResponseWriter, r *http.Request) {

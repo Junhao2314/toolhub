@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	runtimeadapter "github.com/toolhub-dev/toolhub/internal/runtime"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	runtimeadapter "github.com/Junhao2314/toolhub/internal/runtime"
 )
 
 func Enroll(ctx context.Context, serverURL, token, configPath, home, dataDir string) (Config, error) {

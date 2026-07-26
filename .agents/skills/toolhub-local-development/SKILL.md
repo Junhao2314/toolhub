@@ -57,8 +57,8 @@ TOOLHUB_E2E_EMAIL=... TOOLHUB_E2E_PASSWORD=... cd web && npm run test:e2e
 
 | Target | Behavior | Mutates tree? |
 |--------|----------|---------------|
-| `make build` | `web` then `bin/toolhub` + `bin/toolhub-agent` | yes (via web) |
-| `make web` | `npm ci` + build; **rm** `cmd/toolhub/dist/assets`; **cp** `web/dist` → `cmd/toolhub/dist/` | **yes** |
+| `make build` | `web` then `bin/toolhub` + `bin/toolhub-agent` | yes (ignored dist/bin output) |
+| `make web` | `npm ci` + build; replaces ignored `cmd/toolhub/dist/index.html` and assets while preserving the tracked placeholder | **yes** (ignored output) |
 | `make test` | `go test ./...` + web typecheck | no |
 | `make lint` | **`gofmt -w`** on `cmd`/`internal`, `go vet`, typecheck | **yes** |
 | `make docker-config` | `compose config --quiet` with placeholder required env | no |
@@ -129,7 +129,7 @@ Reuse Makefile targets, Compose health wait + `/healthz`, `scripts/smoke-api.sh`
 
 ## Prohibitions
 
-- Do not commit `.env`, real keys, or generated `cmd/toolhub/dist`.
+- Do not commit `.env`, real keys, or generated `cmd/toolhub/dist` output; only `placeholder.txt` is tracked.
 - Do not treat `make lint` / `make web` as read-only verification.
 - Do not publish Compose ports beyond `127.0.0.1`.
 - Do not hand-edit embedded dist assets.
@@ -141,5 +141,5 @@ curl --fail http://127.0.0.1:18480/healthz
 TOOLHUB_SMOKE_EMAIL=... TOOLHUB_SMOKE_PASSWORD=... sh scripts/smoke-api.sh
 go test ./...
 cd web && npm run typecheck
-git diff   # after make lint/web, expect formatting/dist churn
+git diff   # after make lint/web, expect formatting changes only; generated dist output is ignored
 ```

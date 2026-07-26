@@ -15,7 +15,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/toolhub-dev/toolhub/internal/skills"
+	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
 type Deployer struct {

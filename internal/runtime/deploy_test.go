@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/toolhub-dev/toolhub/internal/skills"
+	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
 func TestDeployRefusesUnmanagedTarget(t *testing.T) {

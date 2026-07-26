@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/domain"
 )
 
 func NormalizeMCPDescriptor(runtimeKind string, descriptor domain.MCPDescriptor) (domain.MCPDescriptor, error) {

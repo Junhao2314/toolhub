@@ -8,11 +8,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/toolhub-dev/toolhub/internal/agenthub"
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	"github.com/toolhub-dev/toolhub/internal/remote"
-	"github.com/toolhub-dev/toolhub/internal/skills"
-	"github.com/toolhub-dev/toolhub/internal/store"
+	"github.com/Junhao2314/toolhub/internal/agenthub"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/remote"
+	"github.com/Junhao2314/toolhub/internal/skills"
+	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 type Worker struct {

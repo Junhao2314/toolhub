@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/toolhub-dev/toolhub/internal/ai"
-	"github.com/toolhub-dev/toolhub/internal/market"
+	"github.com/Junhao2314/toolhub/internal/ai"
+	"github.com/Junhao2314/toolhub/internal/market"
 )
 
 func (a *API) searchMarket(w http.ResponseWriter, r *http.Request) {

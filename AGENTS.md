@@ -2,7 +2,7 @@
 
 ToolHub is a Tailnet-oriented operations console for managing Codex, Claude, and Hermes Skills and MCP configuration across nodes. It is a Go modular monolith with an embedded React/Vite UI, a PostgreSQL source of truth, and a separate cross-platform Go Agent.
 
-Module path: `github.com/toolhub-dev/toolhub` (Go 1.22). Web: React 18 + Vite 8 + TypeScript 5.7 (Node 22 in CI/Docker). Database: PostgreSQL 16.
+Module path: `github.com/Junhao2314/toolhub` (Go 1.22). Web: React 18 + Vite 8 + TypeScript 5.7 (Node 22 in CI/Docker). Database: PostgreSQL 16.
 
 ## Project map
 
@@ -113,13 +113,13 @@ The local HTTP smoke profile must set `TOOLHUB_SECURE_COOKIES=false`. The normal
 
 ## Generated and high-risk files
 
-- `cmd/toolhub/dist` is copied from `web/dist` by `make web` and Dockerfile; do not hand-edit generated assets.
+- `cmd/toolhub/dist/placeholder.txt` is the only tracked dist file and keeps clean-clone `go:embed` builds valid. `make web` and Dockerfile populate ignored generated `index.html`/assets; do not hand-edit or commit them.
 - Applied migrations under `internal/store/migrations/` must not be rewritten. Add the next numbered file (for example `003_*.sql`). `Store.Migrate` embeds `migrations/*.sql`, uses advisory lock `18480`, and records versions in `schema_migrations` **without checksums or down migrations**.
 - `.env` and credentials are local runtime state. Do not commit secrets or put real values in examples, logs, tests, or screenshots.
 - Treat `internal/security`, `internal/httpapi/middleware.go`, `internal/protocol/task.go`, `internal/runtime/deploy.go`, `internal/skills/package.go`, and SSH fallback as high-risk boundaries. Preserve their tests and add regression coverage before changing behavior.
 - Redaction is used in audit metadata, inventory persistence, and AI input sanitization, but there is no single universal API-response redaction middleware. Verify the full caller path before treating a `docs/SECURITY.md` claim as enforcement.
 - Store `SecretValue` reads and decrypts by ID without actor authorization; use the caller-specific `AgentSecretValue` boundary for Agent MCP access and add authorization before exposing any other secret.
-- `make lint` runs `gofmt -w` and `make web` removes/copies generated dist assets; treat both as mutating build targets. Prefer `npm ci --ignore-scripts` for CI parity (`make web` currently uses bare `npm ci`).
+- `make lint` runs `gofmt -w`. `make web` rewrites ignored generated dist output while preserving the tracked placeholder. Treat both as filesystem-mutating targets. Prefer `npm ci --ignore-scripts` for CI parity (`make web` currently uses bare `npm ci`).
 
 ## Known limits and current rough edges
 

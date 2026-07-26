@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	"github.com/toolhub-dev/toolhub/internal/security"
-	"github.com/toolhub-dev/toolhub/internal/store"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 func (a *API) login(w http.ResponseWriter, r *http.Request) {

@@ -15,15 +15,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/toolhub-dev/toolhub/internal/agenthub"
-	"github.com/toolhub-dev/toolhub/internal/ai"
-	"github.com/toolhub-dev/toolhub/internal/config"
-	"github.com/toolhub-dev/toolhub/internal/httpapi"
-	"github.com/toolhub-dev/toolhub/internal/market"
-	"github.com/toolhub-dev/toolhub/internal/remote"
-	"github.com/toolhub-dev/toolhub/internal/security"
-	"github.com/toolhub-dev/toolhub/internal/store"
-	"github.com/toolhub-dev/toolhub/internal/worker"
+	"github.com/Junhao2314/toolhub/internal/agenthub"
+	"github.com/Junhao2314/toolhub/internal/ai"
+	"github.com/Junhao2314/toolhub/internal/config"
+	"github.com/Junhao2314/toolhub/internal/httpapi"
+	"github.com/Junhao2314/toolhub/internal/market"
+	"github.com/Junhao2314/toolhub/internal/remote"
+	"github.com/Junhao2314/toolhub/internal/security"
+	"github.com/Junhao2314/toolhub/internal/store"
+	"github.com/Junhao2314/toolhub/internal/worker"
 )
 
 //go:embed dist/*

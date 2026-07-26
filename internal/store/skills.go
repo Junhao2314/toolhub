@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/toolhub-dev/toolhub/internal/skills"
+	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
 type SourceInput struct {

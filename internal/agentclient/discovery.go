@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/toolhub-dev/toolhub/internal/domain"
-	runtimeadapter "github.com/toolhub-dev/toolhub/internal/runtime"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	runtimeadapter "github.com/Junhao2314/toolhub/internal/runtime"
 )
 
 func (e *Executor) discoverInventory(ctx context.Context) ([]domain.InventoryRuntime, error) {
