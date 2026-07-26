@@ -42,6 +42,21 @@ toolhub-agent enroll --server https://toolhub.your-tailnet.ts.net --token '<one-
 toolhub-agent run
 ```
 
+For the packaged Linux systemd unit, enroll with the paths used by the service:
+
+```bash
+sudo install -d -m 0700 /etc/toolhub-agent /var/lib/toolhub-agent
+sudo toolhub-agent enroll \
+  --server https://toolhub.your-tailnet.ts.net \
+  --token '<one-time-token>' \
+  --home "$HOME" \
+  --config /etc/toolhub-agent/agent.json \
+  --data-dir /var/lib/toolhub-agent
+sudo systemctl enable --now toolhub-agent
+```
+
+The unit keeps the home tree read-only except for the configured user's `.codex`, `.claude`, and `.hermes` runtime directories, which reconciliation must update. If the Agent manages another user's home, set the service `User=` and enrollment `--home` consistently (or add equivalent `ReadWritePaths=` overrides).
+
 Service templates are under `packaging/systemd`, `packaging/launchd`, and `packaging/windows`. Enrollment immediately scans existing runtime homes. Existing Skills remain read-only until an administrator adopts one from the Discovered view; the Agent writes the management marker only after the backend imports and verifies the snapshot.
 
 Existing MCP servers are automatically taken over. The Agent sends normalized commands, arguments, URLs, environment key names, and per-node HMAC fingerprints through the authenticated channel. It uploads plaintext environment values only when the backend issues a short-lived one-time capture token. The values are encrypted immediately and never enter browser APIs, inventory JSON, jobs, audit metadata, or logs. The first scan is a no-rewrite baseline; later local edits or deletion are drift, and ToolHub restores central desired state during reconciliation.

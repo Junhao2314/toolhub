@@ -28,11 +28,18 @@ func New(st *store.Store, logger *slog.Logger) *Executor {
 	return &Executor{store: st, logger: logger}
 }
 
-func (e *Executor) Dispatch(ctx context.Context, nodeID string, task domain.AgentTask) error {
+func (e *Executor) Dispatch(ctx context.Context, nodeID string, task domain.AgentTask, owner string) error {
 	connection, err := e.store.SSHConnectionForNode(ctx, nodeID)
 	if errors.Is(err, store.ErrNotFound) {
 		return ErrUnavailable
 	}
+	if err != nil {
+		return err
+	}
+	if owner == "" {
+		owner = "ssh-dispatch"
+	}
+	reserved, err := e.store.ReserveNodeTask(ctx, nodeID, task.ID, "ssh", owner, store.DefaultTaskLease)
 	if err != nil {
 		return err
 	}
@@ -45,8 +52,8 @@ func (e *Executor) Dispatch(ctx context.Context, nodeID string, task domain.Agen
 	knownHostsPath := filepath.Join(localDir, "known_hosts")
 	taskPath := filepath.Join(localDir, "task.json")
 	batchPath := filepath.Join(localDir, "sftp.batch")
-	remotePath := "/tmp/toolhub-task-" + task.ID + ".json"
-	encoded, _ := json.Marshal(task)
+	remotePath := "/tmp/toolhub-task-" + reserved.ID + ".json"
+	encoded, _ := json.Marshal(reserved)
 	if err := os.WriteFile(keyPath, connection.PrivateKey, 0600); err != nil {
 		return err
 	}
@@ -66,25 +73,27 @@ func (e *Executor) Dispatch(ctx context.Context, nodeID string, task domain.Agen
 	if output, err := limitedCommand(commandCtx, "sftp", sftpArgs...); err != nil {
 		return fmt.Errorf("SFTP task upload failed: %s", strings.TrimSpace(string(output)))
 	}
+	_, _ = e.store.CompleteTaskAttempt(ctx, nodeID, reserved.ID, reserved.Attempt, "running", json.RawMessage(`{}`))
 	sshArgs := append(append([]string{}, common...), connection.Address, "toolhub-agent", "run-task", "--file", remotePath)
 	output, err := limitedCommand(commandCtx, "ssh", sshArgs...)
 	if err != nil {
 		return fmt.Errorf("SSH fixed task failed: %s", strings.TrimSpace(string(output)))
 	}
 	var response struct {
-		Status string          `json:"status"`
-		Result json.RawMessage `json:"result"`
+		Status  string          `json:"status"`
+		Attempt int             `json:"attempt"`
+		Result  json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(bytes.TrimSpace(output), &response); err != nil || (response.Status != "succeeded" && response.Status != "failed") {
 		return errors.New("SSH agent returned an invalid task result")
 	}
-	if err := e.store.MarkTaskDelivered(ctx, task.ID); err != nil {
+	if response.Attempt == 0 {
+		response.Attempt = reserved.Attempt
+	}
+	if _, err := e.store.CompleteTaskAttempt(ctx, nodeID, reserved.ID, response.Attempt, response.Status, response.Result); err != nil {
 		return err
 	}
-	if err := e.store.CompleteTask(ctx, nodeID, task.ID, response.Status, response.Result); err != nil {
-		return err
-	}
-	e.logger.Info("task delivered through SSH fallback", "nodeId", nodeID, "taskId", task.ID, "kind", task.Kind)
+	e.logger.Info("task delivered through SSH fallback", "nodeId", nodeID, "taskId", reserved.ID, "kind", reserved.Kind, "attempt", reserved.Attempt)
 	return nil
 }
 

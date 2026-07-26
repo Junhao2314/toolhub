@@ -22,7 +22,7 @@ var enrollmentHostnamePattern = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]
 func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 	value, err := a.store.Overview(r.Context())
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, value)
@@ -63,7 +63,7 @@ func (a *API) listAudit(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) serveList(w http.ResponseWriter, r *http.Request, raw json.RawMessage, err error) {
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeItems(w, raw)
@@ -103,9 +103,9 @@ func (a *API) createUser(w http.ResponseWriter, r *http.Request) {
 	user, err := a.store.CreateUser(r.Context(), username, input.Email, input.DisplayName, password, input.Role)
 	if err != nil {
 		if errors.Is(err, store.ErrUsernameUnavailable) || errors.Is(err, store.ErrEmailUnavailable) {
-			writeCredentialMutationError(w, r, err)
+			a.writeCredentialMutationError(w, r, err)
 		} else {
-			handleStoreError(w, r, err)
+			a.handleStoreError(w, r, err)
 		}
 		return
 	}
@@ -134,7 +134,7 @@ func (a *API) resetUserPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := chi.URLParam(r, "id")
 	if err := a.store.ResetUserPassword(r.Context(), userID, password); err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	principal := principalFrom(r.Context())
@@ -231,7 +231,7 @@ func enrollmentServerURL(configured string, r *http.Request) (string, error) {
 func (a *API) getNode(w http.ResponseWriter, r *http.Request) {
 	raw, err := a.store.GetNode(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, raw)
@@ -256,7 +256,7 @@ func (a *API) updateNode(w http.ResponseWriter, r *http.Request) {
 		labels=CASE WHEN $3::jsonb='null'::jsonb THEN labels ELSE $3::jsonb END,
 		connection_preference=CASE WHEN $4='' THEN connection_preference ELSE $4 END,updated_at=now() WHERE id=$1`, chi.URLParam(r, "id"), strings.TrimSpace(input.Name), labels, input.ConnectionPreference)
 	if err != nil || command.RowsAffected() == 0 {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": chi.URLParam(r, "id"), "updated": true})
@@ -266,7 +266,7 @@ func (a *API) archiveNode(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	command, err := a.store.Pool().Exec(r.Context(), "UPDATE nodes SET status='archived',archived_at=now(),updated_at=now() WHERE id=$1 AND archived_at IS NULL", id)
 	if err != nil || command.RowsAffected() == 0 {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	principal := principalFrom(r.Context())
@@ -278,7 +278,7 @@ func (a *API) scanNode(w http.ResponseWriter, r *http.Request) {
 	principal := principalFrom(r.Context())
 	job, err := a.store.EnqueueJob(r.Context(), "inventory_scan", map[string]any{"nodeId": chi.URLParam(r, "id"), "readOnly": true}, false, principal.ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
@@ -311,7 +311,7 @@ func (a *API) createNodeConnection(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) cancelJob(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.CancelJob(r.Context(), chi.URLParam(r, "id")); err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"cancelled": true})

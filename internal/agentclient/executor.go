@@ -3,12 +3,15 @@ package agentclient
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -31,14 +34,28 @@ func NewExecutor(config Config) *Executor {
 }
 
 func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, json.RawMessage) {
-	if record, ok := e.history.get(task.ID); ok {
-		return record.Status, record.Result
-	}
 	if err := e.verify(task); err != nil {
 		return "failed", marshalResult(map[string]any{"error": err.Error(), "code": "signature_invalid"})
 	}
+	digest, err := taskPayloadDigest(task.Kind, task.Payload)
+	if err != nil {
+		return "failed", marshalResult(map[string]any{"error": err.Error(), "code": "invalid_payload"})
+	}
+	if record, ok := e.history.get(task.ID); ok && record.Status != "running" {
+		if record.Kind != task.Kind || record.PayloadDigest != digest {
+			return "failed", marshalResult(map[string]any{"error": "task ID was replayed with different semantics", "code": "task_replay_mismatch"})
+		}
+		return record.Status, record.Result
+	}
+	lock, err := acquireExecutionLock(ctx, e.config.DataDir)
+	if err != nil {
+		return "failed", marshalResult(map[string]any{"error": err.Error(), "code": "execution_lock_unavailable"})
+	}
+	defer lock.release()
+	if err := e.history.put(task.ID, taskRecord{Kind: task.Kind, PayloadDigest: digest, Status: "running", Result: json.RawMessage(`{}`), StartedAt: time.Now().UTC()}); err != nil {
+		return "failed", marshalResult(map[string]any{"error": err.Error(), "code": "history_write_failed"})
+	}
 	var result any
-	var err error
 	switch task.Kind {
 	case "scan_inventory":
 		result, err = e.discoverInventory(ctx)
@@ -59,7 +76,9 @@ func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, 
 		result = map[string]any{"error": err.Error()}
 	}
 	encoded := marshalResult(result)
-	_ = e.history.put(task.ID, taskRecord{Status: status, Result: encoded, CompletedAt: time.Now().UTC()})
+	if err := e.history.put(task.ID, taskRecord{Kind: task.Kind, PayloadDigest: digest, Status: status, Result: encoded, CompletedAt: time.Now().UTC()}); err != nil {
+		return "failed", marshalResult(map[string]any{"error": err.Error(), "code": "history_write_failed"})
+	}
 	return status, encoded
 }
 
@@ -100,14 +119,7 @@ func (e *Executor) verify(task domain.AgentTask) error {
 }
 
 func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, error) {
-	var request struct {
-		Runtime    string `json:"runtime"`
-		SourceName string `json:"sourceName"`
-		SkillSlug  string `json:"skillSlug"`
-		VersionID  string `json:"versionId"`
-		SHA256     string `json:"sha256"`
-		Enabled    bool   `json:"enabled"`
-	}
+	var request protocol.DeploySkillPayload
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, err
 	}
@@ -122,7 +134,7 @@ func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, e
 	deployer := runtimeadapter.Deployer{DataDir: e.config.DataDir, Paths: e.config.Paths, SharedSources: e.config.SharedSources}
 	result, err := deployer.Deploy(runtimeadapter.DeployRequest{Runtime: request.Runtime, SourceName: request.SourceName, SkillSlug: request.SkillSlug, VersionID: request.VersionID, SHA256: request.SHA256, Enabled: request.Enabled, Artifact: artifact})
 	if err != nil || request.Runtime != domain.RuntimeShared {
-		return result, err
+		return protocol.DeploySkillResult{ActualHash: result.ActualHash, ActualEnabled: request.Enabled, BackupPath: result.BackupPath, Changed: result.Changed}, err
 	}
 	key, decodeErr := base64.StdEncoding.DecodeString(e.config.TaskKey)
 	if decodeErr != nil || len(key) != 32 {
@@ -132,15 +144,19 @@ func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, e
 	if syncErr != nil {
 		return nil, syncErr
 	}
-	return map[string]any{"deployment": result, "sharedSync": syncResult}, nil
+	return map[string]any{"actualHash": result.ActualHash, "actualEnabled": request.Enabled, "backupPath": result.BackupPath, "changed": result.Changed, "sharedSync": syncResult}, nil
 }
 
 func (e *Executor) applyMCP(ctx context.Context, raw json.RawMessage) (any, error) {
+	var request protocol.ApplyMCPPayload
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return nil, err
+	}
 	var profile map[string]any
 	if err := json.Unmarshal(raw, &profile); err != nil {
 		return nil, err
 	}
-	runtimeKind, _ := profile["runtime"].(string)
+	runtimeKind := request.Runtime
 	resolver := func(ctx context.Context, id string) (string, error) {
 		body, err := e.fetchBytes(ctx, "/agent/v1/secrets/"+id, 1<<20)
 		if err != nil {
@@ -155,6 +171,68 @@ func (e *Executor) applyMCP(ctx context.Context, raw json.RawMessage) (any, erro
 		return response.Value, nil
 	}
 	return runtimeadapter.ApplyMCP(ctx, e.config.Paths, e.config.DataDir, runtimeKind, profile, resolver)
+}
+
+func taskPayloadDigest(kind string, payload json.RawMessage) (string, error) {
+	var semantic any
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if err := decoder.Decode(&semantic); err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(semantic)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(append([]byte(kind+"\n"), canonical...))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+type executionLock struct {
+	path string
+	file *os.File
+}
+
+func acquireExecutionLock(ctx context.Context, dataDir string) (*executionLock, error) {
+	if dataDir == "" {
+		dataDir = "."
+	}
+	if err := os.MkdirAll(dataDir, 0700); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dataDir, "task-execution.lock")
+	for {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			_, _ = fmt.Fprintf(file, "pid=%d\ncreatedAt=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+			_ = file.Sync()
+			return &executionLock{path: path, file: file}, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > 2*time.Hour {
+			_ = os.Remove(path)
+			continue
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (l *executionLock) release() {
+	if l == nil {
+		return
+	}
+	if l.file != nil {
+		_ = l.file.Close()
+	}
+	_ = os.Remove(l.path)
 }
 
 func (e *Executor) fetchBytes(ctx context.Context, endpoint string, max int64) ([]byte, error) {

@@ -9,9 +9,12 @@ import (
 )
 
 type taskRecord struct {
-	Status      string          `json:"status"`
-	Result      json.RawMessage `json:"result"`
-	CompletedAt time.Time       `json:"completedAt"`
+	Kind          string          `json:"kind"`
+	PayloadDigest string          `json:"payloadDigest"`
+	Status        string          `json:"status"`
+	Result        json.RawMessage `json:"result"`
+	StartedAt     time.Time       `json:"startedAt,omitempty"`
+	CompletedAt   time.Time       `json:"completedAt,omitempty"`
 }
 
 type taskHistory struct {
@@ -45,7 +48,7 @@ func (h *taskHistory) put(id string, record taskRecord) error {
 	h.Records[id] = record
 	cutoff := time.Now().Add(-30 * 24 * time.Hour)
 	for key, value := range h.Records {
-		if value.CompletedAt.Before(cutoff) {
+		if !value.CompletedAt.IsZero() && value.CompletedAt.Before(cutoff) {
 			delete(h.Records, key)
 		}
 	}
@@ -56,9 +59,39 @@ func (h *taskHistory) put(id string, record taskRecord) error {
 	if err != nil {
 		return err
 	}
-	temporary := h.path + ".new"
-	if err := os.WriteFile(temporary, body, 0600); err != nil {
+	directory := filepath.Dir(h.path)
+	temporary, err := os.CreateTemp(directory, ".task-history-*.json")
+	if err != nil {
 		return err
 	}
-	return os.Rename(temporary, h.path)
+	temporaryPath := temporary.Name()
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = os.Remove(temporaryPath)
+		}
+	}()
+	if _, err := temporary.Write(body); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(temporaryPath, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, h.path); err != nil {
+		return err
+	}
+	removeTemporary = false
+	if directoryFile, err := os.Open(directory); err == nil {
+		_ = directoryFile.Sync()
+		_ = directoryFile.Close()
+	}
+	return nil
 }

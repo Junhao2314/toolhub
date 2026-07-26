@@ -17,10 +17,11 @@ type SkillDeploymentTask struct {
 	VersionID        string
 	SHA256           string
 	Enabled          bool
+	DesiredGeneration int64
 }
 
 func (s *Store) PendingSkillDeployments(ctx context.Context) ([]SkillDeploymentTask, error) {
-	rows, err := s.pool.Query(ctx, `SELECT d.id::text,d.node_id::text,d.runtime_kind,coalesce(shared_source.name,''),s.slug,s.id::text,coalesce(s.source_id::text,''),coalesce(n.labels->>'group',''),d.desired_version_id::text,v.content_sha256,d.desired_enabled
+	rows, err := s.pool.Query(ctx, `SELECT d.id::text,d.node_id::text,d.runtime_kind,coalesce(shared_source.name,''),s.slug,s.id::text,coalesce(s.source_id::text,''),coalesce(n.labels->>'group',''),d.desired_version_id::text,v.content_sha256,d.desired_enabled,d.desired_generation
 		FROM deployments d JOIN skills s ON s.id=d.skill_id JOIN skill_versions v ON v.id=d.desired_version_id
 		JOIN nodes n ON n.id=d.node_id
 		LEFT JOIN LATERAL (SELECT ss.name FROM shared_sources ss WHERE ss.node_id=d.node_id AND ss.mode='managed' AND ss.status<>'missing' ORDER BY ss.name LIMIT 1) shared_source ON d.runtime_kind='shared'
@@ -32,7 +33,7 @@ func (s *Store) PendingSkillDeployments(ctx context.Context) ([]SkillDeploymentT
 	var result []SkillDeploymentTask
 	for rows.Next() {
 		var item SkillDeploymentTask
-		if err := rows.Scan(&item.DeploymentID, &item.NodeID, &item.Runtime, &item.SharedSourceName, &item.SkillSlug, &item.SkillID, &item.SourceID, &item.NodeGroup, &item.VersionID, &item.SHA256, &item.Enabled); err != nil {
+		if err := rows.Scan(&item.DeploymentID, &item.NodeID, &item.Runtime, &item.SharedSourceName, &item.SkillSlug, &item.SkillID, &item.SourceID, &item.NodeGroup, &item.VersionID, &item.SHA256, &item.Enabled, &item.DesiredGeneration); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

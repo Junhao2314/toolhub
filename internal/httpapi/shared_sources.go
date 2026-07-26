@@ -18,7 +18,7 @@ func (a *API) listSharedSources(w http.ResponseWriter, r *http.Request) {
 func (a *API) getSharedSource(w http.ResponseWriter, r *http.Request) {
 	raw, err := a.store.GetSharedSource(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, raw)
@@ -41,7 +41,7 @@ func (a *API) syncSharedSource(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := a.store.SharedSyncTarget(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	if !input.DryRun && target.Mode != "managed" {
@@ -55,7 +55,7 @@ func (a *API) syncSharedSource(w http.ResponseWriter, r *http.Request) {
 		"scopes":    input.Scopes,
 	}, input.DryRun, principal.ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "shared_sync_queued", ResourceType: "shared_source", ResourceID: target.SourceID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"nodeId": target.NodeID, "scopes": input.Scopes, "dryRun": input.DryRun}})

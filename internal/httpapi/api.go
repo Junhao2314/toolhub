@@ -155,7 +155,7 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message, "requestId": middleware.GetReqID(r.Context())}})
 }
 
-func handleStoreError(w http.ResponseWriter, r *http.Request, err error) {
+func (a *API) handleStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "not_found", "The requested resource was not found")
 		return
@@ -163,6 +163,15 @@ func handleStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, store.ErrSourceFileAuthoritative) {
 		writeError(w, r, http.StatusConflict, "source_file_authoritative", "This MCP server is managed by its node-local shared source file")
 		return
+	}
+	if errors.Is(err, store.ErrStateConflict) {
+		writeError(w, r, http.StatusConflict, "state_conflict", "The resource is already in a terminal or conflicting state")
+		return
+	}
+	// The client response stays generic on purpose; without this log an unexpected store
+	// failure is invisible apart from a bare 500 in the access log.
+	if a != nil && a.logger != nil {
+		a.logger.Log(r.Context(), slog.LevelError, "store error", "method", r.Method, "path", r.URL.Path, "requestId", middleware.GetReqID(r.Context()), "error", err.Error())
 	}
 	writeError(w, r, http.StatusInternalServerError, "internal_error", "The operation failed")
 }

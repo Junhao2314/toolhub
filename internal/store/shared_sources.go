@@ -123,14 +123,14 @@ func upsertSharedMCPServersTx(ctx context.Context, tx pgx.Tx, nodeID, sourceID s
 		if err != nil {
 			return fmt.Errorf("normalize shared MCP server %q: %w", server.Descriptor.Name, err)
 		}
-		args, _ := json.Marshal(descriptor.Args)
+		args := jsonStringArray(descriptor.Args)
 		origin, _ := json.Marshal(map[string]any{"nodeId": nodeID, "sharedSourceId": sourceID, "sharedSourceName": source.Name})
 		_, err = tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,runtime_name,transport,command,args,url,env_refs,enabled,source,origin,config_fingerprint,authority,shared_source_id,header_refs,credential_mode)
 			VALUES($1,$2,$2,$3,$4,$5,$6,'{}',$7,'shared-file',$8,$9,'shared-file',$10,'{}','node-local')
 			ON CONFLICT(shared_source_id,runtime_name) WHERE authority='shared-file' DO UPDATE SET name=excluded.name,transport=excluded.transport,
 			command=excluded.command,args=excluded.args,url=excluded.url,enabled=excluded.enabled,origin=excluded.origin,
 			config_fingerprint=excluded.config_fingerprint,credential_mode='node-local',updated_at=now()`, uuid.NewString(), descriptor.Name,
-			descriptor.Transport, descriptor.Command, string(args), descriptor.URL, server.Enabled, string(origin), descriptor.ConfigFingerprint, sourceID)
+			descriptor.Transport, descriptor.Command, args, descriptor.URL, server.Enabled, string(origin), descriptor.ConfigFingerprint, sourceID)
 		if err != nil {
 			return err
 		}
@@ -199,8 +199,8 @@ func upsertSharedMCPBindingTx(ctx context.Context, tx pgx.Tx, nodeID, sourceID, 
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return false, err
 	}
-	envKeys, _ := json.Marshal(binding.EnvKeys)
-	headerKeys, _ := json.Marshal(binding.HeaderKeys)
+	envKeys := jsonStringArray(binding.EnvKeys)
+	headerKeys := jsonStringArray(binding.HeaderKeys)
 	identity := protocol.MCPIdentity(runtimeKind, binding.ServerName)
 	command, err := tx.Exec(ctx, `INSERT INTO mcp_runtime_bindings(id,node_id,runtime_kind,server_name,identity,server_id,env_keys,observed_config_fingerprint,observed_secret_fingerprint,
 		desired_config_fingerprint,desired_secret_fingerprint,desired_enabled,missing,drift,last_seen_at,shared_source_id,header_keys,desired_fingerprint,actual_fingerprint)
@@ -211,7 +211,7 @@ func upsertSharedMCPBindingTx(ctx context.Context, tx pgx.Tx, nodeID, sourceID, 
 		desired_enabled=excluded.desired_enabled,missing=excluded.missing,drift=excluded.drift,last_seen_at=now(),shared_source_id=excluded.shared_source_id,
 		header_keys=excluded.header_keys,desired_fingerprint=excluded.desired_fingerprint,actual_fingerprint=excluded.actual_fingerprint,updated_at=now()
 		WHERE mcp_runtime_bindings.shared_source_id=excluded.shared_source_id`, uuid.NewString(), nodeID, runtimeKind, binding.ServerName, identity, serverID,
-		string(envKeys), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, binding.Enabled, binding.Missing, binding.Drift, sourceID, string(headerKeys),
+		envKeys, descriptor.ConfigFingerprint, descriptor.SecretFingerprint, binding.Enabled, binding.Missing, binding.Drift, sourceID, headerKeys,
 		binding.DesiredFingerprint, binding.ActualFingerprint)
 	if err != nil {
 		return false, err
@@ -245,9 +245,11 @@ func sharedSourceProjectionQuery() string {
 			FROM shared_consumers c WHERE c.source_id=ss.id),'[]'::jsonb) AS consumers,
 		coalesce((SELECT jsonb_agg(jsonb_build_object('id',ms.id::text,'name',ms.runtime_name,'transport',ms.transport,'command',ms.command,
 			'args',ms.args,'url',ms.url,'enabled',ms.enabled,'authority',ms.authority,'credentialMode',ms.credential_mode,
-			'envKeys',coalesce((SELECT jsonb_agg(DISTINCT value) FROM mcp_runtime_bindings b CROSS JOIN LATERAL jsonb_array_elements_text(b.env_keys)
+			'envKeys',coalesce((SELECT jsonb_agg(DISTINCT value) FROM mcp_runtime_bindings b
+				CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(b.env_keys)='array' THEN b.env_keys ELSE '[]'::jsonb END)
 				WHERE b.shared_source_id=ss.id AND b.server_name=ms.runtime_name),'[]'::jsonb),
-			'headerKeys',coalesce((SELECT jsonb_agg(DISTINCT value) FROM mcp_runtime_bindings b CROSS JOIN LATERAL jsonb_array_elements_text(b.header_keys)
+			'headerKeys',coalesce((SELECT jsonb_agg(DISTINCT value) FROM mcp_runtime_bindings b
+				CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(b.header_keys)='array' THEN b.header_keys ELSE '[]'::jsonb END)
 				WHERE b.shared_source_id=ss.id AND b.server_name=ms.runtime_name),'[]'::jsonb)) ORDER BY ms.runtime_name)
 			FROM mcp_servers ms WHERE ms.shared_source_id=ss.id AND ms.authority='shared-file'),'[]'::jsonb) AS "mcpServers"
 	FROM shared_sources ss JOIN nodes n ON n.id=ss.node_id`
@@ -316,4 +318,18 @@ func truncateSharedError(value string) string {
 		return value[:2000]
 	}
 	return value
+}
+
+// jsonStringArray encodes values as a jsonb array literal. A nil slice must not reach
+// PostgreSQL as `null`: the shared-source projection expands these columns with
+// jsonb_array_elements_text, which rejects scalars.
+func jsonStringArray(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
 }

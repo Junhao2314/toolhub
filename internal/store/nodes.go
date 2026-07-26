@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +16,27 @@ import (
 	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/protocol"
 	"github.com/Junhao2314/toolhub/internal/security"
+)
+
+const DefaultTaskLease = 120 * time.Second
+
+type NodeTaskOptions struct {
+	TargetKind       string
+	TargetID         string
+	TargetGeneration int64
+	SemanticKey      string
+}
+
+type TaskCompletionOutcome string
+
+const (
+	TaskCompletionRecorded       TaskCompletionOutcome = "recorded"
+	TaskCompletionProjected      TaskCompletionOutcome = "projected"
+	TaskCompletionStaleIgnored   TaskCompletionOutcome = "stale_projection_ignored"
+	TaskCompletionDuplicate      TaskCompletionOutcome = "duplicate_terminal"
+	TaskCompletionCancelled      TaskCompletionOutcome = "cancelled"
+	TaskCompletionHeartbeat      TaskCompletionOutcome = "heartbeat"
+	TaskCompletionAttemptIgnored TaskCompletionOutcome = "stale_attempt_ignored"
 )
 
 func (s *Store) CreateEnrollmentToken(ctx context.Context, nodeName string, labels map[string]string, createdBy string) (string, time.Time, error) {
@@ -178,16 +200,37 @@ func (s *Store) ReplaceInventory(ctx context.Context, nodeID string, inventory d
 }
 
 func (s *Store) CreateNodeTask(ctx context.Context, nodeID, jobID, kind string, payload any) (domain.AgentTask, error) {
+	return s.CreateNodeTaskWithOptions(ctx, nodeID, jobID, kind, payload, NodeTaskOptions{})
+}
+
+func (s *Store) CreateNodeTaskWithOptions(ctx context.Context, nodeID, jobID, kind string, payload any, options NodeTaskOptions) (domain.AgentTask, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.AgentTask{}, err
 	}
-	task := domain.AgentTask{ID: uuid.NewString(), Kind: kind, Payload: encoded, Attempt: 0, CreatedAt: time.Now().UTC()}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.AgentTask{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if options.SemanticKey != "" {
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "node-task:"+options.SemanticKey); err != nil {
+			return domain.AgentTask{}, err
+		}
+		existing, err := nodeTaskBySemanticKeyTx(ctx, tx, options.SemanticKey)
+		if err == nil {
+			return existing, tx.Commit(ctx)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return domain.AgentTask{}, err
+		}
+	}
+	task := domain.AgentTask{ID: uuid.NewString(), Kind: kind, Payload: encoded, Attempt: 0, CreatedAt: time.Now().UTC(), TargetKind: options.TargetKind, TargetID: options.TargetID, TargetGeneration: options.TargetGeneration, SemanticKey: options.SemanticKey}
 	signingBytes, err := protocol.TaskSigningBytes(task.ID, task.Kind, task.Payload)
 	if err != nil {
 		return domain.AgentTask{}, err
 	}
-	key, err := s.AgentTaskKey(ctx, nodeID)
+	key, err := agentTaskKeyTx(ctx, tx, nodeID, s.cipher)
 	if err != nil {
 		return domain.AgentTask{}, err
 	}
@@ -196,13 +239,33 @@ func (s *Store) CreateNodeTask(ctx context.Context, nodeID, jobID, kind string, 
 	if jobID != "" {
 		job = jobID
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO node_tasks(id,node_id,job_id,kind,payload,signature) VALUES($1,$2,$3,$4,$5,$6)`, task.ID, nodeID, job, kind, string(encoded), task.Signature)
-	return task, err
+	var targetID any
+	if options.TargetID != "" {
+		targetID = options.TargetID
+	}
+	var targetGeneration any
+	if options.TargetGeneration > 0 {
+		targetGeneration = options.TargetGeneration
+	}
+	var semanticKey any
+	if options.SemanticKey != "" {
+		semanticKey = options.SemanticKey
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO node_tasks(id,node_id,job_id,kind,payload,signature,target_kind,target_id,target_generation,semantic_key)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, task.ID, nodeID, job, kind, string(encoded), task.Signature, nullString(options.TargetKind), targetID, targetGeneration, semanticKey)
+	if err != nil {
+		return domain.AgentTask{}, err
+	}
+	return task, tx.Commit(ctx)
 }
 
 func (s *Store) PendingNodeTasks(ctx context.Context, nodeID string) ([]domain.AgentTask, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,payload,signature,attempt,created_at FROM node_tasks
-		WHERE node_id=$1 AND status IN ('pending','delivered') ORDER BY created_at LIMIT 100`, nodeID)
+	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,payload,signature,attempt,transport,lease_owner,lease_expires_at,
+		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at
+		FROM node_tasks
+		WHERE node_id=$1 AND status IN ('pending','delivered','running') AND cancel_requested_at IS NULL
+		  AND (status='pending' OR lease_expires_at IS NULL OR lease_expires_at <= now())
+		ORDER BY created_at LIMIT 100`, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -210,7 +273,8 @@ func (s *Store) PendingNodeTasks(ctx context.Context, nodeID string) ([]domain.A
 	var tasks []domain.AgentTask
 	for rows.Next() {
 		var task domain.AgentTask
-		if err := rows.Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.CreatedAt); err != nil {
+		if err := rows.Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,
+			&task.StartedAt, &task.FinishedAt, &task.CancelRequestedAt, &task.TargetKind, &task.TargetID, &task.TargetGeneration, &task.SemanticKey, &task.CreatedAt); err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, task)
@@ -218,61 +282,136 @@ func (s *Store) PendingNodeTasks(ctx context.Context, nodeID string) ([]domain.A
 	return tasks, rows.Err()
 }
 
-func (s *Store) MarkTaskDelivered(ctx context.Context, id string) error {
-	_, err := s.pool.Exec(ctx, "UPDATE node_tasks SET status='delivered',attempt=attempt+1,updated_at=now() WHERE id=$1 AND status='pending'", id)
-	return err
-}
-
-func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, result json.RawMessage) error {
-	if status != "succeeded" && status != "failed" && status != "running" {
-		return errors.New("invalid task status")
+func (s *Store) ReserveNodeTask(ctx context.Context, nodeID, id, transport, owner string, lease time.Duration) (domain.AgentTask, error) {
+	if transport != "agent_wss" && transport != "ssh" {
+		return domain.AgentTask{}, errors.New("invalid task transport")
+	}
+	if owner == "" {
+		return domain.AgentTask{}, errors.New("task lease owner is required")
+	}
+	if lease <= 0 {
+		return domain.AgentTask{}, errors.New("task lease duration must be positive")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return domain.AgentTask{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var kind string
-	var payload []byte
-	if err := tx.QueryRow(ctx, "SELECT kind,payload FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE", id, nodeID).Scan(&kind, &payload); err != nil {
-		return err
+	now := time.Now().UTC()
+	var task domain.AgentTask
+	var status string
+	err = tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,transport,lease_owner,lease_expires_at,
+		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at,status
+		FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE`, id, nodeID).
+		Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,
+			&task.StartedAt, &task.FinishedAt, &task.CancelRequestedAt, &task.TargetKind, &task.TargetID, &task.TargetGeneration, &task.SemanticKey, &task.CreatedAt, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.AgentTask{}, ErrNotFound
 	}
-	if _, err := tx.Exec(ctx, "UPDATE node_tasks SET status=$3,result=$4,updated_at=now() WHERE id=$1 AND node_id=$2", id, nodeID, status, string(result)); err != nil {
-		return err
+	if err != nil {
+		return domain.AgentTask{}, err
 	}
+	if task.CancelRequestedAt != nil || status == "cancelled" || status == "succeeded" || status == "failed" {
+		return domain.AgentTask{}, ErrStateConflict
+	}
+	if status != "pending" && task.LeaseExpiresAt != nil && task.LeaseExpiresAt.After(now) {
+		return domain.AgentTask{}, ErrLeaseLost
+	}
+	task.Attempt++
+	expires := now.Add(lease)
+	task.Transport = transport
+	task.LeaseOwner = owner
+	task.LeaseExpiresAt = &expires
+	if _, err := tx.Exec(ctx, `UPDATE node_tasks SET status='delivered',transport=$3,lease_owner=$4,
+		lease_expires_at=$5,attempt=$6,updated_at=$7
+		WHERE id=$1 AND node_id=$2`, id, nodeID, transport, owner, expires, task.Attempt, now); err != nil {
+		return domain.AgentTask{}, err
+	}
+	return task, tx.Commit(ctx)
+}
+
+func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, result json.RawMessage) error {
+	_, err := s.CompleteTaskAttempt(ctx, nodeID, id, 0, status, result)
+	return err
+}
+
+func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, attempt int, status string, result json.RawMessage) (TaskCompletionOutcome, error) {
+	if status != "succeeded" && status != "failed" && status != "running" {
+		return "", errors.New("invalid task status")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var kind, currentStatus string
+	var payload, currentResult []byte
+	var currentAttempt int
+	var cancelRequestedAt *time.Time
+	if err := tx.QueryRow(ctx, "SELECT kind,payload,status,attempt,result,cancel_requested_at FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE", id, nodeID).
+		Scan(&kind, &payload, &currentStatus, &currentAttempt, &currentResult, &cancelRequestedAt); err != nil {
+		return "", err
+	}
+	if attempt > 0 && attempt != currentAttempt {
+		return TaskCompletionAttemptIgnored, ErrLeaseLost
+	}
+	if attempt == 0 && currentAttempt > 1 {
+		return TaskCompletionAttemptIgnored, ErrLeaseLost
+	}
+	if currentStatus == "succeeded" || currentStatus == "failed" || currentStatus == "cancelled" {
+		if currentStatus == status && compactJSONEqual(currentResult, result) {
+			return TaskCompletionDuplicate, tx.Commit(ctx)
+		}
+		if currentStatus == "cancelled" {
+			return TaskCompletionCancelled, tx.Commit(ctx)
+		}
+		return TaskCompletionDuplicate, ErrStateConflict
+	}
+	if cancelRequestedAt != nil {
+		if err := cancelTaskTx(ctx, tx, id, nodeID, result); err != nil {
+			return "", err
+		}
+		return TaskCompletionCancelled, tx.Commit(ctx)
+	}
+	if status == "running" {
+		if err := markTaskRunningTx(ctx, tx, id, nodeID, result); err != nil {
+			return "", err
+		}
+		return TaskCompletionHeartbeat, tx.Commit(ctx)
+	}
+	finalStatus := status
+	finalResult := result
+	var projection TaskCompletionOutcome = TaskCompletionRecorded
 	var completedInventory *domain.AgentInventory
 	if status == "succeeded" && kind == "scan_inventory" {
 		var inventory domain.AgentInventory
 		if err := json.Unmarshal(result, &inventory); err != nil {
-			return errors.New("inventory task returned an invalid result")
+			finalStatus = "failed"
+			finalResult = marshalTaskError("inventory task returned an invalid result", "invalid_result")
+		} else {
+			completedInventory = &inventory
 		}
-		completedInventory = &inventory
 	} else if (status == "succeeded" || status == "failed") && kind == "sync_shared" {
-		var task struct {
-			SourceID string `json:"sourceId"`
-		}
+		var task protocol.SyncSharedPayload
 		if json.Unmarshal(payload, &task) != nil || task.SourceID == "" {
-			return errors.New("shared sync task payload is invalid")
+			finalStatus = "failed"
+			finalResult = marshalTaskError("shared sync task payload is invalid", "invalid_payload")
+		} else if err := projectSharedSyncResultTx(ctx, tx, nodeID, task.SourceID, finalResult, finalStatus == "succeeded"); err != nil {
+			finalStatus = "failed"
+			finalResult = marshalTaskError(err.Error(), "projection_failed")
 		}
-		if err := projectSharedSyncResultTx(ctx, tx, nodeID, task.SourceID, result, status == "succeeded"); err != nil {
-			return err
+	} else if kind == "deploy_skill" {
+		outcome, projectedStatus, projectedResult, err := completeDeploySkillTx(ctx, tx, payload, finalStatus, finalResult)
+		if err != nil {
+			return "", err
 		}
-	} else if status == "succeeded" && kind == "deploy_skill" {
-		var task struct {
-			DeploymentID string `json:"deploymentId"`
-			VersionID    string `json:"versionId"`
-			Enabled      bool   `json:"enabled"`
+		projection, finalStatus, finalResult = outcome, projectedStatus, projectedResult
+	} else if kind == "apply_mcp" {
+		outcome, projectedStatus, projectedResult, err := completeApplyMCPTx(ctx, tx, payload, finalStatus, finalResult)
+		if err != nil {
+			return "", err
 		}
-		if json.Unmarshal(payload, &task) == nil {
-			_, _ = tx.Exec(ctx, `UPDATE deployments SET actual_version_id=$2,actual_enabled=$3,state='in_sync',last_error='',reconciled_at=now(),updated_at=now() WHERE id=$1`, task.DeploymentID, task.VersionID, task.Enabled)
-		}
-	} else if status == "succeeded" && kind == "apply_mcp" {
-		var task struct {
-			DeploymentID string `json:"deploymentId"`
-		}
-		if json.Unmarshal(payload, &task) == nil {
-			_, _ = tx.Exec(ctx, "UPDATE mcp_deployments SET actual_hash=desired_hash,state='in_sync',last_error='',updated_at=now() WHERE id=$1", task.DeploymentID)
-		}
+		projection, finalStatus, finalResult = outcome, projectedStatus, projectedResult
 	} else if status == "succeeded" && kind == "adopt_skill" {
 		var task struct {
 			DiscoveryID string `json:"discoveryId"`
@@ -280,15 +419,12 @@ func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, res
 		if json.Unmarshal(payload, &task) == nil {
 			_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET managed=true,missing=false,drift=false,adoption_status='adopted',adoption_error='',updated_at=now() WHERE id=$1", task.DiscoveryID)
 		}
-	} else if status == "failed" {
+	} else if finalStatus == "failed" {
 		var task struct {
 			DeploymentID string `json:"deploymentId"`
 		}
 		if json.Unmarshal(payload, &task) == nil && task.DeploymentID != "" {
-			message := string(result)
-			if len(message) > 2000 {
-				message = message[:2000]
-			}
+			message := truncateSharedError(taskResultMessage(finalResult))
 			if kind == "deploy_skill" {
 				_, _ = tx.Exec(ctx, "UPDATE deployments SET state='failed',last_error=$2,updated_at=now() WHERE id=$1", task.DeploymentID, message)
 			} else if kind == "apply_mcp" {
@@ -300,19 +436,161 @@ func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, res
 				DiscoveryID string `json:"discoveryId"`
 			}
 			if json.Unmarshal(payload, &adoption) == nil && adoption.DiscoveryID != "" {
-				message := string(result)
-				if len(message) > 2000 {
-					message = message[:2000]
-				}
+				message := truncateSharedError(taskResultMessage(finalResult))
 				_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET adoption_status='failed',adoption_error=$2,updated_at=now() WHERE id=$1 AND NOT managed", adoption.DiscoveryID, message)
 			}
 		}
 	}
+	if err := terminalizeTaskTx(ctx, tx, id, nodeID, finalStatus, finalResult); err != nil {
+		return "", err
+	}
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		return "", err
 	}
 	if completedInventory != nil {
-		return s.ReplaceInventory(ctx, nodeID, *completedInventory)
+		if err := s.ReplaceInventory(ctx, nodeID, *completedInventory); err != nil {
+			return "", err
+		}
 	}
-	return nil
+	return projection, nil
+}
+
+func nodeTaskBySemanticKeyTx(ctx context.Context, tx pgx.Tx, semanticKey string) (domain.AgentTask, error) {
+	var task domain.AgentTask
+	err := tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,transport,lease_owner,lease_expires_at,
+		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at
+		FROM node_tasks WHERE semantic_key=$1 AND status IN ('pending','delivered','running') ORDER BY created_at LIMIT 1`, semanticKey).
+		Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,
+			&task.StartedAt, &task.FinishedAt, &task.CancelRequestedAt, &task.TargetKind, &task.TargetID, &task.TargetGeneration, &task.SemanticKey, &task.CreatedAt)
+	return task, err
+}
+
+func markTaskRunningTx(ctx context.Context, tx pgx.Tx, id, nodeID string, result json.RawMessage) error {
+	now := time.Now().UTC()
+	_, err := tx.Exec(ctx, `UPDATE node_tasks SET status='running',result=$3,started_at=COALESCE(started_at,$4),
+		lease_expires_at=$5,updated_at=$4 WHERE id=$1 AND node_id=$2`, id, nodeID, string(result), now, now.Add(DefaultTaskLease))
+	return err
+}
+
+func terminalizeTaskTx(ctx context.Context, tx pgx.Tx, id, nodeID, status string, result json.RawMessage) error {
+	now := time.Now().UTC()
+	_, err := tx.Exec(ctx, `UPDATE node_tasks SET status=$3,result=$4,finished_at=$5,lease_owner=NULL,
+		lease_expires_at=NULL,updated_at=$5 WHERE id=$1 AND node_id=$2`, id, nodeID, status, string(result), now)
+	return err
+}
+
+func cancelTaskTx(ctx context.Context, tx pgx.Tx, id, nodeID string, result json.RawMessage) error {
+	now := time.Now().UTC()
+	late := marshalTaskError("task result ignored after cancellation", "task_cancelled")
+	if len(result) > 0 {
+		late, _ = json.Marshal(map[string]any{"error": "task result ignored after cancellation", "code": "task_cancelled", "lateResult": json.RawMessage(result)})
+	}
+	_, err := tx.Exec(ctx, `UPDATE node_tasks SET status='cancelled',result=$3,finished_at=$4,lease_owner=NULL,
+		lease_expires_at=NULL,updated_at=$4 WHERE id=$1 AND node_id=$2`, id, nodeID, string(late), now)
+	return err
+}
+
+func completeDeploySkillTx(ctx context.Context, tx pgx.Tx, payload []byte, status string, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
+	var task protocol.DeploySkillPayload
+	if err := json.Unmarshal(payload, &task); err != nil || task.DeploymentID == "" || task.VersionID == "" || task.DesiredGeneration <= 0 {
+		return TaskCompletionRecorded, "failed", marshalTaskError("deploy_skill task payload is invalid", "invalid_payload"), nil
+	}
+	if status == "succeeded" {
+		var actual protocol.DeploySkillResult
+		if err := json.Unmarshal(result, &actual); err != nil || actual.ActualHash != task.SHA256 || actual.ActualEnabled != task.Enabled {
+			return projectSkillFailureTx(ctx, tx, task, marshalTaskError("deploy_skill task returned an invalid result", "invalid_result"))
+		}
+		command, err := tx.Exec(ctx, `UPDATE deployments SET actual_version_id=$2,actual_enabled=$3,actual_generation=$4,
+			state='in_sync',last_error='',reconciled_at=now(),updated_at=now()
+			WHERE id=$1 AND desired_generation=$4 AND desired_version_id=$2 AND desired_enabled=$3`,
+			task.DeploymentID, task.VersionID, task.Enabled, task.DesiredGeneration)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if command.RowsAffected() == 0 {
+			return TaskCompletionStaleIgnored, status, result, nil
+		}
+		return TaskCompletionProjected, status, result, nil
+	}
+	return projectSkillFailureTx(ctx, tx, task, result)
+}
+
+func projectSkillFailureTx(ctx context.Context, tx pgx.Tx, task protocol.DeploySkillPayload, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
+	message := truncateSharedError(taskResultMessage(result))
+	command, err := tx.Exec(ctx, `UPDATE deployments SET state='failed',last_error=$5,updated_at=now()
+		WHERE id=$1 AND desired_generation=$4 AND desired_version_id=$2 AND desired_enabled=$3`,
+		task.DeploymentID, task.VersionID, task.Enabled, task.DesiredGeneration, message)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if command.RowsAffected() == 0 {
+		return TaskCompletionStaleIgnored, "failed", result, nil
+	}
+	return TaskCompletionProjected, "failed", result, nil
+}
+
+func completeApplyMCPTx(ctx context.Context, tx pgx.Tx, payload []byte, status string, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
+	var task protocol.ApplyMCPPayload
+	if err := json.Unmarshal(payload, &task); err != nil || task.DeploymentID == "" || task.DesiredGeneration <= 0 || task.DesiredHash == "" {
+		return TaskCompletionRecorded, "failed", marshalTaskError("apply_mcp task payload is invalid", "invalid_payload"), nil
+	}
+	if status == "succeeded" {
+		var actual protocol.ApplyMCPResult
+		if err := json.Unmarshal(result, &actual); err != nil || actual.ActualHash != task.DesiredHash || actual.ActualEnabled != task.Enabled {
+			return projectMCPFailureTx(ctx, tx, task, marshalTaskError("apply_mcp task returned an invalid result", "invalid_result"))
+		}
+		command, err := tx.Exec(ctx, `UPDATE mcp_deployments SET actual_hash=$2,actual_enabled=$3,actual_generation=$4,
+			state='in_sync',last_error='',updated_at=now()
+			WHERE id=$1 AND desired_hash=$2 AND desired_enabled=$3 AND desired_generation=$4`,
+			task.DeploymentID, task.DesiredHash, task.Enabled, task.DesiredGeneration)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if command.RowsAffected() == 0 {
+			return TaskCompletionStaleIgnored, status, result, nil
+		}
+		return TaskCompletionProjected, status, result, nil
+	}
+	return projectMCPFailureTx(ctx, tx, task, result)
+}
+
+func projectMCPFailureTx(ctx context.Context, tx pgx.Tx, task protocol.ApplyMCPPayload, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
+	message := truncateSharedError(taskResultMessage(result))
+	command, err := tx.Exec(ctx, `UPDATE mcp_deployments SET state='failed',last_error=$5,updated_at=now()
+		WHERE id=$1 AND desired_hash=$2 AND desired_enabled=$3 AND desired_generation=$4`,
+		task.DeploymentID, task.DesiredHash, task.Enabled, task.DesiredGeneration, message)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if command.RowsAffected() == 0 {
+		return TaskCompletionStaleIgnored, "failed", result, nil
+	}
+	return TaskCompletionProjected, "failed", result, nil
+}
+
+func marshalTaskError(message, code string) json.RawMessage {
+	body, _ := json.Marshal(map[string]any{"error": message, "code": code})
+	return body
+}
+
+func taskResultMessage(result json.RawMessage) string {
+	var value struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if json.Unmarshal(result, &value) == nil && value.Error != "" {
+		if value.Code != "" {
+			return value.Code + ": " + value.Error
+		}
+		return value.Error
+	}
+	return string(result)
+}
+
+func compactJSONEqual(first, second []byte) bool {
+	var compactFirst, compactSecond bytes.Buffer
+	if json.Compact(&compactFirst, first) != nil || json.Compact(&compactSecond, second) != nil {
+		return bytes.Equal(bytes.TrimSpace(first), bytes.TrimSpace(second))
+	}
+	return bytes.Equal(compactFirst.Bytes(), compactSecond.Bytes())
 }

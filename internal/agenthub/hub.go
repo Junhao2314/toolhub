@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -34,14 +35,18 @@ type Hub struct {
 	store       *store.Store
 	logger      *slog.Logger
 	publicHost  string
+	instanceID  string
 	mu          sync.RWMutex
 	connections map[string]*connection
 	upgrader    websocket.Upgrader
 }
 
-func New(st *store.Store, logger *slog.Logger, publicHost string) *Hub {
+func New(st *store.Store, logger *slog.Logger, publicHost, instanceID string) *Hub {
+	if instanceID == "" {
+		instanceID = fmt.Sprintf("hub-%d", time.Now().UnixNano())
+	}
 	return &Hub{
-		store: st, logger: logger, publicHost: publicHost, connections: map[string]*connection{},
+		store: st, logger: logger, publicHost: publicHost, instanceID: instanceID, connections: map[string]*connection{},
 		upgrader: websocket.Upgrader{HandshakeTimeout: 10 * time.Second, ReadBufferSize: 16 << 10, WriteBufferSize: 16 << 10},
 	}
 }
@@ -101,17 +106,21 @@ func (h *Hub) ServeConnect(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Hub) SendTask(nodeID string, task domain.AgentTask) error {
+func (h *Hub) SendTask(ctx context.Context, nodeID string, task domain.AgentTask, owner string) error {
 	h.mu.RLock()
 	conn := h.connections[nodeID]
 	h.mu.RUnlock()
 	if conn == nil {
 		return ErrOffline
 	}
-	if err := conn.write(map[string]any{"type": "task", "task": task}); err != nil {
+	if owner == "" {
+		owner = h.instanceID + "/send"
+	}
+	reserved, err := h.store.ReserveNodeTask(ctx, nodeID, task.ID, "agent_wss", owner, store.DefaultTaskLease)
+	if err != nil {
 		return err
 	}
-	return h.store.MarkTaskDelivered(context.Background(), task.ID)
+	return conn.write(map[string]any{"type": "task", "task": reserved})
 }
 
 func (h *Hub) IsOnline(nodeID string) bool {
@@ -126,11 +135,16 @@ func (h *Hub) deliverPending(ctx context.Context, nodeID string, conn *connectio
 		h.logger.Error("load pending node tasks", "nodeId", nodeID, "error", err)
 		return
 	}
+	owner := h.instanceID + "/reconnect/" + nodeID
 	for _, task := range tasks {
-		if err := conn.write(map[string]any{"type": "task", "task": task}); err != nil {
+		reserved, err := h.store.ReserveNodeTask(ctx, nodeID, task.ID, "agent_wss", owner, store.DefaultTaskLease)
+		if err != nil {
+			h.logger.Warn("skip pending task reservation", "nodeId", nodeID, "taskId", task.ID, "error", err)
+			continue
+		}
+		if err := conn.write(map[string]any{"type": "task", "task": reserved}); err != nil {
 			return
 		}
-		_ = h.store.MarkTaskDelivered(ctx, task.ID)
 	}
 }
 
@@ -151,13 +165,18 @@ func (h *Hub) handleMessage(ctx context.Context, nodeID string, message domain.A
 	case "task_result":
 		var payload struct {
 			ID     string          `json:"id"`
+			Attempt int             `json:"attempt"`
 			Status string          `json:"status"`
 			Result json.RawMessage `json:"result"`
 		}
 		if err := json.Unmarshal(message.Payload, &payload); err != nil {
 			return err
 		}
-		return h.store.CompleteTask(ctx, nodeID, payload.ID, payload.Status, payload.Result)
+		outcome, err := h.store.CompleteTaskAttempt(ctx, nodeID, payload.ID, payload.Attempt, payload.Status, payload.Result)
+		if err == nil && outcome == store.TaskCompletionStaleIgnored {
+			h.logger.Warn("stale projection ignored", "nodeId", nodeID, "taskId", payload.ID, "attempt", payload.Attempt, "projectionOutcome", outcome)
+		}
+		return err
 	default:
 		return errors.New("unsupported message type")
 	}

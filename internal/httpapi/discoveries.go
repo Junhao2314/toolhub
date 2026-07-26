@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 func (a *API) listDiscoveries(w http.ResponseWriter, r *http.Request) {
@@ -18,7 +19,7 @@ func (a *API) adoptDiscoveredSkill(w http.ResponseWriter, r *http.Request) {
 	principal := principalFrom(r.Context())
 	job, err := a.store.EnqueueJob(r.Context(), "skill_adopt", map[string]any{"discoveryId": id}, false, principal.ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "adopt_queued", ResourceType: "skill_discovery", ResourceID: id, Outcome: "success", IPAddress: clientIP(r)})
@@ -40,26 +41,20 @@ func (a *API) reconcileNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal := principalFrom(r.Context())
-	skillJob, err := a.store.EnqueueJob(r.Context(), "sync", map[string]any{"nodeIds": input.NodeIDs, "skillIds": input.SkillIDs, "manual": true}, input.DryRun, principal.ID)
-	if err != nil {
-		handleStoreError(w, r, err)
-		return
-	}
-	mcpJob, err := a.store.EnqueueJob(r.Context(), "mcp_sync", map[string]any{"nodeIds": input.NodeIDs, "profileIds": input.ProfileIDs, "deploymentIds": input.MCPDeploymentIDs, "manual": true}, input.DryRun, principal.ID)
-	if err != nil {
-		handleStoreError(w, r, err)
-		return
-	}
 	sharedScopes, err := normalizeSharedSyncScopes(input.SharedScopes)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_scope", err.Error())
 		return
 	}
-	sharedJob, err := a.store.EnqueueJob(r.Context(), "shared_sync", map[string]any{"nodeIds": input.NodeIDs, "sourceIds": input.SharedSourceIDs, "scopes": sharedScopes, "manual": true}, input.DryRun, principal.ID)
+	jobs, err := a.store.EnqueueJobs(r.Context(), []store.JobInput{
+		{Kind: "sync", Payload: map[string]any{"nodeIds": input.NodeIDs, "skillIds": input.SkillIDs, "manual": true}, DryRun: input.DryRun},
+		{Kind: "mcp_sync", Payload: map[string]any{"nodeIds": input.NodeIDs, "profileIds": input.ProfileIDs, "deploymentIds": input.MCPDeploymentIDs, "manual": true}, DryRun: input.DryRun},
+		{Kind: "shared_sync", Payload: map[string]any{"nodeIds": input.NodeIDs, "sourceIds": input.SharedSourceIDs, "scopes": sharedScopes, "manual": true}, DryRun: input.DryRun},
+	}, principal.ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "reconcile", ResourceType: "runtime", Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"nodeIds": input.NodeIDs, "skillIds": input.SkillIDs, "profileIds": input.ProfileIDs, "mcpDeploymentIds": input.MCPDeploymentIDs, "sharedSourceIds": input.SharedSourceIDs, "sharedScopes": sharedScopes, "dryRun": input.DryRun}})
-	writeJSON(w, http.StatusAccepted, map[string]any{"jobs": []any{skillJob, mcpJob, sharedJob}})
+	writeJSON(w, http.StatusAccepted, map[string]any{"jobs": jobs})
 }

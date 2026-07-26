@@ -253,53 +253,68 @@ type MCPDeploymentTarget struct {
 	Enabled bool   `json:"enabled"`
 }
 
-func (s *Store) SetMCPDeployments(ctx context.Context, profileID string, targets []MCPDeploymentTarget) ([]string, error) {
+func (s *Store) SetMCPDeployments(ctx context.Context, profileID, actor string, targets []MCPDeploymentTarget, dryRun bool) (domain.Job, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return domain.Job{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	desiredHash, err := profileHashTx(ctx, tx, profileID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
+		return domain.Job{}, ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		return domain.Job{}, err
 	}
 	deploymentIDs := make([]string, 0, len(targets))
+	nodeIDs := make([]string, 0, len(targets))
 	for _, target := range targets {
 		if !domain.IsMCPRuntime(target.Runtime) {
-			return nil, errors.New("invalid runtime target")
+			return domain.Job{}, errors.New("invalid runtime target")
 		}
 		var deploymentID string
-		err := tx.QueryRow(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,desired_hash,state)
-			VALUES($1,$2,$3,$4,$5,$6,'pending') ON CONFLICT(profile_id,node_id,runtime_kind)
-			DO UPDATE SET desired_enabled=excluded.desired_enabled,desired_hash=excluded.desired_hash,state='pending',updated_at=now()
+		err := tx.QueryRow(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,desired_hash,desired_generation,state)
+			VALUES($1,$2,$3,$4,$5,$6,1,'pending') ON CONFLICT(profile_id,node_id,runtime_kind)
+			DO UPDATE SET
+				desired_enabled=excluded.desired_enabled,
+				desired_hash=excluded.desired_hash,
+				desired_generation=CASE WHEN mcp_deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled OR mcp_deployments.desired_hash IS DISTINCT FROM excluded.desired_hash THEN mcp_deployments.desired_generation + 1 ELSE mcp_deployments.desired_generation END,
+				state=CASE WHEN mcp_deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled OR mcp_deployments.desired_hash IS DISTINCT FROM excluded.desired_hash THEN 'pending' ELSE mcp_deployments.state END,
+				updated_at=now()
 			RETURNING id::text`, uuid.NewString(), profileID, target.NodeID, target.Runtime, target.Enabled, desiredHash).Scan(&deploymentID)
 		if err != nil {
-			return nil, err
+			return domain.Job{}, err
 		}
 		deploymentIDs = append(deploymentIDs, deploymentID)
+		nodeIDs = append(nodeIDs, target.NodeID)
 	}
-	return deploymentIDs, tx.Commit(ctx)
+	job, err := s.enqueueJobTx(ctx, tx, "mcp_sync", map[string]any{"nodeIds": nodeIDs, "profileIds": []string{profileID}, "deploymentIds": deploymentIDs, "manual": true}, dryRun, actor)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	return job, tx.Commit(ctx)
 }
 
-func (s *Store) MCPDeploymentPayload(ctx context.Context, deploymentID string) (string, string, map[string]any, error) {
-	var nodeID, runtime string
+func (s *Store) MCPDeploymentPayload(ctx context.Context, deploymentID string) (string, protocol.ApplyMCPPayload, error) {
+	var nodeID string
+	var payload protocol.ApplyMCPPayload
 	var raw []byte
-	err := s.pool.QueryRow(ctx, `SELECT d.node_id::text,d.runtime_kind,jsonb_build_object(
-		'profileId',p.id::text,'profileName',p.name,'enabled',d.desired_enabled,
-		'servers',CASE WHEN d.desired_enabled THEN coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",s.header_refs AS "headerRefs",ps.overrides FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id WHERE ps.profile_id=p.id AND s.enabled AND s.authority='toolhub' ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) ELSE '[]'::jsonb END)
-		FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id WHERE d.id=$1`, deploymentID).Scan(&nodeID, &runtime, &raw)
+	err := s.pool.QueryRow(ctx, `SELECT d.node_id::text,d.runtime_kind,d.desired_generation,d.desired_hash,d.desired_enabled,p.id::text,p.name,
+		CASE WHEN d.desired_enabled THEN coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (
+			SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",s.header_refs AS "headerRefs",ps.overrides
+			FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id
+			WHERE ps.profile_id=p.id AND s.enabled AND s.authority='toolhub' ORDER BY s.runtime_name,s.id
+		) x),'[]'::jsonb) ELSE '[]'::jsonb END
+		FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id WHERE d.id=$1`,
+		deploymentID).Scan(&nodeID, &payload.Runtime, &payload.DesiredGeneration, &payload.DesiredHash, &payload.Enabled, &payload.ProfileID, &payload.ProfileName, &raw)
 	if err != nil {
-		return "", "", nil, err
+		return "", protocol.ApplyMCPPayload{}, err
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return "", "", nil, err
+	if err := json.Unmarshal(raw, &payload.Servers); err != nil {
+		return "", protocol.ApplyMCPPayload{}, err
 	}
-	payload["runtime"] = runtime
-	return nodeID, runtime, payload, nil
+	payload.DeploymentID = deploymentID
+	return nodeID, payload, nil
 }
 
 func profileIDsForServer(ctx context.Context, tx pgx.Tx, serverID string) ([]string, error) {
@@ -325,7 +340,11 @@ func refreshProfileDeployments(ctx context.Context, tx pgx.Tx, profileIDs []stri
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, "UPDATE mcp_deployments SET desired_hash=$2,state='pending',updated_at=now() WHERE profile_id=$1", profileID, desiredHash); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE mcp_deployments SET
+			desired_hash=$2,
+			desired_generation=CASE WHEN desired_hash IS DISTINCT FROM $2 THEN desired_generation + 1 ELSE desired_generation END,
+			state=CASE WHEN desired_hash IS DISTINCT FROM $2 THEN 'pending' ELSE state END,
+			updated_at=now() WHERE profile_id=$1`, profileID, desiredHash); err != nil {
 			return err
 		}
 	}

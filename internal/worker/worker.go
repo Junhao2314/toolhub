@@ -17,14 +17,23 @@ import (
 )
 
 type Worker struct {
-	store  *store.Store
-	hub    *agenthub.Hub
-	logger *slog.Logger
-	ssh    *remote.Executor
+	store      *store.Store
+	hub        *agenthub.Hub
+	logger     *slog.Logger
+	ssh        *remote.Executor
+	instanceID string
 }
 
-func New(st *store.Store, hub *agenthub.Hub, ssh *remote.Executor, logger *slog.Logger) *Worker {
-	return &Worker{store: st, hub: hub, ssh: ssh, logger: logger}
+const (
+	jobLeaseDuration = 60 * time.Second
+	jobLeaseRenewal  = 20 * time.Second
+)
+
+func New(st *store.Store, hub *agenthub.Hub, ssh *remote.Executor, logger *slog.Logger, instanceID string) *Worker {
+	if instanceID == "" {
+		instanceID = fmt.Sprintf("pid-%d", time.Now().UnixNano())
+	}
+	return &Worker{store: st, hub: hub, ssh: ssh, logger: logger, instanceID: instanceID}
 }
 
 func (w *Worker) Run(ctx context.Context, concurrency int) {
@@ -37,13 +46,14 @@ func (w *Worker) Run(ctx context.Context, concurrency int) {
 }
 
 func (w *Worker) loop(ctx context.Context, index int) {
+	owner := fmt.Sprintf("%s/worker-%d", w.instanceID, index)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		job, err := w.store.ClaimJob(ctx)
+		job, err := w.store.ClaimJob(ctx, owner, jobLeaseDuration)
 		if errors.Is(err, store.ErrNotFound) {
 			timer := time.NewTimer(750 * time.Millisecond)
 			select {
@@ -59,18 +69,45 @@ func (w *Worker) loop(ctx context.Context, index int) {
 			time.Sleep(time.Second)
 			continue
 		}
-		result, err := w.execute(ctx, job)
+		result, err := w.executeWithLease(ctx, job, owner)
 		if err != nil {
 			w.logger.Warn("job failed", "jobId", job.ID, "kind", job.Kind, "attempt", job.Attempts, "error", err)
-			if storeErr := w.store.FailJob(ctx, job, err.Error()); storeErr != nil {
+			if storeErr := w.store.FailJob(ctx, job, owner, err.Error()); storeErr != nil && !errors.Is(storeErr, store.ErrJobCancelled) {
 				w.logger.Error("persist job failure", "jobId", job.ID, "error", storeErr)
 			}
 			continue
 		}
-		if err := w.store.FinishJob(ctx, job.ID, result); err != nil {
+		if err := w.store.FinishJob(ctx, job.ID, owner, job.Attempts, result); err != nil && !errors.Is(err, store.ErrJobCancelled) {
 			w.logger.Error("finish job", "jobId", job.ID, "error", err)
 		}
 	}
+}
+
+func (w *Worker) executeWithLease(ctx context.Context, job domain.Job, owner string) (any, error) {
+	jobCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(jobLeaseRenewal)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-jobCtx.Done():
+				return
+			case <-ticker.C:
+				if err := w.store.RenewJobLease(ctx, job.ID, owner, job.Attempts, jobLeaseDuration); err != nil {
+					w.logger.Warn("job lease renewal stopped", "jobId", job.ID, "kind", job.Kind, "attempt", job.Attempts, "leaseOwner", owner, "error", err)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	result, err := w.execute(jobCtx, job)
+	cancel()
+	<-done
+	return result, err
 }
 
 func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
@@ -129,6 +166,9 @@ func (w *Worker) syncShared(ctx context.Context, job domain.Job) (any, error) {
 	}
 	queued, delivered, skipped := 0, 0, 0
 	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !matchesSharedSelectors(target, sourceIDs, nodeIDs, selectors.ScopeType, selectors.ScopeID) {
 			skipped++
 			continue
@@ -243,6 +283,9 @@ func (w *Worker) checkUpdates(ctx context.Context, job domain.Job) (any, error) 
 	}
 	var candidates []map[string]any
 	for _, source := range sources {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if input.ScopeType == "source" && input.ScopeID != source.SourceID {
 			continue
 		}
@@ -273,10 +316,11 @@ func (w *Worker) checkUpdates(ctx context.Context, job domain.Job) (any, error) 
 
 func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
 	var selectors struct {
-		NodeIDs   []string `json:"nodeIds"`
-		SkillIDs  []string `json:"skillIds"`
-		ScopeType string   `json:"scopeType"`
-		ScopeID   string   `json:"scopeId"`
+		NodeIDs       []string `json:"nodeIds"`
+		SkillIDs      []string `json:"skillIds"`
+		DeploymentIDs []string `json:"deploymentIds"`
+		ScopeType     string   `json:"scopeType"`
+		ScopeID       string   `json:"scopeId"`
 	}
 	_ = json.Unmarshal(job.Payload, &selectors)
 	if selectors.ScopeType == "skill" && selectors.ScopeID != "" {
@@ -284,13 +328,17 @@ func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
 	}
 	nodes := makeSet(selectors.NodeIDs)
 	skillsSet := makeSet(selectors.SkillIDs)
+	deploymentIDs := makeSet(selectors.DeploymentIDs)
 	deployments, err := w.store.PendingSkillDeployments(ctx)
 	if err != nil {
 		return nil, err
 	}
 	queued, delivered, skipped := 0, 0, 0
 	for _, deployment := range deployments {
-		if (len(nodes) > 0 && !nodes[deployment.NodeID]) || (len(skillsSet) > 0 && !skillsSet[deployment.SkillID]) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if (len(nodes) > 0 && !nodes[deployment.NodeID]) || (len(skillsSet) > 0 && !skillsSet[deployment.SkillID]) || (len(deploymentIDs) > 0 && !deploymentIDs[deployment.DeploymentID]) {
 			skipped++
 			continue
 		}
@@ -302,12 +350,26 @@ func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
 			skipped++
 			continue
 		}
-		payload := map[string]any{"deploymentId": deployment.DeploymentID, "runtime": deployment.Runtime, "sourceName": deployment.SharedSourceName, "skillSlug": deployment.SkillSlug, "versionId": deployment.VersionID, "sha256": deployment.SHA256, "enabled": deployment.Enabled}
+		payload := protocol.DeploySkillPayload{
+			DeploymentID:      deployment.DeploymentID,
+			DesiredGeneration: deployment.DesiredGeneration,
+			Runtime:           deployment.Runtime,
+			SourceName:        deployment.SharedSourceName,
+			SkillSlug:         deployment.SkillSlug,
+			VersionID:         deployment.VersionID,
+			SHA256:            deployment.SHA256,
+			Enabled:           deployment.Enabled,
+		}
 		if job.DryRun {
 			queued++
 			continue
 		}
-		task, err := w.store.CreateNodeTask(ctx, deployment.NodeID, job.ID, "deploy_skill", payload)
+		task, err := w.store.CreateNodeTaskWithOptions(ctx, deployment.NodeID, job.ID, "deploy_skill", payload, store.NodeTaskOptions{
+			TargetKind:       "skill_deployment",
+			TargetID:         deployment.DeploymentID,
+			TargetGeneration: deployment.DesiredGeneration,
+			SemanticKey:      fmt.Sprintf("deploy_skill:%s:%d:%s:%t", deployment.DeploymentID, deployment.DesiredGeneration, deployment.VersionID, deployment.Enabled),
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -337,20 +399,27 @@ func (w *Worker) syncMCP(ctx context.Context, job domain.Job) (any, error) {
 	}
 	queued, delivered, skipped := 0, 0, 0
 	for _, deployment := range deployments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !matchesMCPSelectors(deployment, nodes, profiles, deploymentIDs, selectors.ScopeType, selectors.ScopeID) {
 			skipped++
 			continue
 		}
-		nodeID, _, payload, err := w.store.MCPDeploymentPayload(ctx, deployment.DeploymentID)
+		nodeID, payload, err := w.store.MCPDeploymentPayload(ctx, deployment.DeploymentID)
 		if err != nil {
 			return nil, err
 		}
-		payload["deploymentId"] = deployment.DeploymentID
 		if job.DryRun {
 			queued++
 			continue
 		}
-		task, err := w.store.CreateNodeTask(ctx, nodeID, job.ID, "apply_mcp", payload)
+		task, err := w.store.CreateNodeTaskWithOptions(ctx, nodeID, job.ID, "apply_mcp", payload, store.NodeTaskOptions{
+			TargetKind:       "mcp_deployment",
+			TargetID:         payload.DeploymentID,
+			TargetGeneration: payload.DesiredGeneration,
+			SemanticKey:      fmt.Sprintf("apply_mcp:%s:%d:%s:%t", payload.DeploymentID, payload.DesiredGeneration, payload.DesiredHash, payload.Enabled),
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -376,10 +445,19 @@ func matchesMCPSelectors(deployment store.MCPDeploymentRef, nodes, profiles, dep
 }
 
 func (w *Worker) deliver(ctx context.Context, nodeID string, task domain.AgentTask) bool {
-	if w.hub.SendTask(nodeID, task) == nil {
+	owner := w.instanceID + "/dispatch"
+	if w.hub.IsOnline(nodeID) {
+		if err := w.hub.SendTask(ctx, nodeID, task, owner); err != nil {
+			w.logger.Warn("WSS task delivery failed after online selection", "nodeId", nodeID, "taskId", task.ID, "kind", task.Kind, "error", err)
+			return false
+		}
 		return true
 	}
-	if w.ssh != nil && w.ssh.Dispatch(ctx, nodeID, task) == nil {
+	if w.ssh != nil {
+		if err := w.ssh.Dispatch(ctx, nodeID, task, owner); err != nil {
+			w.logger.Warn("SSH task delivery failed", "nodeId", nodeID, "taskId", task.ID, "kind", task.Kind, "error", err)
+			return false
+		}
 		return true
 	}
 	return false

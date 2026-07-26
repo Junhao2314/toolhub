@@ -40,7 +40,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token, csrf, expires, err := a.store.CreateSession(r.Context(), user.ID, a.config.SessionTTL, ip, r.UserAgent())
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "toolhub_session", Value: token, Path: "/", HttpOnly: true, Secure: a.config.SecureCookies, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
@@ -76,7 +76,7 @@ func (a *API) session(w http.ResponseWriter, r *http.Request) {
 	}
 	csrf, err := a.store.RotateSessionCSRF(r.Context(), cookie.Value)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "user": principal, "csrfToken": csrf, "expiresAt": principal.ExpiresAt})
@@ -90,7 +90,7 @@ func (a *API) csrf(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := a.store.RotateSessionCSRF(r.Context(), cookie.Value)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"csrfToken": token})
@@ -112,7 +112,7 @@ func (a *API) updateOwnUsername(w http.ResponseWriter, r *http.Request) {
 	}
 	principal := principalFrom(r.Context())
 	if err := a.store.UpdateOwnUsername(r.Context(), principal.ID, input.CurrentPassword, username); err != nil {
-		writeCredentialMutationError(w, r, err)
+		a.writeCredentialMutationError(w, r, err)
 		return
 	}
 	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update_username", ResourceType: "user", ResourceID: principal.ID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"username": username}})
@@ -135,7 +135,7 @@ func (a *API) updateOwnPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	principal := principalFrom(r.Context())
 	if err := a.store.UpdateOwnPassword(r.Context(), principal.ID, input.CurrentPassword, input.NewPassword); err != nil {
-		writeCredentialMutationError(w, r, err)
+		a.writeCredentialMutationError(w, r, err)
 		return
 	}
 	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update_password", ResourceType: "user", ResourceID: principal.ID, Outcome: "success", IPAddress: clientIP(r)})
@@ -143,7 +143,7 @@ func (a *API) updateOwnPassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func writeCredentialMutationError(w http.ResponseWriter, r *http.Request, err error) {
+func (a *API) writeCredentialMutationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, store.ErrInvalidCurrentPassword):
 		writeError(w, r, http.StatusForbidden, "current_password_invalid", "Current password is incorrect")
@@ -152,7 +152,7 @@ func writeCredentialMutationError(w http.ResponseWriter, r *http.Request, err er
 	case errors.Is(err, store.ErrEmailUnavailable):
 		writeError(w, r, http.StatusConflict, "email_unavailable", "Email is unavailable")
 	default:
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 	}
 }
 

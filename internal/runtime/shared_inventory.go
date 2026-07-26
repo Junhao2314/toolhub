@@ -198,7 +198,7 @@ func scanSharedSkills(source SharedSourceConfig, hashContent bool) ([]domain.Sha
 			pkg, scanErr := skills.ScanDirectory(item.ResolvedSourcePath, skills.DefaultLimits)
 			if scanErr != nil {
 				item.State = "blocked"
-				item.LastError = "source Skill failed package validation"
+				item.LastError = "package validation failed: " + scanErr.Error()
 			} else {
 				item.SHA256 = pkg.SHA256
 			}

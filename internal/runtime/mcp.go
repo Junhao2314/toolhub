@@ -21,6 +21,8 @@ type SecretResolver func(context.Context, string) (string, error)
 
 func ApplyMCP(ctx context.Context, paths Paths, dataDir, runtimeKind string, profile map[string]any, resolve SecretResolver) (map[string]any, error) {
 	servers, _ := profile["servers"].([]any)
+	desiredHash, _ := profile["desiredHash"].(string)
+	actualEnabled, _ := profile["enabled"].(bool)
 	resolved := map[string]any{}
 	for _, raw := range servers {
 		server, ok := raw.(map[string]any)
@@ -67,7 +69,7 @@ func ApplyMCP(ctx context.Context, paths Paths, dataDir, runtimeKind string, pro
 	}
 	payload := map[string]any{"mcpServers": resolved}
 	if used, err := tryMCPM(ctx, runtimeKind, payload); used && err == nil {
-		return map[string]any{"method": "mcpm", "serverCount": len(resolved)}, nil
+		return map[string]any{"method": "mcpm", "serverCount": len(resolved), "actualHash": desiredHash, "actualEnabled": actualEnabled}, nil
 	}
 	configPath, format := mcpConfigPath(paths.Home, runtimeKind)
 	if configPath == "" {
@@ -76,7 +78,7 @@ func ApplyMCP(ctx context.Context, paths Paths, dataDir, runtimeKind string, pro
 	if err := structuralPatch(configPath, format, runtimeKind, resolved, dataDir); err != nil {
 		return nil, err
 	}
-	return map[string]any{"method": "structured-config", "serverCount": len(resolved), "configPath": configPath}, nil
+	return map[string]any{"method": "structured-config", "serverCount": len(resolved), "configPath": configPath, "actualHash": desiredHash, "actualEnabled": actualEnabled}, nil
 }
 
 func tryMCPM(ctx context.Context, runtimeKind string, payload map[string]any) (bool, error) {

@@ -114,7 +114,7 @@ func TestSharedSourceProjectionAndHeaderAuthorizationIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.SetMCPDeployments(ctx, profileID, []MCPDeploymentTarget{{NodeID: nodeID, Runtime: domain.RuntimeCodex, Enabled: true}}); err != nil {
+	if _, err := st.SetMCPDeployments(ctx, profileID, adminID, []MCPDeploymentTarget{{NodeID: nodeID, Runtime: domain.RuntimeCodex, Enabled: true}}, false); err != nil {
 		t.Fatal(err)
 	}
 	var envRefs, headerRefs map[string]string
@@ -143,5 +143,75 @@ func TestSharedSourceProjectionAndHeaderAuthorizationIntegration(t *testing.T) {
 	}
 	if _, err := st.AgentSecretValue(ctx, nodeID, headerRefs["Authorization"]); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("disabled MCP header remained readable: %v", err)
+	}
+}
+
+// A binding reported without environment or header keys must be stored as an empty jsonb
+// array. A nil Go slice previously marshalled to `null`, and the projection's
+// jsonb_array_elements_text expansion then failed with "cannot extract elements from a
+// scalar", turning every shared-source read into a 500.
+func TestSharedSourceProjectionToleratesBindingsWithoutKeysIntegration(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("TOOLHUB_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("TOOLHUB_TEST_DATABASE_URL is not set")
+	}
+	if !strings.Contains(databaseURL, "toolhub_discovery_test") {
+		t.Fatal("integration test database URL must target toolhub_discovery_test")
+	}
+	ctx := context.Background()
+	cipher, err := security.NewCipher(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(ctx, databaseURL, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.BootstrapAdmin(ctx, "admin", "admin@example.test", "Admin", "ToolHub-Test-Password-2026")
+	var adminID string
+	if err := st.pool.QueryRow(ctx, `SELECT u.id::text FROM users u JOIN user_roles ur ON ur.user_id=u.id JOIN roles r ON r.id=ur.role_id WHERE r.name='admin' ORDER BY u.created_at LIMIT 1`).Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+
+	suffix := uuid.NewString()
+	nodeID, _ := enrollTestNode(t, st, adminID, "bare-shared-node-"+suffix)
+	descriptor, err := protocol.NormalizeMCPDescriptor(domain.RuntimeClaude, domain.MCPDescriptor{
+		Name: "bare-server-" + suffix, Transport: "stdio", Command: "bare-command",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := domain.SharedSourceInventory{
+		Name: "bare-" + suffix, Mode: "managed", SkillsRoot: "/tmp/bare-" + suffix + "/skills", MCPManifestPath: "/tmp/bare-" + suffix + "/servers.json",
+		ConfigFingerprint: strings.Repeat("e", 64), SourceFingerprint: strings.Repeat("f", 64), Status: "in_sync",
+		Skills:     []domain.SharedSkillInventory{},
+		MCPServers: []domain.SharedMCPServerInventory{{Descriptor: descriptor, Enabled: true}},
+		Consumers: []domain.SharedConsumerInventory{{
+			Kind: domain.RuntimeClaude, MCPPath: "/tmp/bare-" + suffix + "/claude.json", MCPFormat: "claude-settings-json", MCPEnabled: true, State: "in_sync",
+			SkillLinks: []domain.SharedSkillLinkInventory{},
+			// EnvKeys and HeaderKeys are deliberately left nil.
+			MCPBindings: []domain.SharedMCPBindingInventory{{ServerName: descriptor.Name, DesiredFingerprint: "desired", ActualFingerprint: "desired", Enabled: true, State: "in_sync"}},
+		}},
+	}
+	if _, err := st.ProcessAgentInventory(ctx, nodeID, domain.AgentInventory{SharedSources: []domain.SharedSourceInventory{source}}, false); err != nil {
+		t.Fatal(err)
+	}
+	var envType, headerType string
+	if err := st.pool.QueryRow(ctx, `SELECT jsonb_typeof(env_keys),jsonb_typeof(header_keys) FROM mcp_runtime_bindings WHERE node_id=$1 AND server_name=$2`, nodeID, descriptor.Name).Scan(&envType, &headerType); err != nil {
+		t.Fatal(err)
+	}
+	if envType != "array" || headerType != "array" {
+		t.Fatalf("binding key types = env:%q header:%q, want array", envType, headerType)
+	}
+	projection, err := st.ListSharedSources(ctx)
+	if err != nil {
+		t.Fatalf("shared projection failed for a binding without keys: %v", err)
+	}
+	if !strings.Contains(string(projection), source.Name) {
+		t.Fatalf("shared projection omitted the source: %s", projection)
 	}
 }

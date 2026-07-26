@@ -13,6 +13,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/var/lib/toolhub-agent
+ReadWritePaths=-%h/.codex -%h/.claude -%h/.hermes
 
 [Install]
 WantedBy=multi-user.target

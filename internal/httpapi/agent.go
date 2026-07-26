@@ -46,7 +46,7 @@ func (a *API) agentArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	content, hash, err := a.store.Artifact(r.Context(), chi.URLParam(r, "versionID"))
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/zip")
@@ -64,7 +64,7 @@ func (a *API) agentSecret(w http.ResponseWriter, r *http.Request) {
 	nodeID := strings.TrimSpace(r.Header.Get("X-ToolHub-Node-ID"))
 	value, err := a.store.AgentSecretValue(r.Context(), nodeID, chi.URLParam(r, "secretID"))
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"value": string(value)})

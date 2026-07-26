@@ -22,6 +22,9 @@ var (
 	ErrInvalidCurrentPassword  = errors.New("current password is incorrect")
 	ErrUsernameUnavailable     = errors.New("username is unavailable")
 	ErrEmailUnavailable        = errors.New("email is unavailable")
+	ErrStateConflict           = errors.New("state conflict")
+	ErrLeaseLost               = errors.New("lease lost")
+	ErrJobCancelled            = errors.New("job cancelled")
 )
 
 func (s *Store) UserByIdentifier(ctx context.Context, identifier string) (domain.User, error) {

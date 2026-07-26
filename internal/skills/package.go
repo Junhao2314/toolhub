@@ -144,8 +144,11 @@ func ScanDirectory(root string, limits Limits) (Package, error) {
 		if item.Name() == ".toolhub-managed.json" {
 			return nil
 		}
-		if len(entries)+1 > limits.MaxFiles || info.Size() > limits.MaxFileBytes {
-			return errors.New("package exceeds file limits")
+		if len(entries)+1 > limits.MaxFiles {
+			return fmt.Errorf("package contains more than %d files", limits.MaxFiles)
+		}
+		if info.Size() > limits.MaxFileBytes {
+			return fmt.Errorf("file exceeds the %d MiB per-file limit: %s", limits.MaxFileBytes>>20, current)
 		}
 		relative, err := filepath.Rel(resolvedRoot, current)
 		if err != nil {
@@ -161,7 +164,7 @@ func ScanDirectory(root string, limits Limits) (Package, error) {
 		}
 		total += int64(len(body))
 		if total > limits.MaxUncompressedBytes {
-			return errors.New("package exceeds uncompressed size limit")
+			return fmt.Errorf("package exceeds the %d MiB total size limit", limits.MaxUncompressedBytes>>20)
 		}
 		entries = append(entries, entry{name: name, mode: info.Mode(), data: body})
 		return nil

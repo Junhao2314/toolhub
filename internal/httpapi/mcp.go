@@ -47,7 +47,7 @@ func (a *API) updateMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.UpdateMCPServer(r.Context(), chi.URLParam(r, "id"), input); err != nil {
 		if errors.Is(err, store.ErrSourceFileAuthoritative) {
-			handleStoreError(w, r, err)
+			a.handleStoreError(w, r, err)
 			return
 		}
 		writeError(w, r, http.StatusBadRequest, "mcp_update_failed", err.Error())
@@ -58,7 +58,7 @@ func (a *API) updateMCPServer(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) deleteMCPServer(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.DeleteMCPServer(r.Context(), chi.URLParam(r, "id")); err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -77,7 +77,7 @@ func (a *API) createMCPProfile(w http.ResponseWriter, r *http.Request) {
 	id, err := a.store.CreateMCPProfile(r.Context(), input.Name, input.Description, principalFrom(r.Context()).ID, input.ServerIDs)
 	if err != nil {
 		if errors.Is(err, store.ErrSourceFileAuthoritative) {
-			handleStoreError(w, r, err)
+			a.handleStoreError(w, r, err)
 			return
 		}
 		writeError(w, r, http.StatusBadRequest, "mcp_profile_failed", err.Error())
@@ -96,14 +96,9 @@ func (a *API) deployMCPProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	deploymentIDs, err := a.store.SetMCPDeployments(r.Context(), input.ProfileID, input.Targets)
+	job, err := a.store.SetMCPDeployments(r.Context(), input.ProfileID, principalFrom(r.Context()).ID, input.Targets, input.DryRun)
 	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "mcp_deploy_failed", err.Error())
-		return
-	}
-	job, err := a.store.EnqueueJob(r.Context(), "mcp_sync", map[string]any{"profileIds": []string{input.ProfileID}, "deploymentIds": deploymentIDs}, input.DryRun, principalFrom(r.Context()).ID)
-	if err != nil {
-		handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
@@ -112,7 +107,7 @@ func (a *API) deployMCPProfile(w http.ResponseWriter, r *http.Request) {
 func (a *API) checkMCPHealth(w http.ResponseWriter, r *http.Request) {
 	job, err := a.store.EnqueueJob(r.Context(), "mcp_health", map[string]string{"serverId": chi.URLParam(r, "id")}, false, principalFrom(r.Context()).ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)

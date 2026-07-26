@@ -204,22 +204,35 @@ type AgentMessage struct {
 }
 
 type AgentTask struct {
-	ID        string          `json:"id"`
-	Kind      string          `json:"kind"`
-	Payload   json.RawMessage `json:"payload"`
-	Signature string          `json:"signature"`
-	Attempt   int             `json:"attempt"`
-	CreatedAt time.Time       `json:"createdAt"`
+	ID                  string          `json:"id"`
+	Kind                string          `json:"kind"`
+	Payload             json.RawMessage `json:"payload"`
+	Signature           string          `json:"signature"`
+	Attempt             int             `json:"attempt"`
+	Transport           string          `json:"transport,omitempty"`
+	LeaseOwner          string          `json:"leaseOwner,omitempty"`
+	LeaseExpiresAt      *time.Time      `json:"leaseExpiresAt,omitempty"`
+	StartedAt           *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt          *time.Time      `json:"finishedAt,omitempty"`
+	CancelRequestedAt   *time.Time      `json:"cancelRequestedAt,omitempty"`
+	TargetKind          string          `json:"targetKind,omitempty"`
+	TargetID            string          `json:"targetId,omitempty"`
+	TargetGeneration    int64           `json:"targetGeneration,omitempty"`
+	SemanticKey         string          `json:"semanticKey,omitempty"`
+	CreatedAt           time.Time       `json:"createdAt"`
 }
 
 type Job struct {
-	ID          string          `json:"id"`
-	Kind        string          `json:"kind"`
-	Status      string          `json:"status"`
-	Payload     json.RawMessage `json:"payload"`
-	DryRun      bool            `json:"dryRun"`
-	Attempts    int             `json:"attempts"`
-	MaxAttempts int             `json:"maxAttempts"`
-	RunAfter    time.Time       `json:"runAfter"`
-	CreatedBy   string          `json:"createdBy,omitempty"`
+	ID             string          `json:"id"`
+	Kind           string          `json:"kind"`
+	Status         string          `json:"status"`
+	Payload        json.RawMessage `json:"payload"`
+	DryRun         bool            `json:"dryRun"`
+	Attempts       int             `json:"attempts"`
+	MaxAttempts    int             `json:"maxAttempts"`
+	RunAfter       time.Time       `json:"runAfter"`
+	LeaseOwner     string          `json:"leaseOwner,omitempty"`
+	LeaseExpiresAt *time.Time      `json:"leaseExpiresAt,omitempty"`
+	HeartbeatAt    *time.Time      `json:"heartbeatAt,omitempty"`
+	CreatedBy      string          `json:"createdBy,omitempty"`
 }

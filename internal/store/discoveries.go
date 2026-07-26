@@ -162,9 +162,9 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 			drift := !desiredEnabled || descriptor.ConfigFingerprint != desiredConfig || descriptor.SecretFingerprint != desiredSecret
 			bindingKey := runtime.Kind + "\x00" + descriptor.Name
 			seenBindings[bindingKey] = true
-			envKeys, _ := json.Marshal(descriptor.EnvKeys)
+			envKeys := jsonStringArray(descriptor.EnvKeys)
 			if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET identity=$2,env_keys=$3,
-				observed_config_fingerprint=$4,observed_secret_fingerprint=$5,missing=false,drift=$6,last_seen_at=now(),updated_at=now() WHERE id=$1`, bindingID, descriptor.Identity, string(envKeys), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, drift); err != nil {
+				observed_config_fingerprint=$4,observed_secret_fingerprint=$5,missing=false,drift=$6,last_seen_at=now(),updated_at=now() WHERE id=$1`, bindingID, descriptor.Identity, envKeys, descriptor.ConfigFingerprint, descriptor.SecretFingerprint, drift); err != nil {
 				return nil, err
 			}
 			if drift && !priorBindings[bindingKey].Drift {
@@ -404,22 +404,27 @@ func (s *Store) adoptRuntimeMCPTx(ctx context.Context, tx pgx.Tx, nodeID, runtim
 	err = tx.QueryRow(ctx, "SELECT id::text FROM mcp_deployments WHERE profile_id=$1 AND node_id=$2 AND runtime_kind=$3 FOR UPDATE", profileID, nodeID, runtimeKind).Scan(&deploymentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		deploymentID = uuid.NewString()
-		_, err = tx.Exec(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,actual_hash,desired_hash,state)
-			VALUES($1,$2,$3,$4,true,$5,$5,'in_sync')`, deploymentID, profileID, nodeID, runtimeKind, desiredHash)
+		_, err = tx.Exec(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,actual_enabled,actual_hash,desired_hash,desired_generation,actual_generation,state)
+			VALUES($1,$2,$3,$4,true,true,$5,$5,1,1,'in_sync')`, deploymentID, profileID, nodeID, runtimeKind, desiredHash)
 	} else if err == nil && existingAttention == 0 {
-		_, err = tx.Exec(ctx, "UPDATE mcp_deployments SET desired_enabled=true,actual_hash=$2,desired_hash=$2,state='in_sync',last_error='',updated_at=now() WHERE id=$1", deploymentID, desiredHash)
+		_, err = tx.Exec(ctx, `UPDATE mcp_deployments SET desired_enabled=true,actual_enabled=true,actual_hash=$2,desired_hash=$2,
+			desired_generation=CASE WHEN desired_hash IS DISTINCT FROM $2 OR desired_enabled IS DISTINCT FROM true THEN desired_generation + 1 ELSE desired_generation END,
+			actual_generation=CASE WHEN desired_hash IS DISTINCT FROM $2 OR desired_enabled IS DISTINCT FROM true THEN desired_generation + 1 ELSE desired_generation END,
+			state='in_sync',last_error='',updated_at=now() WHERE id=$1`, deploymentID, desiredHash)
 	} else if err == nil {
-		_, err = tx.Exec(ctx, "UPDATE mcp_deployments SET desired_enabled=true,desired_hash=$2,state='drift',updated_at=now() WHERE id=$1", deploymentID, desiredHash)
+		_, err = tx.Exec(ctx, `UPDATE mcp_deployments SET desired_enabled=true,desired_hash=$2,
+			desired_generation=CASE WHEN desired_hash IS DISTINCT FROM $2 OR desired_enabled IS DISTINCT FROM true THEN desired_generation + 1 ELSE desired_generation END,
+			state='drift',updated_at=now() WHERE id=$1`, deploymentID, desiredHash)
 	}
 	if err != nil {
 		return MCPAdoptionResult{}, err
 	}
 	bindingID := uuid.NewString()
-	envKeys, _ := json.Marshal(descriptor.EnvKeys)
-	headerKeys, _ := json.Marshal(descriptor.HeaderKeys)
+	envKeys := jsonStringArray(descriptor.EnvKeys)
+	headerKeys := jsonStringArray(descriptor.HeaderKeys)
 	if _, err := tx.Exec(ctx, `INSERT INTO mcp_runtime_bindings(id,node_id,runtime_kind,server_name,identity,server_id,profile_id,deployment_id,env_keys,
 		observed_config_fingerprint,observed_secret_fingerprint,desired_config_fingerprint,desired_secret_fingerprint,desired_enabled,missing,drift,last_seen_at,header_keys)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$11,true,false,false,now(),$12)`, bindingID, nodeID, runtimeKind, descriptor.Name, descriptor.Identity, serverID, profileID, deploymentID, string(envKeys), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, string(headerKeys)); err != nil {
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$10,$11,true,false,false,now(),$12)`, bindingID, nodeID, runtimeKind, descriptor.Name, descriptor.Identity, serverID, profileID, deploymentID, envKeys, descriptor.ConfigFingerprint, descriptor.SecretFingerprint, headerKeys); err != nil {
 		return MCPAdoptionResult{}, err
 	}
 	return MCPAdoptionResult{BindingID: bindingID, ServerID: serverID, ProfileID: profileID, DeploymentID: deploymentID, Reused: reused}, nil

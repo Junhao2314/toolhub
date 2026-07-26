@@ -28,6 +28,8 @@ type Runner struct {
 	inventoryInterval time.Duration
 	inventoryTrigger  chan struct{}
 	mu                sync.Mutex
+	activeMu          sync.Mutex
+	activeTasks       map[string]int
 }
 
 const DefaultInventoryInterval = 6 * time.Hour
@@ -35,7 +37,7 @@ const DefaultInventoryInterval = 6 * time.Hour
 const sharedReconcileRetryAttempts = 5
 
 func NewRunner(config Config) *Runner {
-	return &Runner{config: config, executor: NewExecutor(config), inventoryInterval: DefaultInventoryInterval, inventoryTrigger: make(chan struct{}, 1)}
+	return &Runner{config: config, executor: NewExecutor(config), inventoryInterval: DefaultInventoryInterval, inventoryTrigger: make(chan struct{}, 1), activeTasks: map[string]int{}}
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -84,10 +86,22 @@ func (r *Runner) runConnection(ctx context.Context) error {
 	defer socket.Close()
 	connectionCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	stopCloser := make(chan struct{})
+	defer close(stopCloser)
+	go func() {
+		select {
+		case <-connectionCtx.Done():
+			_ = socket.Close()
+		case <-stopCloser:
+		}
+	}()
 	go r.heartbeatLoop(connectionCtx, socket)
 	if err := r.sendInventory(connectionCtx, socket); err != nil {
 		return err
 	}
+	tasks := make(chan domain.AgentTask, 8)
+	defer close(tasks)
+	go r.executeTasks(ctx, socket, tasks)
 	socket.SetReadLimit(2 << 20)
 	for {
 		var envelope struct {
@@ -100,22 +114,107 @@ func (r *Runner) runConnection(ctx context.Context) error {
 		if envelope.Type != "task" {
 			continue
 		}
-		_ = r.send(socket, "task_result", map[string]any{"id": envelope.Task.ID, "status": "running", "result": map[string]any{}})
-		status, result := r.executor.Execute(connectionCtx, envelope.Task)
-		if envelope.Task.Kind == "scan_inventory" && status == "succeeded" {
+		if !r.acceptTask(envelope.Task) {
+			_ = r.sendTaskResult(socket, envelope.Task.ID, r.activeAttempt(envelope.Task.ID, envelope.Task.Attempt), "running", map[string]any{"active": true})
+			continue
+		}
+		if err := r.sendTaskResult(socket, envelope.Task.ID, envelope.Task.Attempt, "running", map[string]any{}); err != nil {
+			r.clearActive(envelope.Task.ID)
+			return err
+		}
+		select {
+		case tasks <- envelope.Task:
+		default:
+			r.clearActive(envelope.Task.ID)
+			if err := r.sendTaskResult(socket, envelope.Task.ID, envelope.Task.Attempt, "failed", map[string]any{"error": "Agent task queue is full", "code": "queue_full"}); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (r *Runner) executeTasks(ctx context.Context, socket *websocket.Conn, tasks <-chan domain.AgentTask) {
+	for task := range tasks {
+		deadline := taskDeadline(task.Kind)
+		taskCtx := ctx
+		cancel := func() {}
+		if deadline > 0 {
+			taskCtx, cancel = context.WithTimeout(ctx, deadline)
+		}
+		done := make(chan struct{})
+		go r.runningHeartbeat(taskCtx, socket, task.ID, task.Attempt, done)
+		status, result := r.executor.Execute(taskCtx, task)
+		cancel()
+		<-done
+		if task.Kind == "scan_inventory" && status == "succeeded" {
 			var inventory domain.AgentInventory
 			if json.Unmarshal(result, &inventory) == nil {
 				_ = r.send(socket, "inventory", inventory)
 			}
-		} else if envelope.Task.Kind == "sync_shared" && status == "succeeded" {
-			if err := r.sendInventory(connectionCtx, socket); err != nil {
+		} else if task.Kind == "sync_shared" && status == "succeeded" {
+			if err := r.sendInventory(ctx, socket); err != nil {
 				log.Printf("refresh inventory after shared sync: %v", err)
 			}
 		}
-		if err := r.send(socket, "task_result", map[string]any{"id": envelope.Task.ID, "status": status, "result": json.RawMessage(result)}); err != nil {
-			return err
+		attempt := r.activeAttempt(task.ID, task.Attempt)
+		if err := r.sendTaskResult(socket, task.ID, attempt, status, json.RawMessage(result)); err != nil {
+			log.Printf("send task result %s attempt %d: %v", task.ID, attempt, err)
+		}
+		r.clearActive(task.ID)
+	}
+}
+
+func (r *Runner) runningHeartbeat(ctx context.Context, socket *websocket.Conn, taskID string, attempt int, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = r.sendTaskResult(socket, taskID, r.activeAttempt(taskID, attempt), "running", map[string]any{})
 		}
 	}
+}
+
+func taskDeadline(kind string) time.Duration {
+	switch kind {
+	case "scan_inventory":
+		return 2 * time.Minute
+	case "deploy_skill", "apply_mcp", "adopt_skill", "sync_shared":
+		return 10 * time.Minute
+	default:
+		return time.Minute
+	}
+}
+
+func (r *Runner) acceptTask(task domain.AgentTask) bool {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	if current, exists := r.activeTasks[task.ID]; exists {
+		if task.Attempt > current {
+			r.activeTasks[task.ID] = task.Attempt
+		}
+		return false
+	}
+	r.activeTasks[task.ID] = task.Attempt
+	return true
+}
+
+func (r *Runner) activeAttempt(taskID string, fallback int) int {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	if attempt, ok := r.activeTasks[taskID]; ok && attempt > 0 {
+		return attempt
+	}
+	return fallback
+}
+
+func (r *Runner) clearActive(taskID string) {
+	r.activeMu.Lock()
+	defer r.activeMu.Unlock()
+	delete(r.activeTasks, taskID)
 }
 
 func (r *Runner) heartbeatLoop(ctx context.Context, socket *websocket.Conn) {
@@ -219,4 +318,8 @@ func (r *Runner) send(socket *websocket.Conn, messageType string, payload any) e
 	defer r.mu.Unlock()
 	_ = socket.SetWriteDeadline(time.Now().Add(15 * time.Second))
 	return socket.WriteJSON(domain.AgentMessage{Type: messageType, Timestamp: time.Now().UTC(), Payload: encoded})
+}
+
+func (r *Runner) sendTaskResult(socket *websocket.Conn, taskID string, attempt int, status string, result any) error {
+	return r.send(socket, "task_result", map[string]any{"id": taskID, "attempt": attempt, "status": status, "result": result})
 }

@@ -15,7 +15,7 @@ import (
 func (a *API) getSkill(w http.ResponseWriter, r *http.Request) {
 	raw, err := a.store.GetSkill(r.Context(), chi.URLParam(r, "id"))
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, raw)
@@ -81,7 +81,7 @@ func (a *API) importSkill(w http.ResponseWriter, r *http.Request) {
 	principal := principalFrom(r.Context())
 	job, err := a.store.EnqueueJob(r.Context(), "skill_import", map[string]any{"kind": input.Kind, "name": input.Name, "url": remote, "subdirectory": input.Subdirectory, "commit": input.Commit}, false, principal.ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
@@ -116,22 +116,19 @@ func (a *API) setSkillTargets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal := principalFrom(r.Context())
-	if err := a.store.SetSkillTargets(r.Context(), chi.URLParam(r, "id"), principal.ID, input.Targets); err != nil {
+	job, err := a.store.SetSkillTargets(r.Context(), chi.URLParam(r, "id"), principal.ID, input.Targets, input.DryRun)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "target_update_failed", err.Error())
 		return
 	}
-	job, err := a.store.EnqueueJob(r.Context(), "sync", map[string]any{"skillIds": []string{chi.URLParam(r, "id")}, "manual": input.Sync}, input.DryRun, principal.ID)
-	if err != nil {
-		handleStoreError(w, r, err)
-		return
-	}
+	_ = input.Sync
 	writeJSON(w, http.StatusAccepted, job)
 }
 
 func (a *API) archiveSkill(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := a.store.ArchiveSkill(r.Context(), id); err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	principal := principalFrom(r.Context())
@@ -150,7 +147,7 @@ func (a *API) checkUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := a.store.EnqueueJob(r.Context(), "update_check", input, input.DryRun, principalFrom(r.Context()).ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
@@ -159,12 +156,13 @@ func (a *API) checkUpdates(w http.ResponseWriter, r *http.Request) {
 func (a *API) approveUpdate(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	principal := principalFrom(r.Context())
-	if err := a.store.ApproveUpdate(r.Context(), id, principal.ID); err != nil {
+	job, err := a.store.ApproveUpdate(r.Context(), id, principal.ID)
+	if err != nil {
 		writeError(w, r, http.StatusBadRequest, "update_approval_failed", err.Error())
 		return
 	}
 	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "approve", ResourceType: "update", ResourceID: id, Outcome: "success", IPAddress: clientIP(r)})
-	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "status": "approved"})
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": id, "status": "approved", "job": job})
 }
 
 func (a *API) syncNow(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +177,7 @@ func (a *API) syncNow(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := a.store.EnqueueJob(r.Context(), "sync", input, input.DryRun, principalFrom(r.Context()).ID)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
@@ -187,14 +185,9 @@ func (a *API) syncNow(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) rollbackDeployment(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	nodeID, skillID, err := a.store.RollbackDeployment(r.Context(), id)
+	job, err := a.store.RollbackDeployment(r.Context(), id, principalFrom(r.Context()).ID)
 	if err != nil {
-		handleStoreError(w, r, err)
-		return
-	}
-	job, err := a.store.EnqueueJob(r.Context(), "rollback", map[string]any{"nodeIds": []string{nodeID}, "skillIds": []string{skillID}, "deploymentIds": []string{id}}, false, principalFrom(r.Context()).ID)
-	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)

@@ -10,7 +10,7 @@ func (a *API) getSettings(w http.ResponseWriter, r *http.Request) {
 		(SELECT to_jsonb(u) FROM (SELECT schedule,timezone,enabled,require_approval AS "requireApproval",settings FROM update_policies WHERE scope_type='global' AND scope_id='') u) AS "updatePolicy",
 		(SELECT to_jsonb(s) FROM (SELECT schedule,timezone,enabled,settings FROM sync_policies WHERE scope_type='global' AND scope_id='') s) AS "syncPolicy"`)
 	if err != nil {
-		handleStoreError(w, r, err)
+		a.handleStoreError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"publicUrl": a.config.PublicURL, "listenPort": 18480, "timezone": a.config.Timezone.String(), "localNodeName": a.config.LocalNodeName, "inventoryIntervalHours": 6, "policies": policies, "marketApiKeyConfigured": a.config.SkillsMPAPIKey != ""})

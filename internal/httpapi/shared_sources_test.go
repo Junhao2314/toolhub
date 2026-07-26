@@ -26,7 +26,8 @@ func TestNormalizeSharedSyncScopes(t *testing.T) {
 func TestHandleStoreErrorMapsSourceFileAuthorityToConflict(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/mcp/servers/server-1", nil)
 	response := httptest.NewRecorder()
-	handleStoreError(response, request, store.ErrSourceFileAuthoritative)
+	var api *API
+	api.handleStoreError(response, request, store.ErrSourceFileAuthoritative)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("status = %d", response.Code)
 	}

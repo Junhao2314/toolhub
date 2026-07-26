@@ -108,43 +108,54 @@ type DeploymentTarget struct {
 	Enabled bool   `json:"enabled"`
 }
 
-func (s *Store) SetSkillTargets(ctx context.Context, skillID, actor string, targets []DeploymentTarget) error {
+func (s *Store) SetSkillTargets(ctx context.Context, skillID, actor string, targets []DeploymentTarget, dryRun bool) (domain.Job, error) {
 	if len(targets) > 500 {
-		return errors.New("too many deployment targets")
+		return domain.Job{}, errors.New("too many deployment targets")
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return domain.Job{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var versionID string
 	if err := tx.QueryRow(ctx, "SELECT current_version_id::text FROM skills WHERE id=$1 AND review_status='approved' AND archived_at IS NULL", skillID).Scan(&versionID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return errors.New("skill must be approved before targets are assigned")
+			return domain.Job{}, errors.New("skill must be approved before targets are assigned")
 		}
-		return err
+		return domain.Job{}, err
 	}
 	for _, target := range targets {
 		if !domain.IsSkillRuntime(target.Runtime) {
-			return errors.New("invalid runtime target")
+			return domain.Job{}, errors.New("invalid runtime target")
 		}
 		if target.Runtime == domain.RuntimeShared {
 			var managedSources int
 			if err := tx.QueryRow(ctx, `SELECT count(*) FROM shared_sources WHERE node_id=$1 AND mode='managed' AND status<>'missing'`, target.NodeID).Scan(&managedSources); err != nil {
-				return err
+				return domain.Job{}, err
 			}
 			if managedSources != 1 {
-				return errors.New("shared Skill targets require exactly one managed shared source on the node")
+				return domain.Job{}, errors.New("shared Skill targets require exactly one managed shared source on the node")
 			}
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO deployments(id,node_id,runtime_kind,skill_id,desired_version_id,desired_enabled,state)
-			VALUES($1,$2,$3,$4,$5,$6,'pending')
-			ON CONFLICT(node_id,runtime_kind,skill_id) DO UPDATE SET previous_version_id=deployments.desired_version_id,desired_version_id=excluded.desired_version_id,desired_enabled=excluded.desired_enabled,state='pending',updated_at=now()`, uuid.NewString(), target.NodeID, target.Runtime, skillID, versionID, target.Enabled)
+		_, err := tx.Exec(ctx, `INSERT INTO deployments(id,node_id,runtime_kind,skill_id,desired_version_id,desired_enabled,desired_generation,state)
+			VALUES($1,$2,$3,$4,$5,$6,1,'pending')
+			ON CONFLICT(node_id,runtime_kind,skill_id) DO UPDATE SET
+				previous_version_id=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id THEN deployments.desired_version_id ELSE deployments.previous_version_id END,
+				desired_version_id=excluded.desired_version_id,
+				desired_enabled=excluded.desired_enabled,
+				desired_generation=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id OR deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled THEN deployments.desired_generation + 1 ELSE deployments.desired_generation END,
+				state=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id OR deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled THEN 'pending' ELSE deployments.state END,
+				updated_at=now()`,
+			uuid.NewString(), target.NodeID, target.Runtime, skillID, versionID, target.Enabled)
 		if err != nil {
-			return err
+			return domain.Job{}, err
 		}
 	}
-	return tx.Commit(ctx)
+	job, err := s.enqueueJobTx(ctx, tx, "sync", map[string]any{"skillIds": []string{skillID}, "manual": true, "scopeType": "skill", "scopeId": skillID}, dryRun, actor)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	return job, tx.Commit(ctx)
 }
 
 func (s *Store) ArchiveSkill(ctx context.Context, id string) error {
@@ -159,49 +170,68 @@ func (s *Store) ArchiveSkill(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Store) ApproveUpdate(ctx context.Context, updateID, actor string) error {
+func (s *Store) ApproveUpdate(ctx context.Context, updateID, actor string) (domain.Job, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return domain.Job{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var skillID, sha string
 	if err := tx.QueryRow(ctx, "SELECT skill_id::text,candidate_sha256 FROM updates WHERE id=$1 AND status='available' FOR UPDATE", updateID).Scan(&skillID, &sha); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
+			return domain.Job{}, ErrNotFound
 		}
-		return err
+		return domain.Job{}, err
 	}
 	var versionID string
 	if err := tx.QueryRow(ctx, "SELECT id::text FROM skill_versions WHERE skill_id=$1 AND content_sha256=$2 ORDER BY created_at DESC LIMIT 1", skillID, sha).Scan(&versionID); err != nil {
-		return errors.New("candidate artifact is not available; rerun update check")
+		return domain.Job{}, errors.New("candidate artifact is not available; rerun update check")
 	}
 	if _, err := tx.Exec(ctx, "UPDATE skill_versions SET approved_at=now(),approved_by=$2 WHERE id=$1", versionID, actor); err != nil {
-		return err
+		return domain.Job{}, err
 	}
 	if _, err := tx.Exec(ctx, "UPDATE skills SET current_version_id=$2,updated_at=now() WHERE id=$1", skillID, versionID); err != nil {
-		return err
+		return domain.Job{}, err
 	}
-	if _, err := tx.Exec(ctx, "UPDATE deployments SET previous_version_id=desired_version_id,desired_version_id=$2,state='pending',updated_at=now() WHERE skill_id=$1", skillID, versionID); err != nil {
-		return err
+	if _, err := tx.Exec(ctx, `UPDATE deployments SET
+		previous_version_id=CASE WHEN desired_version_id IS DISTINCT FROM $2 THEN desired_version_id ELSE previous_version_id END,
+		desired_version_id=$2,
+		desired_generation=CASE WHEN desired_version_id IS DISTINCT FROM $2 THEN desired_generation + 1 ELSE desired_generation END,
+		state=CASE WHEN desired_version_id IS DISTINCT FROM $2 THEN 'pending' ELSE state END,
+		updated_at=now() WHERE skill_id=$1`, skillID, versionID); err != nil {
+		return domain.Job{}, err
 	}
 	if _, err := tx.Exec(ctx, "UPDATE updates SET status='approved',approved_by=$2,approved_at=now() WHERE id=$1", updateID, actor); err != nil {
-		return err
+		return domain.Job{}, err
 	}
-	return tx.Commit(ctx)
+	job, err := s.enqueueJobTx(ctx, tx, "sync", map[string]any{"skillIds": []string{skillID}, "manual": true, "scopeType": "skill", "scopeId": skillID}, false, actor)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	return job, tx.Commit(ctx)
 }
 
-func (s *Store) RollbackDeployment(ctx context.Context, deploymentID string) (string, string, error) {
+func (s *Store) RollbackDeployment(ctx context.Context, deploymentID, actor string) (domain.Job, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var nodeID, skillID string
-	err := s.pool.QueryRow(ctx, `UPDATE deployments SET desired_version_id=previous_version_id,previous_version_id=desired_version_id,state='rolling_back',updated_at=now()
+	err = tx.QueryRow(ctx, `UPDATE deployments SET desired_version_id=previous_version_id,previous_version_id=desired_version_id,
+		desired_generation=desired_generation + 1,state='rolling_back',updated_at=now()
 		WHERE id=$1 AND previous_version_id IS NOT NULL RETURNING node_id::text,skill_id::text`, deploymentID).Scan(&nodeID, &skillID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", ErrNotFound
+		return domain.Job{}, ErrNotFound
 	}
 	if err != nil {
-		return "", "", err
+		return domain.Job{}, err
 	}
-	return nodeID, skillID, nil
+	job, err := s.enqueueJobTx(ctx, tx, "rollback", map[string]any{"nodeIds": []string{nodeID}, "skillIds": []string{skillID}, "deploymentIds": []string{deploymentID}}, false, actor)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	return job, tx.Commit(ctx)
 }
 
 func (s *Store) Artifact(ctx context.Context, versionID string) ([]byte, string, error) {

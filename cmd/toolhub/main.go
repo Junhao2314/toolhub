@@ -24,6 +24,7 @@ import (
 	"github.com/Junhao2314/toolhub/internal/security"
 	"github.com/Junhao2314/toolhub/internal/store"
 	"github.com/Junhao2314/toolhub/internal/worker"
+	"github.com/google/uuid"
 )
 
 //go:embed dist/*
@@ -74,9 +75,10 @@ func run(logger *slog.Logger) error {
 	if parsed, parseErr := url.Parse(cfg.PublicURL); parseErr == nil {
 		publicHost = parsed.Hostname()
 	}
-	hub := agenthub.New(st, logger, publicHost)
+	instanceID := uuid.NewString()
+	hub := agenthub.New(st, logger, publicHost, instanceID)
 	sshFallback := remote.New(st, logger)
-	jobWorker := worker.New(st, hub, sshFallback, logger)
+	jobWorker := worker.New(st, hub, sshFallback, logger, instanceID)
 	jobWorker.Run(ctx, 4)
 	scheduler := worker.NewScheduler(st, logger)
 	go scheduler.Run(ctx)
