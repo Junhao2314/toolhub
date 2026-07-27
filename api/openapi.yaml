@@ -77,7 +77,11 @@ paths:
   /deployments:
     get: {operationId: listDeployments, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /deployments/{id}/rollback:
-    post: {operationId: rollbackDeployment, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
+    post:
+      operationId: rollbackDeployment
+      description: Queues a desired-state rollback. A deployment with a previous version swaps versions; a first successful deployment rolls back to disabled while retaining its version for safe Agent removal.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
   /updates:
     get: {operationId: listUpdates, responses: {'200': {$ref: '#/components/responses/JSON'}}}
     post: {operationId: checkUpdates, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}

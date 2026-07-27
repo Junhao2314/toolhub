@@ -18,6 +18,8 @@ PostgreSQL is authoritative. Shared sources and native runtime configuration are
 
 Before starting, confirm the systemd unit can write the enrolled home paths. Atomic replacement of top-level files such as `~/.claude.json` requires write access to the home directory itself; `ProtectHome=read-only` cannot be reopened by a nested `ReadWritePaths=` exception. Keep `ProtectSystem=strict`, set `ProtectHome=false`, and allow-list the enrolled home plus the Agent data directory. Record hashes, modes, owners, symlink targets, and secure backups for the mcpm registry, Claude/Codex configs, the legacy shared trees, and any ToolHub-authored plugin.
 
+Also enumerate every out-of-band writer that can edit the native MCP files, including application-managed schedulers that do not appear in system cron or systemd. Back up and retire legacy restore jobs before the cutover; do not use an immutable file flag because the Agent must remain able to reconcile approved desired state.
+
 ### Phase 1 — scan, import, and seed (no runtime writes)
 
 1. Deploy the control plane and Agent code, restart the Agent, and wait for a fresh inventory.
@@ -42,7 +44,7 @@ Gate: a fresh Codex session exposes the expected tools once, with no duplicate s
 2. Confirm top-level `~/.claude.json` has exactly one `mcpServers.toolhub-claude` relay.
 3. Remove only the dead `mcpServers` block from `~/.claude/settings.json` and the invalid `mcp_servers` block from `settings.local.json`; preserve `env`, `permissions`, and every unrelated field.
 
-Gate: `claude mcp list` or a fresh Claude session exposes the expected tools, and unrelated settings remain byte/semantic equivalent.
+Gate: `claude mcp list` or a fresh Claude session exposes the expected tools, and unrelated settings remain byte/semantic equivalent. If the CLI health command connects but its short discovery window expires during a cold aggregate startup, verify the exact relay with a direct MCP `initialize` plus `tools/list` probe using a recorded timeout; connection alone is not a passing gate.
 
 ### Phase 4 — materialize Skills
 
@@ -64,6 +66,6 @@ Gate: Codex and Claude remain healthy after legacy removal, materialized Skills 
 ### Rollback
 
 - Phases 2–3: restore the timestamped mcpm and native-anchor backups, then verify the legacy relay before retrying.
-- Phase 4: use the normal per-deployment rollback transition; do not hand-edit managed directories.
+- Phase 4: use the normal per-deployment rollback transition; a first deployment rolls back to disabled, while later versions swap previous and desired. Do not hand-edit managed directories.
 - Phase 5: restore the verified archive and recorded symlink layout. Never bulk-delete or recreate an entire runtime Skills root.
 - Stop at the first failed gate. A succeeded Job is not proof of a successful Agent task or in-sync deployment.

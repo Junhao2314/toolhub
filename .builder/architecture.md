@@ -26,4 +26,4 @@ ToolHub is a modular monolith: one Go control-plane binary embeds the compiled R
 
 ## Rollback
 
-Every deployment records the previous artifact hash. Agent writes a backup manifest before atomic replacement. A rollback job sets the prior approved version as desired and reconciles only selected nodes.
+Deployments retain the previous approved version when one exists. Agent writes a backup manifest before atomic replacement. A rollback job sets that prior version as desired; for a first successful deployment with no previous version, rollback advances desired state to disabled while retaining the version for safe removal and later re-enable.

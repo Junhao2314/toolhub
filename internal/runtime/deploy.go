@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -116,14 +117,14 @@ func (d *Deployer) enable(target string, request DeployRequest) (DeployResult, e
 			_ = os.RemoveAll(staging)
 			return DeployResult{}, err
 		}
-		if err := os.Rename(target, backup); err != nil {
+		if err := movePath(target, backup); err != nil {
 			_ = os.RemoveAll(staging)
 			return DeployResult{}, fmt.Errorf("backup current deployment: %w", err)
 		}
 	}
 	if err := os.Rename(staging, target); err != nil {
 		if backup != "" {
-			_ = os.Rename(backup, target)
+			_ = movePath(backup, target)
 		}
 		_ = os.RemoveAll(staging)
 		return DeployResult{}, fmt.Errorf("activate deployment: %w", err)
@@ -260,4 +261,91 @@ func copyDirectory(source, destination string, skip map[string]bool) error {
 		}
 		return os.WriteFile(target, body, info.Mode().Perm())
 	})
+}
+
+func movePath(source, destination string) error {
+	return movePathWithRename(source, destination, os.Rename)
+}
+
+func movePathWithRename(source, destination string, rename func(string, string) error) error {
+	if err := rename(source, destination); err == nil {
+		return nil
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+
+	staging := destination + ".new-" + uuid.NewString()
+	defer os.RemoveAll(staging)
+	if err := copyPath(source, staging); err != nil {
+		return fmt.Errorf("copy across filesystems: %w", err)
+	}
+	if err := os.Rename(staging, destination); err != nil {
+		return fmt.Errorf("activate cross-filesystem copy: %w", err)
+	}
+	if err := removePath(source); err != nil {
+		return fmt.Errorf("remove source after cross-filesystem copy (backup preserved at %s): %w", destination, err)
+	}
+	return nil
+}
+
+func copyPath(source, destination string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(source)
+		if err != nil {
+			return err
+		}
+		return os.Symlink(target, destination)
+	}
+	if info.IsDir() {
+		if err := os.Mkdir(destination, info.Mode().Perm()); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(source)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := copyPath(filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("deployment backup contains an unsupported file type")
+	}
+
+	input, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		_ = output.Close()
+		return err
+	}
+	return output.Close()
+}
+
+func removePath(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return os.RemoveAll(path)
+	}
+	return os.Remove(path)
 }

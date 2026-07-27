@@ -209,9 +209,13 @@ func (s *Store) RollbackDeployment(ctx context.Context, deploymentID, actor stri
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var nodeID, skillID string
-	err = tx.QueryRow(ctx, `UPDATE deployments SET desired_version_id=previous_version_id,previous_version_id=desired_version_id,
+	err = tx.QueryRow(ctx, `UPDATE deployments SET
+		desired_version_id=CASE WHEN previous_version_id IS NOT NULL THEN previous_version_id ELSE desired_version_id END,
+		previous_version_id=CASE WHEN previous_version_id IS NOT NULL THEN desired_version_id ELSE previous_version_id END,
+		desired_enabled=CASE WHEN previous_version_id IS NOT NULL THEN desired_enabled ELSE false END,
 		desired_generation=desired_generation + 1,state='rolling_back',updated_at=now()
-		WHERE id=$1 AND previous_version_id IS NOT NULL RETURNING node_id::text,skill_id::text`, deploymentID).Scan(&nodeID, &skillID)
+		WHERE id=$1 AND (previous_version_id IS NOT NULL OR (desired_enabled AND actual_enabled AND actual_version_id=desired_version_id))
+		RETURNING node_id::text,skill_id::text`, deploymentID).Scan(&nodeID, &skillID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Job{}, ErrNotFound
 	}

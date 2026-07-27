@@ -60,7 +60,8 @@ func (s *Store) ListSources(ctx context.Context) (json.RawMessage, error) {
 
 func (s *Store) ListDeployments(ctx context.Context) (json.RawMessage, error) {
 	return s.JSONList(ctx, `SELECT d.id::text AS id,d.node_id::text AS "nodeId",n.name AS "nodeName",d.runtime_kind AS runtime,d.skill_id::text AS "skillId",s.name AS "skillName",
-		d.desired_version_id::text AS "desiredVersionId",d.actual_version_id::text AS "actualVersionId",d.desired_enabled AS "desiredEnabled",d.actual_enabled AS "actualEnabled",d.state,d.last_error AS "lastError",d.reconciled_at AS "reconciledAt"
+		d.desired_version_id::text AS "desiredVersionId",d.actual_version_id::text AS "actualVersionId",d.previous_version_id::text AS "previousVersionId",
+		d.desired_enabled AS "desiredEnabled",d.actual_enabled AS "actualEnabled",d.state,d.last_error AS "lastError",d.reconciled_at AS "reconciledAt"
 		FROM deployments d JOIN nodes n ON n.id=d.node_id JOIN skills s ON s.id=d.skill_id ORDER BY s.name,n.name,d.runtime_kind`)
 }
 

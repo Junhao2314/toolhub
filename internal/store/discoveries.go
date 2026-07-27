@@ -660,7 +660,8 @@ func (s *Store) importMCPDescriptorTx(ctx context.Context, tx pgx.Tx, nodeID str
 			deployment_id=excluded.deployment_id,identity=excluded.identity,env_keys=excluded.env_keys,header_keys=excluded.header_keys,
 			observed_config_fingerprint=excluded.observed_config_fingerprint,observed_secret_fingerprint=excluded.observed_secret_fingerprint,
 			desired_config_fingerprint=excluded.desired_config_fingerprint,desired_secret_fingerprint=excluded.desired_secret_fingerprint,
-			desired_fingerprint=excluded.desired_fingerprint,actual_fingerprint=excluded.actual_fingerprint,desired_enabled=excluded.desired_enabled,missing=false,drift=false,last_seen_at=now(),updated_at=now()
+			desired_fingerprint=excluded.desired_fingerprint,actual_fingerprint=excluded.actual_fingerprint,desired_enabled=excluded.desired_enabled,
+			missing=false,drift=false,shared_source_id=NULL,last_seen_at=now(),updated_at=now()
 			RETURNING id::text`, bindingID, nodeID, runtimeKind, descriptor.Name, identity, serverID, profileID, deploymentID,
 			jsonStringArray(descriptor.EnvKeys), jsonStringArray(descriptor.HeaderKeys), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, descriptor.ImportEnabled).Scan(&bindingID); err != nil {
 			return MCPAdoptionResult{}, err

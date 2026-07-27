@@ -33,7 +33,7 @@ Discovered runtime Skills remain read-only until an administrator queues adoptio
 
 ## Deployment Safety
 
-Managed content is cached under `~/.toolhub/artifacts/<sha256>`. Activation stages a full directory, backs up the previous managed directory, and uses rename-based replacement. Existing unmanaged directories and `.system` targets are conflicts, not overwrite candidates.
+Managed content is cached under `~/.toolhub/artifacts/<sha256>`. Activation stages a full directory, backs up the previous managed directory, and uses rename-based replacement. If the backup directory is on another filesystem, the Agent copies into a destination-side staging path, atomically activates the backup, and only then removes the source. Existing unmanaged directories and `.system` targets are conflicts, not overwrite candidates.
 
 For ToolHub-authoritative MCP, native non-relay discoveries are automatically baselined without rewriting the node. mcpm imports instead create fixed Codex/Claude profiles in `observed` state; an explicit deployment transition is required before the Agent writes anything.
 

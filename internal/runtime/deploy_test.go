@@ -4,8 +4,10 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/Junhao2314/toolhub/internal/skills"
@@ -143,6 +145,67 @@ func TestDeployRefusesUnownedOrRetargetedLegacyLink(t *testing.T) {
 			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeSymlink == 0 {
 				t.Fatalf("refused target was modified: info=%v err=%v", info, err)
 			}
+		})
+	}
+}
+
+func TestMovePathFallsBackAcrossFilesystems(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, source string)
+		check func(t *testing.T, destination string)
+	}{
+		{
+			name: "symlink",
+			setup: func(t *testing.T, source string) {
+				t.Helper()
+				if err := os.Symlink("../shared/example", source); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, destination string) {
+				t.Helper()
+				target, err := os.Readlink(destination)
+				if err != nil || target != "../shared/example" {
+					t.Fatalf("backup symlink target=%q err=%v", target, err)
+				}
+			},
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T, source string) {
+				t.Helper()
+				if err := os.Mkdir(source, 0750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(source, "SKILL.md"), []byte("managed\n"), 0640); err != nil {
+					t.Fatal(err)
+				}
+			},
+			check: func(t *testing.T, destination string) {
+				t.Helper()
+				body, err := os.ReadFile(filepath.Join(destination, "SKILL.md"))
+				if err != nil || string(body) != "managed\n" {
+					t.Fatalf("backup body=%q err=%v", body, err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, "source")
+			destination := filepath.Join(root, "backup")
+			test.setup(t, source)
+			rename := func(_, _ string) error {
+				return &os.LinkError{Op: "rename", Old: source, New: destination, Err: syscall.EXDEV}
+			}
+			if err := movePathWithRename(source, destination, rename); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(source); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("source still exists: %v", err)
+			}
+			test.check(t, destination)
 		})
 	}
 }

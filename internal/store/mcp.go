@@ -442,7 +442,7 @@ func (s *Store) upsertMCPDeploymentBindingsTx(ctx context.Context, tx pgx.Tx, no
 			ON CONFLICT(node_id,runtime_kind,server_name) DO UPDATE SET server_id=excluded.server_id,profile_id=excluded.profile_id,
 			deployment_id=excluded.deployment_id,identity=excluded.identity,env_keys=excluded.env_keys,header_keys=excluded.header_keys,
 			desired_config_fingerprint=excluded.desired_config_fingerprint,desired_secret_fingerprint=excluded.desired_secret_fingerprint,
-			desired_fingerprint=excluded.desired_fingerprint,desired_enabled=excluded.desired_enabled,
+			desired_fingerprint=excluded.desired_fingerprint,desired_enabled=excluded.desired_enabled,shared_source_id=NULL,
 			drift=CASE WHEN excluded.desired_enabled THEN mcp_runtime_bindings.missing OR
 				mcp_runtime_bindings.observed_config_fingerprint<>excluded.desired_config_fingerprint OR
 				mcp_runtime_bindings.observed_secret_fingerprint<>excluded.desired_secret_fingerprint
