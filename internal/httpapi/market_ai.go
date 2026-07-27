@@ -10,26 +10,33 @@ import (
 	"github.com/Junhao2314/toolhub/internal/market"
 )
 
+// searchMarket queries the configured marketplace sources and returns normalized
+// listings. A single unreachable source never blocks the remaining sources; those
+// failures surface under the response `errors` map instead.
 func (a *API) searchMarket(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	result, err := a.market.Search(r.Context(), r.URL.Query().Get("q"), page, limit)
-	if errors.Is(err, market.ErrRateLimited) {
-		message := "SkillsMP anonymous quota is exhausted; configure SKILLSMP_API_KEY and retry"
-		if a.config.SkillsMPAPIKey != "" {
-			message = "SkillsMP rate limit is exhausted; retry after the provider window resets"
-		}
-		writeError(w, r, http.StatusTooManyRequests, "market_rate_limited", message)
-		return
-	}
+	result, err := a.market.Search(r.Context(), r.URL.Query().Get("source"), r.URL.Query().Get("q"), page, limit)
 	if err != nil {
-		writeError(w, r, http.StatusBadGateway, "market_unavailable", err.Error())
+		selector := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+		switch {
+		case errors.Is(err, market.ErrRateLimited):
+			message := "Marketplace rate limit is exhausted; retry after the provider window resets"
+			if selector == "skillsmp" && a.config.SkillsMPAPIKey == "" {
+				message = "SkillsMP anonymous quota is exhausted; configure SKILLSMP_API_KEY and retry"
+			}
+			writeError(w, r, http.StatusTooManyRequests, "market_rate_limited", message)
+		case errors.Is(err, market.ErrUnknownSource):
+			writeError(w, r, http.StatusBadRequest, "invalid_source", "source must be all, skillsmp, or xiaping")
+		case errors.Is(err, market.ErrInvalidQuery):
+			writeError(w, r, http.StatusBadRequest, "invalid_request", "search query must contain 2-200 characters")
+		default:
+			writeError(w, r, http.StatusBadGateway, "market_unavailable", "The selected marketplace sources are unavailable")
+		}
 		return
 	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, max-age=300")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(result)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (a *API) recommend(w http.ResponseWriter, r *http.Request) {

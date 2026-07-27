@@ -23,14 +23,14 @@ type API struct {
 	config      config.Config
 	store       *store.Store
 	hub         *agenthub.Hub
-	market      *market.Client
+	market      *market.Multi
 	recommender *ai.Recommender
 	logger      *slog.Logger
 	dummyHash   string
 	loginLimit  *ipLimiter
 }
 
-func New(cfg config.Config, st *store.Store, hub *agenthub.Hub, marketClient *market.Client, recommender *ai.Recommender, logger *slog.Logger) (*API, error) {
+func New(cfg config.Config, st *store.Store, hub *agenthub.Hub, marketClient *market.Multi, recommender *ai.Recommender, logger *slog.Logger) (*API, error) {
 	dummyHash, err := security.HashPassword("toolhub timing equalizer password")
 	if err != nil {
 		return nil, err

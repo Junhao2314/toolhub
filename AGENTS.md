@@ -13,7 +13,7 @@ Module path: `github.com/Junhao2314/toolhub` (Go 1.22). Web: React 18 + Vite 8 +
 - `internal/security` and `internal/policy`: password/session/CSRF handling, encryption, redaction, task signing, username normalization, and policy resolution helpers (policy package is library-only today; scheduler loads schedules from the store).
 - `internal/runtime`: runtime inventory and managed Skill/MCP filesystem operations.
 - `internal/agenthub`, `internal/agentclient`, `internal/remote`: Agent WSS protocol, enrollment/task execution, and pinned SSH fallback.
-- `internal/skills` and `internal/market`: package safety/provenance and SkillsMP search/import support.
+- `internal/skills` and `internal/market`: package safety/provenance plus normalized SkillsMP/Xiaping search and reviewed import support.
 - `internal/worker`: queued job execution plus scheduled update discovery and sync reconciliation.
 - `internal/ai`: OpenAI-compatible structured recommendations (never auto-install).
 - `web/src`: manually routed React pages, shared UI primitives, data hook, and API client.
@@ -101,7 +101,7 @@ For local Compose smoke:
 
 Ports: host control plane `127.0.0.1:18480` (Compose publishes loopback only); Vite dev `127.0.0.1:18481` with proxy to `:18480`. Binaries: `bin/toolhub`, `bin/toolhub-agent`.
 
-The local HTTP smoke profile must set `TOOLHUB_SECURE_COOKIES=false`. The normal default is secure cookies. `config.Load` requires `TOOLHUB_DATABASE_URL` and a 32-byte `TOOLHUB_MASTER_KEY`. Bootstrap email/password are required by `BootstrapAdmin` when creating the first admin; username defaults to `admin` via `TOOLHUB_BOOTSTRAP_ADMIN_USERNAME`. Optional: `TOOLHUB_SESSION_TTL` (default `12h`, range 15m–168h), `TOOLHUB_DATA_DIR` (default `/data`), `TOOLHUB_PUBLIC_URL`, `TOOLHUB_TIMEZONE` (default `Asia/Shanghai`), `SKILLSMP_API_KEY`.
+The local HTTP smoke profile must set `TOOLHUB_SECURE_COOKIES=false`. The normal default is secure cookies. `config.Load` requires `TOOLHUB_DATABASE_URL` and a 32-byte `TOOLHUB_MASTER_KEY`. Bootstrap email/password are required by `BootstrapAdmin` when creating the first admin; username defaults to `admin` via `TOOLHUB_BOOTSTRAP_ADMIN_USERNAME`. Optional: `TOOLHUB_SESSION_TTL` (default `12h`, range 15m–168h), `TOOLHUB_DATA_DIR` (default `/data`), `TOOLHUB_PUBLIC_URL`, `TOOLHUB_TIMEZONE` (default `Asia/Shanghai`), `SKILLSMP_API_KEY`, `XIAPING_API_KEY`, and HTTPS-only `XIAPING_BASE_URL`.
 
 ## Change-specific paths
 

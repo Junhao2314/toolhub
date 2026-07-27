@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -24,6 +25,8 @@ type Config struct {
 	PublicURL              string
 	Timezone               *time.Location
 	SkillsMPAPIKey         string
+	XiapingAPIKey          string
+	XiapingBaseURL         string
 	DataDir                string
 	SessionTTL             time.Duration
 	SecureCookies          bool
@@ -63,12 +66,18 @@ func Load() (Config, error) {
 		PublicURL:              strings.TrimRight(strings.TrimSpace(os.Getenv("TOOLHUB_PUBLIC_URL")), "/"),
 		Timezone:               location,
 		SkillsMPAPIKey:         strings.TrimSpace(os.Getenv("SKILLSMP_API_KEY")),
+		XiapingAPIKey:          strings.TrimSpace(os.Getenv("XIAPING_API_KEY")),
+		XiapingBaseURL:         strings.TrimRight(env("XIAPING_BASE_URL", "https://xiaping.coze.com"), "/"),
 		DataDir:                env("TOOLHUB_DATA_DIR", "/data"),
 		SessionTTL:             ttl,
 		SecureCookies:          secureCookies,
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("TOOLHUB_DATABASE_URL is required")
+	}
+	parsedXiapingURL, err := url.Parse(cfg.XiapingBaseURL)
+	if err != nil || parsedXiapingURL.Scheme != "https" || parsedXiapingURL.Hostname() == "" || parsedXiapingURL.User != nil || parsedXiapingURL.RawQuery != "" || parsedXiapingURL.Fragment != "" {
+		return Config{}, errors.New("XIAPING_BASE_URL must be an https URL without embedded credentials")
 	}
 	return cfg, nil
 }

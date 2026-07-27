@@ -238,6 +238,10 @@ td small { color: var(--muted); margin-top: 4px; display: block; max-width: 360p
 .matrix-head { background: rgba(255, 255, 255, 0.03); font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--muted); letter-spacing: 0.05em; }
 
 /* Marketplace */
+.market-tabs { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 900px; margin: 0 auto 20px; }
+.market-tabs button { border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(30, 41, 59, 0.6); color: var(--muted); padding: 8px 18px; border-radius: 20px; cursor: pointer; font-size: 14px; transition: var(--transition); }
+.market-tabs button:hover { color: #fff; }
+.market-tabs button.active { border-color: var(--blue); color: #fff; background: rgba(59, 130, 246, 0.18); }
 .market-search { height: 60px; max-width: 900px; margin: 0 auto 32px; display: flex; align-items: center; gap: 16px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(30, 41, 59, 0.6); backdrop-filter: blur(12px); padding: 8px 10px 8px 24px; border-radius: 30px; box-shadow: 0 8px 32px rgba(0,0,0,0.2); transition: var(--transition); }
 .market-search:focus-within { border-color: var(--blue); box-shadow: 0 8px 32px rgba(59, 130, 246, 0.2); }
 .market-search input { flex: 1; min-width: 0; border: 0; outline: 0; font-size: 16px; background: transparent; color: #fff; }

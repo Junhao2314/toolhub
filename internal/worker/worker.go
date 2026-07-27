@@ -10,6 +10,7 @@ import (
 
 	"github.com/Junhao2314/toolhub/internal/agenthub"
 	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/market"
 	"github.com/Junhao2314/toolhub/internal/protocol"
 	"github.com/Junhao2314/toolhub/internal/remote"
 	"github.com/Junhao2314/toolhub/internal/skills"
@@ -21,6 +22,7 @@ type Worker struct {
 	hub        *agenthub.Hub
 	logger     *slog.Logger
 	ssh        *remote.Executor
+	market     *market.Multi
 	instanceID string
 }
 
@@ -29,11 +31,11 @@ const (
 	jobLeaseRenewal  = 20 * time.Second
 )
 
-func New(st *store.Store, hub *agenthub.Hub, ssh *remote.Executor, logger *slog.Logger, instanceID string) *Worker {
+func New(st *store.Store, hub *agenthub.Hub, ssh *remote.Executor, marketClient *market.Multi, logger *slog.Logger, instanceID string) *Worker {
 	if instanceID == "" {
 		instanceID = fmt.Sprintf("pid-%d", time.Now().UnixNano())
 	}
-	return &Worker{store: st, hub: hub, ssh: ssh, logger: logger, instanceID: instanceID}
+	return &Worker{store: st, hub: hub, ssh: ssh, market: marketClient, logger: logger, instanceID: instanceID}
 }
 
 func (w *Worker) Run(ctx context.Context, concurrency int) {
@@ -172,13 +174,16 @@ func (w *Worker) inventoryScan(ctx context.Context, job domain.Job) (any, error)
 
 func (w *Worker) importSkill(ctx context.Context, job domain.Job) (any, error) {
 	var input struct {
-		Kind, Name, URL, Subdirectory, Commit string
+		Kind, Name, URL, Subdirectory, Commit, ExternalID string
 	}
 	if err := json.Unmarshal(job.Payload, &input); err != nil {
 		return nil, err
 	}
 	importCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	if input.Kind == "xiaping" {
+		return w.importXiapingSkill(importCtx, ctx, job, input.Name, input.ExternalID)
+	}
 	pkg, commit, err := skills.ImportGit(importCtx, input.URL, input.Subdirectory, input.Commit, skills.DefaultLimits)
 	if err != nil {
 		return nil, err
@@ -188,6 +193,35 @@ func (w *Worker) importSkill(ctx context.Context, job domain.Job) (any, error) {
 		name = pkg.Name
 	}
 	result, err := w.store.ImportSkill(ctx, store.SourceInput{Kind: input.Kind, Name: name, URL: input.URL, Subdirectory: input.Subdirectory, Commit: commit}, pkg, map[string]any{"importedByJob": job.ID}, job.CreatedBy)
+	return result, err
+}
+
+// importXiapingSkill downloads the marketplace ZIP through the authenticated Xiaping API,
+// scans it under the standard package limits, and queues it for review like any other import.
+// Official skills charge the configured account's platform coins at download time.
+func (w *Worker) importXiapingSkill(importCtx, ctx context.Context, job domain.Job, name, externalID string) (any, error) {
+	if externalID == "" {
+		return nil, errors.New("xiaping import requires externalId")
+	}
+	if w.market == nil {
+		return nil, errors.New("marketplace sources are not configured")
+	}
+	xiaping, ok := w.market.Xiaping()
+	if !ok {
+		return nil, errors.New("xiaping marketplace source is not configured")
+	}
+	download, err := xiaping.Download(importCtx, externalID, skills.DefaultLimits.MaxArchiveBytes)
+	if err != nil {
+		return nil, err
+	}
+	pkg, err := skills.ScanZIP(download.Archive, skills.DefaultLimits)
+	if err != nil {
+		return nil, err
+	}
+	if name == "" {
+		name = pkg.Name
+	}
+	result, err := w.store.ImportSkill(ctx, store.SourceInput{Kind: "xiaping", Name: name, URL: download.SkillPage, Commit: download.Version}, pkg, map[string]any{"importedByJob": job.ID, "xiapingSkillId": externalID, "xiapingVersion": download.Version, "xiapingCoinsSpent": download.CoinsSpent}, job.CreatedBy)
 	return result, err
 }
 

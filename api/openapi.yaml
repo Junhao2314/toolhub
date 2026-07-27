@@ -59,7 +59,25 @@ paths:
     post: {operationId: createNodeConnection, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
   /skills:
     get: {operationId: listSkills, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post: {operationId: importSkill, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+    post:
+      operationId: importSkill
+      description: Queues a reviewed skill import. `git`/`skillsmp`/`openai` fetch a fixed commit from a public repository; `xiaping` downloads the marketplace ZIP via the authenticated Xiaping API (`externalId` required, `XIAPING_API_KEY` must be configured). Identical active Xiaping requests return the same one-attempt job so a potentially charged download is never automatically repeated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind]
+              properties:
+                kind: {type: string, enum: [git, skillsmp, openai, xiaping]}
+                name: {type: string}
+                url: {type: string}
+                githubUrl: {type: string}
+                subdirectory: {type: string}
+                commit: {type: string}
+                externalId: {type: string, description: Xiaping skill id, required for kind=xiaping.}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '412': {$ref: '#/components/responses/Error'}}
   /skills/upload:
     post:
       operationId: uploadSkill
@@ -124,8 +142,27 @@ paths:
   /market/search:
     get:
       operationId: searchMarket
-      parameters: [{name: q, in: query, required: true, schema: {type: string}}, {name: page, in: query, schema: {type: integer, minimum: 1}}]
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '429': {$ref: '#/components/responses/Error'}}
+      description: Queries the configured marketplace sources (SkillsMP and Xiaping) and returns normalized listings. A failing source never blocks the others; partial failures surface under the response `errors` map.
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 2, maxLength: 200}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+        - {name: source, in: query, schema: {type: string, enum: [all, skillsmp, xiaping], default: all}}
+      responses:
+        '200':
+          description: Normalized marketplace listings.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: '#/components/schemas/MarketResult'}}
+                  page: {type: integer}
+                  limit: {type: integer}
+                  errors: {type: object, additionalProperties: {type: string}, description: Sanitized per-source failure status when at least one source succeeded.}
+        '400': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
   /recommendations:
     post: {operationId: recommendSkills, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /mcp/servers:
@@ -259,3 +296,22 @@ components:
           type: object
           required: [code, message]
           properties: {code: {type: string}, message: {type: string}, requestId: {type: string}}
+    MarketResult:
+      type: object
+      description: Normalized marketplace listing independent of the provider payload shape.
+      properties:
+        source: {type: string, enum: [skillsmp, xiaping]}
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        author: {type: string}
+        stars: {type: integer}
+        downloads: {type: integer}
+        reviews: {type: integer}
+        version: {type: string}
+        status: {type: string, description: Xiaping listings report trial/official.}
+        githubUrl: {type: string}
+        sourceUrl: {type: string}
+        categories: {type: array, items: {type: string}}
+        tags: {type: array, items: {type: string}}
+        updatedAt: {type: string}

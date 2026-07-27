@@ -78,11 +78,14 @@ func run(logger *slog.Logger) error {
 	instanceID := uuid.NewString()
 	hub := agenthub.New(st, logger, publicHost, instanceID)
 	sshFallback := remote.New(st, logger)
-	jobWorker := worker.New(st, hub, sshFallback, logger, instanceID)
+	marketClient := market.NewMulti(
+		market.New("https://skillsmp.com/api/v1", cfg.SkillsMPAPIKey),
+		market.NewXiaping(cfg.XiapingBaseURL, cfg.XiapingAPIKey),
+	)
+	jobWorker := worker.New(st, hub, sshFallback, marketClient, logger, instanceID)
 	jobWorker.Run(ctx, 4)
 	scheduler := worker.NewScheduler(st, logger)
 	go scheduler.Run(ctx)
-	marketClient := market.New("https://skillsmp.com/api/v1", cfg.SkillsMPAPIKey)
 	api, err := httpapi.New(cfg, st, hub, marketClient, ai.New(st), logger)
 	if err != nil {
 		return err

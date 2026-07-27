@@ -33,7 +33,7 @@ type ImportedSkill struct {
 }
 
 func (s *Store) ImportSkill(ctx context.Context, source SourceInput, pkg skills.Package, provenance map[string]any, createdBy string) (ImportedSkill, error) {
-	if source.Kind != "upload" && source.Kind != "git" && source.Kind != "skillsmp" && source.Kind != "openai" {
+	if source.Kind != "upload" && source.Kind != "git" && source.Kind != "skillsmp" && source.Kind != "openai" && source.Kind != "xiaping" {
 		return ImportedSkill{}, errors.New("invalid source kind")
 	}
 	tx, err := s.pool.Begin(ctx)

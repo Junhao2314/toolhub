@@ -65,20 +65,39 @@ func (a *API) importSkill(w http.ResponseWriter, r *http.Request) {
 		GitHubURL    string `json:"githubUrl"`
 		Subdirectory string `json:"subdirectory"`
 		Commit       string `json:"commit"`
+		ExternalID   string `json:"externalId"`
 	}
 	if err := decodeJSON(w, r, &input, 256<<10); err != nil {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if input.Kind != "git" && input.Kind != "skillsmp" && input.Kind != "openai" {
-		writeError(w, r, http.StatusBadRequest, "invalid_source", "Source kind must be git, skillsmp, or openai")
+	if input.Kind != "git" && input.Kind != "skillsmp" && input.Kind != "openai" && input.Kind != "xiaping" {
+		writeError(w, r, http.StatusBadRequest, "invalid_source", "Source kind must be git, skillsmp, openai, or xiaping")
+		return
+	}
+	principal := principalFrom(r.Context())
+	if input.Kind == "xiaping" {
+		externalID := strings.TrimSpace(input.ExternalID)
+		if externalID == "" {
+			writeError(w, r, http.StatusBadRequest, "invalid_request", "externalId is required for xiaping imports")
+			return
+		}
+		if a.config.XiapingAPIKey == "" {
+			writeError(w, r, http.StatusPreconditionFailed, "xiaping_not_configured", "Set XIAPING_API_KEY on the control plane to import Xiaping marketplace skills")
+			return
+		}
+		job, err := a.store.EnqueueJobWithOptions(r.Context(), "skill_import", map[string]any{"kind": "xiaping", "externalId": externalID}, false, principal.ID, store.JobOptions{MaxAttempts: 1, DeduplicateActive: true})
+		if err != nil {
+			a.handleStoreError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, job)
 		return
 	}
 	remote := strings.TrimSpace(input.URL)
 	if input.Kind == "skillsmp" {
 		remote = strings.TrimSpace(input.GitHubURL)
 	}
-	principal := principalFrom(r.Context())
 	job, err := a.store.EnqueueJob(r.Context(), "skill_import", map[string]any{"kind": input.Kind, "name": input.Name, "url": remote, "subdirectory": input.Subdirectory, "commit": input.Commit}, false, principal.ID)
 	if err != nil {
 		a.handleStoreError(w, r, err)

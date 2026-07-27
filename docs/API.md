@@ -11,6 +11,12 @@ Main namespaces:
 
 Errors use `{ "error": { "code", "message", "requestId" } }`. List responses use `{ "items": [...] }`. Agent WSS messages are typed envelopes; task signatures cover ID, kind, and canonical payload.
 
+## Marketplace sources
+
+- `GET /api/v1/market/search?q=…&source=all|skillsmp|xiaping&page&limit` fans out over the configured sources and returns normalized listings: `source`, `id`, `name`, `description`, `author`, provenance URLs, and per-source metrics (SkillsMP `stars`; Xiaping `downloads`/`reviews`/`version`/`status`). A failing source never blocks the others: partial failures are reported as sanitized per-source statuses under `errors`; a total failure returns `429`/`502`.
+- SkillsMP is anonymous with an optional `SKILLSMP_API_KEY` for higher quotas. Xiaping search is public and never receives the download key; `XIAPING_API_KEY` is sent only to the authenticated download endpoint. `XIAPING_BASE_URL` overrides the default `https://xiaping.coze.com` origin and must remain HTTPS.
+- `POST /skills` with `kind: "xiaping"` requires `externalId` (the Xiaping skill id) and a configured `XIAPING_API_KEY` (`412 xiaping_not_configured` otherwise). The worker downloads the platform ZIP through a proxy-free, DNS-pinned public-HTTPS client, scans it under the standard package limits, and queues it for review like any other import. The provider-reported coin charge is recorded in provenance. Identical active requests return the existing job, and Xiaping imports use one attempt only so ToolHub never automatically repeats a potentially charged download; a failed import must be explicitly queued again.
+
 ## Browser credentials
 
 - Login accepts `{ "identifier", "password" }`; `identifier` matches either a lowercase username or the required email address, case-insensitively. Authentication failures use one non-enumerating error.

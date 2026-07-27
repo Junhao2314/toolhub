@@ -38,6 +38,8 @@ services:
       TOOLHUB_TIMEZONE: ${TOOLHUB_TIMEZONE:-Asia/Shanghai}
       TOOLHUB_SECURE_COOKIES: ${TOOLHUB_SECURE_COOKIES:-true}
       SKILLSMP_API_KEY: ${SKILLSMP_API_KEY:-}
+      XIAPING_API_KEY: ${XIAPING_API_KEY:-}
+      XIAPING_BASE_URL: ${XIAPING_BASE_URL:-https://xiaping.coze.com}
     ports:
       - "127.0.0.1:${TOOLHUB_PORT:-18480}:18480"
     volumes:

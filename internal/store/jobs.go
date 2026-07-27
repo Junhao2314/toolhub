@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -13,18 +15,33 @@ import (
 )
 
 type JobInput struct {
-	Kind    string
-	Payload any
-	DryRun  bool
+	Kind              string
+	Payload           any
+	DryRun            bool
+	MaxAttempts       int
+	DeduplicateActive bool
+}
+
+type JobOptions struct {
+	MaxAttempts       int
+	DeduplicateActive bool
 }
 
 func (s *Store) EnqueueJob(ctx context.Context, kind string, payload any, dryRun bool, createdBy string) (domain.Job, error) {
+	return s.EnqueueJobWithOptions(ctx, kind, payload, dryRun, createdBy, JobOptions{})
+}
+
+func (s *Store) EnqueueJobWithOptions(ctx context.Context, kind string, payload any, dryRun bool, createdBy string, options JobOptions) (domain.Job, error) {
+	options, err := normalizeJobOptions(options)
+	if err != nil {
+		return domain.Job{}, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.Job{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	job, err := s.enqueueJobTx(ctx, tx, kind, payload, dryRun, createdBy)
+	job, err := s.enqueueJobTxWithOptions(ctx, tx, kind, payload, dryRun, createdBy, options)
 	if err != nil {
 		return domain.Job{}, err
 	}
@@ -39,7 +56,11 @@ func (s *Store) EnqueueJobs(ctx context.Context, inputs []JobInput, createdBy st
 	defer func() { _ = tx.Rollback(ctx) }()
 	jobs := make([]domain.Job, 0, len(inputs))
 	for _, input := range inputs {
-		job, err := s.enqueueJobTx(ctx, tx, input.Kind, input.Payload, input.DryRun, createdBy)
+		options, err := normalizeJobOptions(JobOptions{MaxAttempts: input.MaxAttempts, DeduplicateActive: input.DeduplicateActive})
+		if err != nil {
+			return nil, err
+		}
+		job, err := s.enqueueJobTxWithOptions(ctx, tx, input.Kind, input.Payload, input.DryRun, createdBy, options)
 		if err != nil {
 			return nil, err
 		}
@@ -48,19 +69,59 @@ func (s *Store) EnqueueJobs(ctx context.Context, inputs []JobInput, createdBy st
 	return jobs, tx.Commit(ctx)
 }
 
+func normalizeJobOptions(options JobOptions) (JobOptions, error) {
+	if options.MaxAttempts == 0 {
+		options.MaxAttempts = 5
+	}
+	if options.MaxAttempts < 1 || options.MaxAttempts > 25 {
+		return JobOptions{}, errors.New("job max attempts must be between 1 and 25")
+	}
+	return options, nil
+}
+
 func (s *Store) enqueueJobTx(ctx context.Context, tx pgx.Tx, kind string, payload any, dryRun bool, createdBy string) (domain.Job, error) {
+	options, _ := normalizeJobOptions(JobOptions{})
+	return s.enqueueJobTxWithOptions(ctx, tx, kind, payload, dryRun, createdBy, options)
+}
+
+func (s *Store) enqueueJobTxWithOptions(ctx context.Context, tx pgx.Tx, kind string, payload any, dryRun bool, createdBy string, options JobOptions) (domain.Job, error) {
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return domain.Job{}, err
 	}
+	if options.DeduplicateActive {
+		dedupeInput := append([]byte(kind+"\x00"), encoded...)
+		dedupeInput = append(dedupeInput, '\x00')
+		if dryRun {
+			dedupeInput = append(dedupeInput, '1')
+		} else {
+			dedupeInput = append(dedupeInput, '0')
+		}
+		sum := sha256.Sum256(dedupeInput)
+		lockKey := hex.EncodeToString(sum[:])
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", lockKey); err != nil {
+			return domain.Job{}, err
+		}
+		var existing domain.Job
+		err := tx.QueryRow(ctx, `SELECT id::text,kind,status,payload,dry_run,attempts,max_attempts,run_after,coalesce(created_by::text,'')
+			FROM jobs WHERE kind=$1 AND payload=$2::jsonb AND dry_run=$3 AND status IN ('pending','running')
+			AND cancel_requested_at IS NULL ORDER BY created_at LIMIT 1`, kind, string(encoded), dryRun).
+			Scan(&existing.ID, &existing.Kind, &existing.Status, &existing.Payload, &existing.DryRun, &existing.Attempts, &existing.MaxAttempts, &existing.RunAfter, &existing.CreatedBy)
+		if err == nil {
+			return existing, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return domain.Job{}, err
+		}
+	}
 	now := time.Now().UTC()
-	job := domain.Job{ID: uuid.NewString(), Kind: kind, Status: "pending", Payload: encoded, DryRun: dryRun, MaxAttempts: 5, RunAfter: now}
+	job := domain.Job{ID: uuid.NewString(), Kind: kind, Status: "pending", Payload: encoded, DryRun: dryRun, MaxAttempts: options.MaxAttempts, RunAfter: now}
 	var actor any
 	if createdBy != "" {
 		actor = createdBy
 		job.CreatedBy = createdBy
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO jobs(id,kind,payload,dry_run,created_by,run_after) VALUES($1,$2,$3,$4,$5,$6)`, job.ID, job.Kind, string(job.Payload), dryRun, actor, now)
+	_, err = tx.Exec(ctx, `INSERT INTO jobs(id,kind,payload,dry_run,created_by,run_after,max_attempts) VALUES($1,$2,$3,$4,$5,$6,$7)`, job.ID, job.Kind, string(job.Payload), dryRun, actor, now, job.MaxAttempts)
 	return job, err
 }
 
