@@ -108,7 +108,7 @@ func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, e
 			return nil, err
 		}
 	}
-	deployer := runtimeadapter.Deployer{DataDir: e.config.DataDir, Paths: e.config.Paths}
+	deployer := runtimeadapter.Deployer{DataDir: e.config.DataDir, Paths: e.config.Paths, SharedSources: e.config.SharedSources}
 	result, err := deployer.Deploy(runtimeadapter.DeployRequest{Runtime: request.Runtime, SkillSlug: request.SkillSlug, VersionID: request.VersionID, SHA256: request.SHA256, Enabled: request.Enabled, Artifact: artifact})
 	return protocol.DeploySkillResult{ActualHash: result.ActualHash, ActualEnabled: request.Enabled, BackupPath: result.BackupPath, Changed: result.Changed}, err
 }

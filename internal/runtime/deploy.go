@@ -19,8 +19,9 @@ import (
 )
 
 type Deployer struct {
-	DataDir string
-	Paths   Paths
+	DataDir       string
+	Paths         Paths
+	SharedSources []SharedSourceConfig
 }
 
 type DeployRequest struct {
@@ -67,10 +68,27 @@ func (d *Deployer) enable(target string, request DeployRequest) (DeployResult, e
 			return DeployResult{}, err
 		}
 	}
-	if info, err := os.Stat(target); err == nil && info.IsDir() && !fileExists(filepath.Join(target, ".toolhub-managed.json")) {
-		return DeployResult{}, errors.New("target already contains an unmanaged skill; onboarding remains read-only")
+	targetExists := false
+	takeoverSharedLink := false
+	if info, statErr := os.Lstat(target); statErr == nil {
+		targetExists = true
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			if !d.ownsLegacySharedLink(target, request.Runtime, request.SkillSlug) {
+				return DeployResult{}, errors.New("target is an unowned symlink; refusing to replace it")
+			}
+			takeoverSharedLink = true
+		case info.IsDir():
+			if !fileExists(filepath.Join(target, ".toolhub-managed.json")) {
+				return DeployResult{}, errors.New("target already contains an unmanaged skill; onboarding remains read-only")
+			}
+		default:
+			return DeployResult{}, errors.New("target is not a managed skill directory")
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return DeployResult{}, statErr
 	}
-	if fileExists(filepath.Join(target, ".toolhub-managed.json")) {
+	if !takeoverSharedLink && fileExists(filepath.Join(target, ".toolhub-managed.json")) {
 		var marker struct {
 			SHA256 string `json:"sha256"`
 		}
@@ -92,7 +110,7 @@ func (d *Deployer) enable(target string, request DeployRequest) (DeployResult, e
 		return DeployResult{}, err
 	}
 	backup := ""
-	if fileExists(target) {
+	if targetExists {
 		backup = filepath.Join(d.DataDir, "backups", request.Runtime, request.SkillSlug, time.Now().UTC().Format("20060102T150405Z")+"-"+uuid.NewString())
 		if err := os.MkdirAll(filepath.Dir(backup), 0700); err != nil {
 			_ = os.RemoveAll(staging)
@@ -111,6 +129,30 @@ func (d *Deployer) enable(target string, request DeployRequest) (DeployResult, e
 		return DeployResult{}, fmt.Errorf("activate deployment: %w", err)
 	}
 	return DeployResult{ActualHash: request.SHA256, BackupPath: backup, Changed: true}, nil
+}
+
+func (d *Deployer) ownsLegacySharedLink(target, runtimeKind, skillSlug string) bool {
+	linkTarget, err := os.Readlink(target)
+	if err != nil {
+		return false
+	}
+	actualTarget := cleanLinkTarget(target, linkTarget)
+	for _, source := range d.SharedSources {
+		consumer, ok := source.Consumers[runtimeKind]
+		if !ok || !samePath(consumer.SkillsPath, filepath.Dir(target)) {
+			continue
+		}
+		state, err := loadSharedState(d.DataDir, source.Name)
+		if err != nil {
+			return false
+		}
+		record, ok := state.Links[runtimeKind][skillSlug]
+		expectedTarget := filepath.Join(source.SkillsRoot, skillSlug)
+		if ok && samePath(record.TargetPath, target) && samePath(record.ExpectedTarget, expectedTarget) && samePath(actualTarget, expectedTarget) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Deployer) disable(target string, request DeployRequest) (DeployResult, error) {
