@@ -68,8 +68,9 @@ func MCPMStorePath(home string) string {
 }
 
 // ScanMCPM reads the global mcpm registry without writing it. A server carrying
-// the legacy all-mcp tag is seeded into both managed runtime profiles until a
-// ToolHub profile tag exists; this makes the first cutover behaviour-preserving.
+// the legacy all-mcp tag follows recognized native all-mcp anchors until a
+// ToolHub profile tag exists. Ambiguous registries with no native anchor keep
+// the historical both-runtime fallback.
 func ScanMCPM(home string, fingerprintKey []byte) (MCPMScan, error) {
 	path := MCPMStorePath(home)
 	body, err := os.ReadFile(path)
@@ -100,6 +101,7 @@ func ScanMCPM(home string, fingerprintKey []byte) (MCPMScan, error) {
 			}
 		}
 	}
+	legacyAnchorTargets := legacyMCPMAnchorTargets(home)
 	result := MCPMScan{Servers: []domain.MCPDescriptor{}, Secrets: map[string]MCPSecretValues{}}
 	names := make([]string, 0, len(document))
 	for name := range document {
@@ -115,7 +117,7 @@ func ScanMCPM(home string, fingerprintKey []byte) (MCPMScan, error) {
 		if server.Name == "" {
 			server.Name = name
 		}
-		targets := mcpmTargetRuntimes(server.ProfileTags, hasManagedTag)
+		targets := mcpmTargetRuntimes(server.ProfileTags, hasManagedTag, legacyAnchorTargets)
 		if len(targets) == 0 {
 			continue
 		}
@@ -147,8 +149,9 @@ func ScanMCPM(home string, fingerprintKey []byte) (MCPMScan, error) {
 	return result, nil
 }
 
-func mcpmTargetRuntimes(tags []string, hasManagedTag map[string]bool) []string {
+func mcpmTargetRuntimes(tags []string, hasManagedTag, legacyAnchorTargets map[string]bool) []string {
 	set := map[string]bool{}
+	hasLegacyAnchor := legacyAnchorTargets[domain.RuntimeCodex] || legacyAnchorTargets[domain.RuntimeClaude]
 	for _, tag := range tags {
 		switch tag {
 		case managedCodexProfile:
@@ -156,10 +159,10 @@ func mcpmTargetRuntimes(tags []string, hasManagedTag map[string]bool) []string {
 		case managedClaudeProfile:
 			set[domain.RuntimeClaude] = true
 		case "all-mcp":
-			if !hasManagedTag[domain.RuntimeCodex] {
+			if !hasManagedTag[domain.RuntimeCodex] && (!hasLegacyAnchor || legacyAnchorTargets[domain.RuntimeCodex]) {
 				set[domain.RuntimeCodex] = true
 			}
-			if !hasManagedTag[domain.RuntimeClaude] {
+			if !hasManagedTag[domain.RuntimeClaude] && (!hasLegacyAnchor || legacyAnchorTargets[domain.RuntimeClaude]) {
 				set[domain.RuntimeClaude] = true
 			}
 		}
@@ -169,6 +172,21 @@ func mcpmTargetRuntimes(tags []string, hasManagedTag map[string]bool) []string {
 		result = append(result, runtimeKind)
 	}
 	sort.Strings(result)
+	return result
+}
+
+func legacyMCPMAnchorTargets(home string) map[string]bool {
+	paths := map[string]string{
+		domain.RuntimeCodex:  filepath.Join(home, ".codex", "config.toml"),
+		domain.RuntimeClaude: filepath.Join(home, ".claude.json"),
+	}
+	result := map[string]bool{}
+	for runtimeKind, path := range paths {
+		entry, ok := readMCPConfig(path, runtimeKind)["all-mcp"].(map[string]any)
+		if ok && stringValue(entry["command"]) == "mcpm" && equalStringSlice(entry["args"], []string{"profile", "run", "all-mcp"}) {
+			result[runtimeKind] = true
+		}
+	}
 	return result
 }
 

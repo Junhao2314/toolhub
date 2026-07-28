@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Junhao2314/toolhub/internal/domain"
@@ -52,6 +53,61 @@ func TestScanMCPMSeedsEachRuntimeUntilItsManagedProfileExists(t *testing.T) {
 	}
 	if values := scan.Secrets[byName["legacy"].Identity]; values.Env["TOKEN"] != "not-in-inventory" {
 		t.Fatal("Agent-local capture values were not retained")
+	}
+}
+
+func TestScanMCPMSeedsLegacyProfileOnlyIntoObservedNativeAnchor(t *testing.T) {
+	home := t.TempDir()
+	registry := MCPMStorePath(home)
+	if err := os.MkdirAll(filepath.Dir(registry), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registry, []byte(`{
+  "legacy": {"name":"legacy","command":"npx","args":["legacy"],"profile_tags":["all-mcp"]}
+}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfig, []byte(`[mcp_servers.all-mcp]
+command = "mcpm"
+args = ["profile", "run", "all-mcp"]
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, err := ScanMCPM(home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scan.Servers) != 1 {
+		t.Fatalf("server count = %d; want 1", len(scan.Servers))
+	}
+	if got := scan.Servers[0].TargetRuntimes; len(got) != 1 || got[0] != domain.RuntimeCodex {
+		t.Fatalf("legacy targets = %v; want only the observed Codex anchor", got)
+	}
+}
+
+func TestMCPMTargetRuntimesUsesLegacyAnchorsWhenAvailable(t *testing.T) {
+	tests := []struct {
+		name    string
+		anchors map[string]bool
+		want    string
+	}{
+		{name: "compatibility fallback", anchors: map[string]bool{}, want: "claude,codex"},
+		{name: "Codex only", anchors: map[string]bool{domain.RuntimeCodex: true}, want: "codex"},
+		{name: "Claude only", anchors: map[string]bool{domain.RuntimeClaude: true}, want: "claude"},
+		{name: "both runtimes", anchors: map[string]bool{domain.RuntimeCodex: true, domain.RuntimeClaude: true}, want: "claude,codex"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := mcpmTargetRuntimes([]string{"all-mcp"}, map[string]bool{}, test.anchors)
+			if joined := strings.Join(got, ","); joined != test.want {
+				t.Fatalf("legacy targets = %q; want %q", joined, test.want)
+			}
+		})
 	}
 }
 
