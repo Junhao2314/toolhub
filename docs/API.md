@@ -29,7 +29,7 @@ Errors use `{ "error": { "code", "message", "requestId" } }`. Profile activation
 
 - `GET /discoveries` returns runtime-local Skill discoveries, one canonical `shared` discovery per importable shared Skill, and MCP runtime bindings. It never returns MCP secret values or per-node HMAC fingerprints.
 - MCP entries are captured through the Agent-only protocol. The Agent scans mcpm plus non-relay native entries; plaintext values are submitted once over the authenticated Agent route and encrypted in PostgreSQL.
-- Initial mcpm discovery creates the fixed `toolhub-codex` and `toolhub-claude` profiles. The live profile membership is seeded into both with deployment state `observed`; only `POST /mcp/deployments` advances a selected node/runtime to `pending` and queues `mcp_sync`.
+- Initial mcpm discovery creates the fixed `toolhub-codex` and `toolhub-claude` profiles. Legacy `all-mcp` membership follows recognized Codex/Claude native anchors; only an ambiguous registry with no anchor evidence retains the both-runtime compatibility fallback. Deployments start as `observed`; only `POST /mcp/deployments` advances a selected node/runtime to `pending` and queues `mcp_sync`.
 - `PUT /mcp/profiles/{id}/servers` replaces membership only for those fixed managed profiles. Membership edits refresh desired hashes/bindings but preserve `observed` state until the matching runtime is explicitly deployed.
 - Legacy shared-manifest MCP entries are imported as disabled `shared-import` candidates. A collision keeps the live mcpm name and renames the candidate with `-shared`; the browser shows import provenance and conflict state.
 - `POST /discoveries/{id}/adopt-skill` is administrator-only. For a shared-source discovery the Agent uploads a safely packaged immutable snapshot without writing the legacy tree. The resulting Skill remains pending review, then deploys as a materialized copy through ordinary per-runtime targets.
@@ -41,7 +41,7 @@ Errors use `{ "error": { "code", "message", "requestId" } }`. Profile activation
 
 ## MCP delivery and legacy imports
 
-- PostgreSQL is authoritative. `mcp_sync` sends a signed `apply_mcp` task whose payload names the fixed mcpm profile and contains only encrypted secret references. The Agent resolves authorized values, atomically updates `~/.config/mcpm/servers.json` at mode `0600`, then repairs the runtime's single native mcpm anchor.
+- PostgreSQL is authoritative. `mcp_sync` sends a signed `apply_mcp` task whose payload names the fixed mcpm profile and contains only encrypted secret references. The Agent resolves authorized values, atomically updates `~/.config/mcpm/servers.json` at mode `0600`, then repairs the runtime's single native mcpm anchor. The Codex anchor uses a managed 60-second startup timeout and drift detection includes that timeout.
 - Managed delivery accepts only the exact fixed mapping: `toolhub-codex` to Codex and `toolhub-claude` to Claude. Arbitrary or mismatched profiles return `409` and are excluded from worker dispatch and Agent secret authorization.
 - Shared manifest rows remain mirrored with `authority: "shared-file"` and `credentialMode: "node-local"` for read-only observation. Separate `shared-import` candidate rows are ordinary ToolHub-authoritative records after one-time capture; they remain disabled until explicitly reviewed.
 - ToolHub-authoritative MCP servers may contain both `env` and `headers` plaintext only in create/capture requests. Values are encrypted into `mcp-env` or `mcp-header` records; list/detail and task payloads contain references only.

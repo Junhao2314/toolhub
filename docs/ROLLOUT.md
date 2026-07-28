@@ -23,7 +23,7 @@ Also enumerate every out-of-band writer that can edit the native MCP files, incl
 ### Phase 1 — scan, import, and seed (no runtime writes)
 
 1. Deploy the control plane and Agent code, restart the Agent, and wait for a fresh inventory.
-2. Confirm live mcpm members appear as `mcpm-import` servers and both fixed profiles (`toolhub-codex`, `toolhub-claude`) have identical seeded membership with deployment state `observed`.
+2. Confirm live mcpm members appear as `mcpm-import` servers and each fixed profile follows the recognized native legacy anchor for its runtime. If the registry has no native anchor evidence, confirm the documented both-runtime compatibility fallback. Deployments remain `observed`.
 3. Confirm legacy shared-manifest entries appear as disabled `shared-import` candidates. The live definition keeps a conflicting name; the candidate receives `-shared`.
 4. Adopt importable shared Skills into immutable pending-review artifacts. A package-invalid Skill stays blocked and does not prevent healthy siblings from importing.
 
@@ -33,8 +33,10 @@ Gate: compare command/args/URL/key names and profile membership with the pre-rol
 
 1. Explicitly deploy the `toolhub-codex` profile to the canary node. Wait for the `apply_mcp` node task and deployment state, not merely the parent Job.
 2. Confirm `~/.config/mcpm/servers.json` is mode `0600`, contains the desired `toolhub-codex` tags, and preserves unrelated definitions/tags.
-3. Confirm `~/.codex/config.toml` contains one `[mcp_servers.toolhub-codex]` relay, no recognized legacy `all-mcp` relay/subsections, and unchanged model/provider settings.
+3. Confirm `~/.codex/config.toml` contains one `[mcp_servers.toolhub-codex]` relay with `startup_timeout_sec = 60`, no recognized legacy `all-mcp` relay/subsections, and unchanged model/provider settings.
 4. Archive the old ToolHub-authored `shared-mcp` plugin only after its `plugin.json` identity is validated.
+
+On memory-constrained nodes, begin with only the required profile members and add servers after measuring steady-state RSS. Each stdio member starts once per active runtime client; assigning the same member to Codex and Claude does not share one subprocess.
 
 Gate: a fresh Codex session exposes the expected tools once, with no duplicate servers. Keep the Agent mcpm and anchor backups until the full migration is accepted.
 

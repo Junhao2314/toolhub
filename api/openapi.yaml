@@ -195,7 +195,7 @@ paths:
   /mcp/profiles:
     get:
       operationId: listMCPProfiles
-      description: Lists profiles and membership. Initial mcpm discovery creates fixed toolhub-codex and toolhub-claude profiles with managedRuntime provenance.
+      description: Lists profiles and membership. Initial mcpm discovery creates fixed toolhub-codex and toolhub-claude profiles with managedRuntime provenance; legacy all-mcp membership follows recognized native anchors when present.
       responses: {'200': {$ref: '#/components/responses/JSON'}}
     post: {operationId: createMCPProfile, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}}
   /mcp/profiles/{id}/servers:
