@@ -137,6 +137,35 @@ args = []
 	if anchor["command"] != "mcpm" || !equalStringSlice(anchor["args"], []string{"profile", "run", managedCodexProfile}) {
 		t.Fatalf("Codex anchor is wrong: %+v", anchor)
 	}
+	if timeout, ok := integerValue(anchor["startup_timeout_sec"]); !ok || timeout != managedCodexStartupTimeoutSeconds {
+		t.Fatalf("Codex startup timeout = %v; want %d", anchor["startup_timeout_sec"], managedCodexStartupTimeoutSeconds)
+	}
+}
+
+func TestInspectCodexAnchorRequiresManagedStartupTimeout(t *testing.T) {
+	home := t.TempDir()
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`[mcp_servers.toolhub-codex]
+command = "mcpm"
+args = ["profile", "run", "toolhub-codex"]
+startup_timeout_sec = 10
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before := InspectRuntimeMCPAnchor(home, "codex")
+	if before["present"] != true || before["valid"] != false {
+		t.Fatalf("unexpected pre-repair observation: %+v", before)
+	}
+	if _, err := ApplyRuntimeMCPAnchor(home, t.TempDir(), "codex", managedCodexProfile, true); err != nil {
+		t.Fatal(err)
+	}
+	after := InspectRuntimeMCPAnchor(home, "codex")
+	if after["valid"] != true {
+		t.Fatalf("repaired anchor is not valid: %+v", after)
+	}
 }
 
 func TestCodexAnchorPreservesUnrecognizedAllMCPSection(t *testing.T) {

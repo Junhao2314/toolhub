@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const managedCodexStartupTimeoutSeconds int64 = 60
+
 type AnchorApplyResult struct {
 	ConfigPath string
 	BackupPath string
@@ -47,6 +49,10 @@ func InspectRuntimeMCPAnchor(home, runtimeKind string) map[string]any {
 	servers := readMCPConfig(path, runtimeKind)
 	entry, present := servers[profile].(map[string]any)
 	valid := present && stringValue(entry["command"]) == "mcpm" && equalStringSlice(entry["args"], []string{"profile", "run", profile})
+	if valid && runtimeKind == "codex" {
+		timeout, ok := integerValue(entry["startup_timeout_sec"])
+		valid = ok && timeout == managedCodexStartupTimeoutSeconds
+	}
 	legacy := false
 	if old, ok := servers["all-mcp"].(map[string]any); ok {
 		legacy = stringValue(old["command"]) == "mcpm" && equalStringSlice(old["args"], []string{"profile", "run", "all-mcp"})
@@ -103,7 +109,7 @@ func applyCodexAnchor(path, dataDir, profile string, enabled bool) (AnchorApplyR
 	sections := map[string]string{}
 	removals := map[string]bool{}
 	if enabled {
-		sections["mcp_servers."+profile] = "[mcp_servers." + profile + "]\ncommand = \"mcpm\"\nargs = [\"profile\", \"run\", " + strconv.Quote(profile) + "]\n"
+		sections["mcp_servers."+profile] = "[mcp_servers." + profile + "]\ncommand = \"mcpm\"\nargs = [\"profile\", \"run\", " + strconv.Quote(profile) + "]\nstartup_timeout_sec = " + strconv.FormatInt(managedCodexStartupTimeoutSeconds, 10) + "\n"
 		if old, ok := readMCPConfig(path, "codex")["all-mcp"].(map[string]any); ok &&
 			stringValue(old["command"]) == "mcpm" && equalStringSlice(old["args"], []string{"profile", "run", "all-mcp"}) {
 			removals["mcp_servers.all-mcp"] = true
@@ -115,6 +121,19 @@ func applyCodexAnchor(path, dataDir, profile string, enabled bool) (AnchorApplyR
 	return writeAnchor(path, dataDir, before, mode, exists, encoded, func() error {
 		return restoreAnchor(path, before, mode, exists)
 	})
+}
+
+func integerValue(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	default:
+		return 0, false
+	}
 }
 
 func replaceTOMLSections(body []byte, replacements map[string]string, removals map[string]bool) []byte {
