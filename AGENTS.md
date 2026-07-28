@@ -129,7 +129,7 @@ The local HTTP smoke profile must set `TOOLHUB_SECURE_COOKIES=false`. The normal
 - Existing `internal/httpapi/resources.go` and `settings.go` still contain direct `Pool().Exec` calls. Do not expand that pattern; move new persistence behavior into `internal/store`, and treat refactoring those paths as a separate risk-reviewed change.
 - Some handlers update state and enqueue a job in separate operations (`setSkillTargets`, `rollbackDeployment`, `deployMCPProfile`). Their selectors are scoped, but the state/enqueue pair is still not atomic; verify failure semantics when changing those flows.
 - Playwright has no webServer setting. The backend must already be running; tests use `TOOLHUB_E2E_EMAIL` and `TOOLHUB_E2E_PASSWORD`, pin Chrome at `/usr/bin/google-chrome`, and run workers=1 (desktop + mobile projects).
-- Compose healthchecks only Postgres; app readiness is `GET /healthz`. Compose publishes only `127.0.0.1:18480`.
+- Compose healthchecks PostgreSQL with `pg_isready` and ToolHub with `GET /healthz`; `docker compose up --wait` waits for both. Compose publishes only `127.0.0.1:18480`.
 - CI (`.github/workflows/ci.yml`): `go-test`, matrix `agent-build` (linux/mac/windows), `web` (audit+typecheck+build), `container-smoke` (compose + `scripts/smoke-api.sh` + Playwright). Race tests are not gated. Prefer Makefile/CI over historical `docs/workflows/**` for current gates.
 - `mcp_health` job returns a stub (`queued_on_next_reconcile`) and does not run real health probes today.
 - `SetSkillTargets`, `SetMCPDeployments`, and `ReplaceInventory` are upsert-only; omitted rows are not deleted.

@@ -99,8 +99,8 @@ Prefer `npm ci --ignore-scripts` for CI parity; `make web` currently uses bare `
 
 ## Compose / Docker facts
 
-- Services: `postgres` (16-alpine, healthcheck `pg_isready`) and `toolhub` (build context `.`).
-- **Only Postgres is healthchecked**; `--wait` does not prove app readiness — always `curl /healthz`.
+- Services: `postgres` (16-alpine, healthcheck `pg_isready`) and `toolhub` (build context `.`, healthcheck `GET /healthz`).
+- `docker compose up --wait` waits for both PostgreSQL and ToolHub readiness; a follow-up `curl /healthz` remains a useful explicit smoke assertion.
 - Hardening: `read_only`, tmpfs `/tmp`, `cap_drop: ALL`, networks `backend` (internal) + `egress`.
 - Volumes: `postgres_data`, `toolhub_data` → `/data`.
 - Dockerfile: multi-stage `node:22-alpine` → `golang:1.22-alpine` (CGO=0, embeds `cmd/toolhub/dist`) → `alpine:3.21` non-root `toolhub` user; ships both binaries; ENTRYPOINT `toolhub`.

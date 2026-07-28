@@ -93,7 +93,7 @@ Framework: stdlib `testing` only (no testify/sqlmock/testcontainers). No shared 
 | Login fails in browser on local HTTP | `TOOLHUB_SECURE_COOKIES` still true |
 | smoke-api exits early | missing `TOOLHUB_SMOKE_EMAIL`/`PASSWORD` or wrong bootstrap |
 | Playwright cannot launch | no `/usr/bin/google-chrome` or backend not on 18480 |
-| Compose up but curl fails | only Postgres healthchecked; inspect `docker compose logs --no-color` |
+| Compose up but curl fails | inspect ToolHub health with `docker compose ps` and dump `docker compose logs --no-color` |
 | CSRF 403 in client | token not in `sessionStorage` key `toolhub.csrf` after login/session |
 | CI web job fails audit | dependency vulnerability ≥ high |
 

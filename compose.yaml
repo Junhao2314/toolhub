@@ -22,6 +22,13 @@ services:
     build:
       context: .
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "-T", "2", "http://127.0.0.1:18480/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
     depends_on:
       postgres:
         condition: service_healthy
