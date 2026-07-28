@@ -1,4 +1,4 @@
-import { Activity, FileJson, Plus, RefreshCw, ServerCog, ToggleLeft, ToggleRight } from 'lucide-react'
+import { Activity, Archive, ArchiveRestore, FileJson, Plus, RefreshCw, ServerCog, ToggleLeft, ToggleRight } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, type Dict } from '../api/client'
 import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
@@ -6,7 +6,7 @@ import { useData } from '../hooks/useData'
 import { useI18n } from '../i18n'
 
 interface MCPOrigin { importSource?: string; importSourceName?: string; serverName?: string; managedRuntime?: string }
-interface MCPServer extends Dict { id: string; name: string; runtimeName: string; transport: string; command: string; url: string; enabled: boolean; healthStatus: string; source: string; origin?: MCPOrigin; authority: string; credentialMode: string; sharedSourceId?: string; envRefs: Record<string, string>; headerRefs: Record<string, string>; bindingCount: number; hasDrift: boolean }
+interface MCPServer extends Dict { id: string; name: string; runtimeName: string; transport: string; command: string; url: string; enabled: boolean; healthStatus: string; source: string; origin?: MCPOrigin; authority: string; credentialMode: string; sharedSourceId?: string; envRefs: Record<string, string>; headerRefs: Record<string, string>; bindingCount: number; hasDrift: boolean; archivedAt?: string }
 interface Profile { id: string; name: string; description: string; enabled: boolean; source: string; origin?: MCPOrigin; serverIds: string[] }
 interface Deployment { id: string; profileName: string; source: string; nodeName: string; runtime: string; state: string; lastError: string; bindings: { id: string; serverName: string; missing: boolean; drift: boolean }[] }
 interface SharedSource { id: string; nodeName: string; name: string; mode: string; autoSync: boolean; status: string; lastError: string; blockedSkills: { name: string; path: string; error: string }[]; mcpServers: { id: string; name: string; transport: string; enabled: boolean; authority: string; credentialMode: string; envKeys: string[]; headerKeys: string[] }[]; consumers: { kind: string; inheritsFrom: string; state: string; expectedFingerprint: string; actualFingerprint: string; lastError: string; mcpBindings: { serverName: string; enabled: boolean; missing: boolean; drift: boolean }[] }[] }
@@ -16,24 +16,30 @@ export default function MCP() {
   const [tab, setTab] = useState('Servers')
   const [modal, setModal] = useState<'server' | 'profile' | null>(null)
   const [error, setError] = useState('')
+  const [provenance, setProvenance] = useState('all')
+  const [showArchived, setShowArchived] = useState(false)
   const state = useData(async () => {
     const [servers, profiles, deployments, sharedSources] = await Promise.all([api.list<MCPServer>('/mcp/servers'), api.list<Profile>('/mcp/profiles'), api.list<Deployment>('/mcp/deployments'), api.list<SharedSource>('/shared-sources')])
     return { servers: servers.items, profiles: profiles.items, deployments: deployments.items, sharedSources: sharedSources.items }
   }, [])
   const toggle = (server: MCPServer) => api.patch(`/mcp/servers/${server.id}`, { enabled: !server.enabled }).then(state.reload).catch((reason: Error) => setError(reason.message))
   const health = (id: string) => api.post(`/mcp/servers/${id}/health`).then(state.reload).catch((reason: Error) => setError(reason.message))
+  const archive = (server: MCPServer) => api.post(`/mcp/servers/${server.id}/${server.archivedAt ? 'unarchive' : 'archive'}`).then(state.reload).catch((reason: Error) => setError(reason.message))
+  const serverProvenance = (server: MCPServer) => [server.source, server.origin?.importSourceName].filter(Boolean).join(' · ')
+  const provenanceOptions = [...new Set((state.data?.servers ?? []).map(serverProvenance))].sort()
+  const visibleServers = (state.data?.servers ?? []).filter((server) => (showArchived || !server.archivedAt) && (provenance === 'all' || serverProvenance(server) === provenance))
   const addAction = tab === 'Profiles' ? <Button onClick={() => setModal('profile')}><Plus size={16} />{t('Add profile')}</Button> : tab === 'Servers' ? <Button onClick={() => setModal('server')}><Plus size={16} />{t('Add server')}</Button> : undefined
   return <>
     <PageHeader title={t('MCP')} detail={t('Servers, reusable profiles, health, usage, and runtime distribution.')} actions={<><Button variant="secondary" onClick={state.reload}><RefreshCw size={16} />{t('Refresh')}</Button>{addAction}</>} />
     {error && <ErrorNotice message={error} />}
-    <div className="toolbar"><Segments options={['Servers', 'Shared Sources', 'Profiles', 'Deployments']} value={tab} onChange={setTab} /></div>
-    {state.loading ? <Loading label={t('Loading MCP inventory')} /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : tab === 'Servers' ? <ServerTable items={state.data.servers} toggle={toggle} health={health} /> : tab === 'Shared Sources' ? <SharedSourceTable items={state.data.sharedSources} /> : tab === 'Profiles' ? <ProfileTable items={state.data.profiles} servers={state.data.servers} saved={state.reload} /> : <DeploymentTable items={state.data.deployments} />}
+    <div className="toolbar"><Segments options={['Servers', 'Shared Sources', 'Profiles', 'Deployments']} value={tab} onChange={setTab} />{tab === 'Servers' && <><label className="toolbar-select"><span>{t('Provenance')}</span><select aria-label={t('MCP provenance')} value={provenance} onChange={(event) => setProvenance(event.target.value)}><option value="all">{t('All sources')}</option>{provenanceOptions.map((source) => <option key={source} value={source}>{source}</option>)}</select></label><label className="toggle-control"><input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)} />{t('Show archived')}</label></>}</div>
+    {state.loading ? <Loading label={t('Loading MCP inventory')} /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : tab === 'Servers' ? <ServerTable items={visibleServers} toggle={toggle} health={health} archive={archive} /> : tab === 'Shared Sources' ? <SharedSourceTable items={state.data.sharedSources} /> : tab === 'Profiles' ? <ProfileTable items={state.data.profiles} servers={state.data.servers} saved={state.reload} /> : <DeploymentTable items={state.data.deployments} />}
     {modal === 'server' && <ServerModal close={() => setModal(null)} saved={() => { setModal(null); state.reload() }} />}
     {modal === 'profile' && state.data && <ProfileModal servers={state.data.servers} close={() => setModal(null)} saved={() => { setModal(null); state.reload() }} />}
   </>
 }
 
-function ServerTable({ items, toggle, health }: { items: MCPServer[]; toggle: (item: MCPServer) => void; health: (id: string) => void }) {
+function ServerTable({ items, toggle, health, archive }: { items: MCPServer[]; toggle: (item: MCPServer) => void; health: (id: string) => void; archive: (item: MCPServer) => void }) {
   const { t } = useI18n()
   if (!items.length) return <Empty title={t('No MCP servers')} detail={t('Add a stdio, SSE, or Streamable HTTP server.')} />
   return <div className="table-scroll"><table><thead><tr><th>{t('Server')}</th><th>{t('Transport')}</th><th>{t('Endpoint')}</th><th>{t('Bindings')}</th><th>{t('State')}</th><th /></tr></thead><tbody>{items.map((item) => {
@@ -50,7 +56,7 @@ function ServerTable({ items, toggle, health }: { items: MCPServer[]; toggle: (i
           ? t('Imported from {source} · runtime name {name}', { source: sourceName, name: item.runtimeName })
           : item.source
     const stateValue = item.hasDrift ? 'drift' : conflict ? 'conflict' : candidate && !item.enabled ? 'candidate' : !item.enabled ? 'disabled' : item.healthStatus
-    return <tr key={item.id}><td><strong>{item.name}</strong><small>{sourceDetail}</small>{(candidate || conflict) && <span className="label-row">{candidate && <Status value="candidate" />}{conflict && <Status value="name conflict" />}</span>}</td><td>{item.transport}</td><td><code>{item.command || item.url}</code></td><td>{item.bindingCount ?? 0}<small>{shared ? t('Credential values stay on the node') : t('{n} encrypted refs', { n: Object.keys(item.envRefs ?? {}).length + Object.keys(item.headerRefs ?? {}).length })}</small></td><td><Status value={stateValue} /></td><td className="row-actions"><IconButton label={shared ? t('Shared-file servers are read-only here') : t('Run health check')} disabled={shared} onClick={() => health(item.id)}><Activity size={16} /></IconButton><IconButton label={shared ? t('Legacy manifests are import-only') : item.enabled ? t('Disable server') : t('Enable server')} disabled={shared} onClick={() => toggle(item)}>{item.enabled ? <ToggleRight size={19} /> : <ToggleLeft size={19} />}</IconButton></td></tr>
+    return <tr key={item.id}><td><strong>{item.name}</strong><small>{sourceDetail}</small>{(candidate || conflict) && <span className="label-row">{candidate && <Status value="candidate" />}{conflict && <Status value="name conflict" />}</span>}</td><td>{item.transport}</td><td><code>{item.command || item.url}</code></td><td>{item.bindingCount ?? 0}<small>{shared ? t('Credential values stay on the node') : t('{n} encrypted refs', { n: Object.keys(item.envRefs ?? {}).length + Object.keys(item.headerRefs ?? {}).length })}</small></td><td><Status value={item.archivedAt ? 'archived' : stateValue} /></td><td className="row-actions"><IconButton label={shared ? t('Shared-file servers are read-only here') : t('Run health check')} disabled={shared || Boolean(item.archivedAt)} onClick={() => health(item.id)}><Activity size={16} /></IconButton><IconButton label={shared ? t('Legacy manifests are import-only') : item.enabled ? t('Disable server') : t('Enable server')} disabled={shared || Boolean(item.archivedAt)} onClick={() => toggle(item)}>{item.enabled ? <ToggleRight size={19} /> : <ToggleLeft size={19} />}</IconButton><IconButton label={item.archivedAt ? t('Unarchive server') : t('Archive server')} disabled={shared} onClick={() => archive(item)}>{item.archivedAt ? <ArchiveRestore size={17} /> : <Archive size={17} />}</IconButton></td></tr>
   })}</tbody></table></div>
 }
 
@@ -66,7 +72,7 @@ function ProfileTable({ items, servers, saved }: { items: Profile[]; servers: MC
     const runtime = item.origin?.managedRuntime
     return (runtime === 'codex' || runtime === 'claude') && item.name === `toolhub-${runtime}`
   })
-  const selectable = servers.filter((server) => server.authority !== 'shared-file')
+  const selectable = servers.filter((server) => server.authority !== 'shared-file' && !server.archivedAt)
   const [drafts, setDrafts] = useState<Record<string, string[]>>({})
   const [saving, setSaving] = useState('')
   const [error, setError] = useState('')
@@ -126,6 +132,6 @@ function ProfileModal({ servers, close, saved }: { servers: MCPServer[]; close: 
   const [description, setDescription] = useState('')
   const [selected, setSelected] = useState<string[]>([])
   const submit = () => api.post('/mcp/profiles', { name, description, serverIds: selected }).then(saved)
-  const editableServers = servers.filter((server) => server.authority !== 'shared-file')
+  const editableServers = servers.filter((server) => server.authority !== 'shared-file' && !server.archivedAt)
   return <Modal title={t('Create MCP profile')} close={close}><Field label={t('Name')}><input value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label={t('Description')}><input value={description} onChange={(event) => setDescription(event.target.value)} /></Field><div className="check-list">{editableServers.map((server) => <label key={server.id}><input type="checkbox" checked={selected.includes(server.id)} onChange={() => setSelected((current) => current.includes(server.id) ? current.filter((id) => id !== server.id) : [...current, server.id])} /><span>{server.name}<small>{server.transport}</small></span></label>)}</div><div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button><Button onClick={submit} disabled={!name}>{t('Create profile')}</Button></div></Modal>
 }

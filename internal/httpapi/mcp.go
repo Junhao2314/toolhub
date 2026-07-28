@@ -46,7 +46,7 @@ func (a *API) updateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.store.UpdateMCPServer(r.Context(), chi.URLParam(r, "id"), input); err != nil {
-		if errors.Is(err, store.ErrSourceFileAuthoritative) {
+		if errors.Is(err, store.ErrSourceFileAuthoritative) || errors.Is(err, store.ErrTargetManagedByProfile) {
 			a.handleStoreError(w, r, err)
 			return
 		}
@@ -96,7 +96,7 @@ func (a *API) setMCPProfileServers(w http.ResponseWriter, r *http.Request) {
 	}
 	profileID := chi.URLParam(r, "id")
 	if err := a.store.SetMCPProfileServers(r.Context(), profileID, input.ServerIDs); err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrSourceFileAuthoritative) || errors.Is(err, store.ErrManagedMCPProfile) || errors.Is(err, store.ErrMCPProfileRuntime) {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrSourceFileAuthoritative) || errors.Is(err, store.ErrManagedMCPProfile) || errors.Is(err, store.ErrMCPProfileRuntime) || errors.Is(err, store.ErrTargetManagedByProfile) {
 			a.handleStoreError(w, r, err)
 			return
 		}
@@ -120,7 +120,7 @@ func (a *API) deployMCPProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	job, err := a.store.SetMCPDeployments(r.Context(), input.ProfileID, principalFrom(r.Context()).ID, input.Targets, input.DryRun)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrManagedMCPProfile) || errors.Is(err, store.ErrMCPProfileRuntime) {
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrManagedMCPProfile) || errors.Is(err, store.ErrMCPProfileRuntime) || errors.Is(err, store.ErrTargetManagedByProfile) {
 			a.handleStoreError(w, r, err)
 			return
 		}
@@ -137,4 +137,27 @@ func (a *API) checkMCPHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+func (a *API) archiveMCPServer(w http.ResponseWriter, r *http.Request) {
+	a.setMCPServerArchived(w, r, true)
+}
+
+func (a *API) unarchiveMCPServer(w http.ResponseWriter, r *http.Request) {
+	a.setMCPServerArchived(w, r, false)
+}
+
+func (a *API) setMCPServerArchived(w http.ResponseWriter, r *http.Request, archived bool) {
+	id := chi.URLParam(r, "id")
+	if err := a.store.SetMCPServerArchived(r.Context(), id, archived); err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	principal := principalFrom(r.Context())
+	action := "unarchive"
+	if archived {
+		action = "archive"
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: action, ResourceType: "mcp_server", ResourceID: id, Outcome: "success", IPAddress: clientIP(r)})
+	w.WriteHeader(http.StatusNoContent)
 }

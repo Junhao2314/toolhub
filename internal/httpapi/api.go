@@ -80,6 +80,9 @@ func (a *API) Router() http.Handler {
 			read.Get("/mcp/servers", a.listMCPServers)
 			read.Get("/mcp/profiles", a.listMCPProfiles)
 			read.Get("/mcp/deployments", a.listMCPDeployments)
+			read.Get("/profiles", a.listProfiles)
+			read.Get("/profiles/{id}", a.getProfile)
+			read.Get("/targets/{nodeId}/{runtime}", a.getTargetView)
 			read.Get("/discoveries", a.listDiscoveries)
 			read.Get("/shared-sources", a.listSharedSources)
 			read.Get("/shared-sources/{id}", a.getSharedSource)
@@ -106,9 +109,18 @@ func (a *API) Router() http.Handler {
 			ops.Patch("/mcp/servers/{id}", a.updateMCPServer)
 			ops.Delete("/mcp/servers/{id}", a.deleteMCPServer)
 			ops.Post("/mcp/servers/{id}/health", a.checkMCPHealth)
+			ops.Post("/mcp/servers/{id}/archive", a.archiveMCPServer)
+			ops.Post("/mcp/servers/{id}/unarchive", a.unarchiveMCPServer)
 			ops.Post("/mcp/profiles", a.createMCPProfile)
 			ops.Put("/mcp/profiles/{id}/servers", a.setMCPProfileServers)
 			ops.Post("/mcp/deployments", a.deployMCPProfile)
+			ops.Post("/profiles", a.createProfile)
+			ops.Patch("/profiles/{id}", a.updateProfile)
+			ops.Put("/profiles/{id}/members", a.setProfileMembers)
+			ops.Delete("/profiles/{id}", a.deleteProfile)
+			ops.Post("/profiles/{id}/preflight", a.preflightProfile)
+			ops.Post("/profiles/{id}/activate", a.activateProfile)
+			ops.Post("/targets/{nodeId}/{runtime}/deactivate", a.deactivateTarget)
 		})
 
 		api.Group(func(admin chi.Router) {
@@ -155,6 +167,14 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message, "requestId": middleware.GetReqID(r.Context())}})
 }
 
+func writeErrorDetails(w http.ResponseWriter, r *http.Request, status int, code, message string, details map[string]any) {
+	payload := map[string]any{"code": code, "message": message, "requestId": middleware.GetReqID(r.Context())}
+	for key, value := range details {
+		payload[key] = value
+	}
+	writeJSON(w, status, map[string]any{"error": payload})
+}
+
 func (a *API) handleStoreError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "not_found", "The requested resource was not found")
@@ -170,6 +190,14 @@ func (a *API) handleStoreError(w http.ResponseWriter, r *http.Request, err error
 	}
 	if errors.Is(err, store.ErrMCPProfileRuntime) {
 		writeError(w, r, http.StatusConflict, "mcp_profile_runtime_mismatch", "The MCP profile does not match the target runtime")
+		return
+	}
+	if errors.Is(err, store.ErrTargetManagedByProfile) {
+		writeError(w, r, http.StatusConflict, "target_managed_by_profile", "Deactivate the ToolHub Profile before changing this target")
+		return
+	}
+	if errors.Is(err, store.ErrToolHubProfileNameTaken) {
+		writeError(w, r, http.StatusConflict, "profile_name_unavailable", "A ToolHub Profile with this name already exists")
 		return
 	}
 	if errors.Is(err, store.ErrStateConflict) {

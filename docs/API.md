@@ -6,10 +6,10 @@ Main namespaces:
 
 - `/api/v1/auth`, `/users`, `/audit`, `/settings`
 - `/api/v1/nodes`, `/skills`, `/sources`, `/deployments`, `/updates`, `/discoveries`, `/shared-sources`, `/sync`, `/reconcile`, `/jobs`
-- `/api/v1/market`, `/recommendations`, `/mcp`
+- `/api/v1/market`, `/recommendations`, `/mcp`, `/profiles`, `/targets`
 - `/agent/v1/enroll`, `/connect`, `/artifacts`, `/secrets`
 
-Errors use `{ "error": { "code", "message", "requestId" } }`. List responses use `{ "items": [...] }`. Agent WSS messages are typed envelopes; task signatures cover ID, kind, and canonical payload.
+Errors use `{ "error": { "code", "message", "requestId" } }`. Profile activation conflicts additionally include `issues`, `skipped`, `nodeName`, and `secretKeys`; the latter contains key names only. List responses use `{ "items": [...] }`. Agent WSS messages are typed envelopes; task signatures cover ID, kind, and canonical payload.
 
 ## Marketplace sources
 
@@ -47,5 +47,15 @@ Errors use `{ "error": { "code", "message", "requestId" } }`. List responses use
 - ToolHub-authoritative MCP servers may contain both `env` and `headers` plaintext only in create/capture requests. Values are encrypted into `mcp-env` or `mcp-header` records; list/detail and task payloads contain references only.
 - Updating or deleting a mirrored shared-file server, or adding it to a ToolHub profile, returns `409 source_file_authoritative`. Import and edit the separate central candidate instead.
 - Header names are validated as HTTP field-name tokens and stored in canonical form. Values are never included in ordinary browser responses, audit metadata, inventory JSON, or logs.
+
+## ToolHub Profiles and runtime targets
+
+- User-defined ToolHub Profiles live at `/profiles`; they are selection sets containing MCP server IDs and Skill IDs. They are distinct from the fixed `toolhub-codex` / `toolhub-claude` delivery channels under `/mcp/profiles`.
+- `POST /profiles/{id}/preflight` validates node/runtime availability, approved members, and the fixed delivery channel without writing desired state. A non-local target receiving MCP credentials returns `409 remote_secret_confirmation_required` with the destination node name and secret key names only.
+- `POST /profiles/{id}/activate` accepts `{nodeId, runtime, confirmSecrets?}`. One Profile owns a `(node, runtime)` target at a time. Activation writes all Skill desired flags and the target-specific MCP hash in one transaction, then a one-attempt `profile_activate` job dispatches existing `deploy_skill` tasks before existing `apply_mcp` tasks. No new Agent task kind or native MCP anchor is introduced.
+- Activation state (`pending`, `active`, `partial`, or `failed`) records orchestration. As with other Jobs, `active` means all tasks were dispatched, not that every Agent result has completed; desired/actual state in `GET /targets/{nodeId}/{runtime}` remains authoritative for drift.
+- Manual Skill target, MCP target, rollback, and fixed MCP membership mutations return `409 target_managed_by_profile` while a target is Profile-owned. `POST /targets/{nodeId}/{runtime}/deactivate` releases ownership but intentionally leaves current desired-state rows unchanged.
+- `GET /targets/{nodeId}/{runtime}` aggregates activation ownership, effective MCP membership, Skill desired/actual state, capability notes, and drift. Hermes/OpenClaw MCP is read-only; Grok explicitly shows the same-node Claude MCP set as inherited read-only state.
+- MCP archive/unarchive uses `POST /mcp/servers/{id}/archive|unarchive`. Archived servers remain persisted with provenance, are hidden by default in the UI, cannot join a Profile, and are excluded from effective delivery. A server referenced by an active ToolHub Profile must be deactivated before archive, restore, enable/disable, or delete, which preserves remote-secret confirmation.
 
 The Agent-only descriptor, capture, and Skill upload contracts are documented in [Agent Protocol](AGENT_PROTOCOL.md).

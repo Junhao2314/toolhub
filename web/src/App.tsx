@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Boxes, Bot, BriefcaseBusiness, ChevronDown, CircleUserRound, KeyRound, LogOut, Menu, Network, Settings, ShieldCheck, Store, Workflow, X } from 'lucide-react'
+import { Boxes, Bot, BriefcaseBusiness, ChevronDown, CircleUserRound, KeyRound, Layers, LogOut, Menu, MonitorCog, Network, Settings, ShieldCheck, Store, Workflow, X } from 'lucide-react'
 import { api, APIError, type Session } from './api/client'
 import { IconButton, Loading } from './components/ui'
 import { LanguageToggle, useI18n } from './i18n'
@@ -13,6 +13,8 @@ import MCP from './pages/MCP'
 import Access from './pages/Access'
 import SettingsPage from './pages/Settings'
 import Account from './pages/Account'
+import Profiles from './pages/Profiles'
+import Targets from './pages/Targets'
 
 const navigation = [
   { path: '/overview', label: 'Overview', icon: BriefcaseBusiness },
@@ -21,6 +23,8 @@ const navigation = [
   { path: '/nodes', label: 'Nodes', icon: Network },
   { path: '/jobs', label: 'Jobs', icon: Workflow },
   { path: '/mcp', label: 'MCP', icon: Bot },
+  { path: '/profiles', label: 'Profiles', icon: Layers },
+  { path: '/targets', label: 'Runtime View', icon: MonitorCog },
   { path: '/account', label: 'Account', icon: CircleUserRound },
   { path: '/access', label: 'Users & Audit', icon: ShieldCheck, admin: true },
   { path: '/settings', label: 'Settings', icon: Settings, admin: true },
@@ -67,6 +71,8 @@ export default function App() {
     : path.startsWith('/nodes') ? <Nodes />
     : path.startsWith('/jobs') ? <Jobs />
     : path.startsWith('/mcp') ? <MCP />
+    : path.startsWith('/profiles') ? <Profiles canOperate={canOperate} />
+    : path.startsWith('/targets') ? <Targets canOperate={canOperate} />
     : path.startsWith('/account') ? <Account user={session.user} signedOut={signedOut} />
     : path.startsWith('/access') && isAdmin ? <Access currentUserID={session.user.id} sessionInvalidated={signedOut} />
     : path.startsWith('/settings') && isAdmin ? <SettingsPage />

@@ -18,8 +18,9 @@ export interface Session {
 }
 
 export class APIError extends Error {
-  constructor(public status: number, public code: string, message: string) {
+  constructor(public status: number, public code: string, message: string, public details: Dict = {}) {
     super(message)
+    this.name = 'APIError'
   }
 }
 
@@ -35,7 +36,7 @@ class ToolHubClient {
     const payload = await response.json().catch(() => ({})) as Dict
     if (!response.ok) {
       const error = (payload.error ?? {}) as Dict
-      throw new APIError(response.status, String(error.code ?? 'request_failed'), String(error.message ?? `HTTP ${response.status}`))
+      throw new APIError(response.status, String(error.code ?? 'request_failed'), String(error.message ?? `HTTP ${response.status}`), error)
     }
     return payload as T
   }
@@ -79,6 +80,22 @@ class ToolHubClient {
   put<T>(path: string, body: unknown): Promise<T> { return this.request(path, { method: 'PUT', body: JSON.stringify(body) }) }
   patch<T>(path: string, body: unknown): Promise<T> { return this.request(path, { method: 'PATCH', body: JSON.stringify(body) }) }
   delete(path: string): Promise<void> { return this.request(path, { method: 'DELETE' }) }
+
+  preflightProfile<T>(profileID: string, nodeId: string, runtime: string): Promise<T> {
+    return this.post(`/profiles/${profileID}/preflight`, { nodeId, runtime })
+  }
+
+  activateProfile<T>(profileID: string, nodeId: string, runtime: string, confirmSecrets = false): Promise<T> {
+    return this.post(`/profiles/${profileID}/activate`, { nodeId, runtime, confirmSecrets })
+  }
+
+  targetView<T>(nodeID: string, runtime: string): Promise<T> {
+    return this.get(`/targets/${nodeID}/${runtime}`)
+  }
+
+  deactivateTarget(nodeID: string, runtime: string): Promise<void> {
+    return this.post(`/targets/${nodeID}/${runtime}/deactivate`)
+  }
 
   async uploadSkill(file: File): Promise<Dict> {
     const form = new FormData()

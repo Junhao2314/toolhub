@@ -129,6 +129,9 @@ func (d *Deployer) enable(target string, request DeployRequest) (DeployResult, e
 		_ = os.RemoveAll(staging)
 		return DeployResult{}, fmt.Errorf("activate deployment: %w", err)
 	}
+	if err := removeDisabledSkillCopies(filepath.Dir(target), request.SkillSlug); err != nil {
+		return DeployResult{}, fmt.Errorf("clean disabled skill copies: %w", err)
+	}
 	return DeployResult{ActualHash: request.SHA256, BackupPath: backup, Changed: true}, nil
 }
 
@@ -170,13 +173,35 @@ func (d *Deployer) disable(target string, request DeployRequest) (DeployResult, 
 	if err := os.MkdirAll(filepath.Dir(disabled), 0700); err != nil {
 		return DeployResult{}, err
 	}
-	if fileExists(disabled) {
-		return DeployResult{}, errors.New("disabled target already exists")
+	// Disabled copies are content-addressed immutable artifacts. Replacing the
+	// same slug/hash copy makes repeated profile switches safely re-entrant.
+	if err := os.RemoveAll(disabled); err != nil {
+		return DeployResult{}, fmt.Errorf("remove previous disabled target: %w", err)
 	}
 	if err := os.Rename(target, disabled); err != nil {
 		return DeployResult{}, err
 	}
 	return DeployResult{ActualHash: request.SHA256, BackupPath: disabled, Changed: true}, nil
+}
+
+func removeDisabledSkillCopies(skillsRoot, slug string) error {
+	disabledRoot := filepath.Join(skillsRoot, ".toolhub-disabled")
+	entries, err := os.ReadDir(disabledRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	prefix := slug + "-"
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			if err := os.RemoveAll(filepath.Join(disabledRoot, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func extractCache(archive []byte, destination string) error {

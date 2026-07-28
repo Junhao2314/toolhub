@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -137,6 +138,15 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerP
 	if authority == "shared-file" {
 		return ErrSourceFileAuthoritative
 	}
+	if patch.Enabled != nil && *patch.Enabled != enabled {
+		managed, err := mcpServerInActiveToolHubProfileTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if managed {
+			return ErrTargetManagedByProfile
+		}
+	}
 	var args []string
 	var refs map[string]string
 	var headerRefs map[string]string
@@ -199,6 +209,13 @@ func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
 	} else if authority == "shared-file" {
 		return ErrSourceFileAuthoritative
 	}
+	managed, err := mcpServerInActiveToolHubProfileTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return ErrTargetManagedByProfile
+	}
 	profileIDs, err := profileIDsForServer(ctx, tx, id)
 	if err != nil {
 		return err
@@ -217,6 +234,82 @@ func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// SetMCPServerArchived hides or restores an MCP server without deleting its
+// provenance. Active ToolHub Profiles must be deactivated first so a restore
+// cannot add remote secrets without a fresh activation preflight.
+func (s *Store) SetMCPServerArchived(ctx context.Context, id string, archived bool) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var currentlyArchived bool
+	if err := tx.QueryRow(ctx, "SELECT archived_at IS NOT NULL FROM mcp_servers WHERE id=$1 FOR UPDATE", id).Scan(&currentlyArchived); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if currentlyArchived == archived {
+		return tx.Commit(ctx)
+	}
+	managed, err := mcpServerInActiveToolHubProfileTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return ErrTargetManagedByProfile
+	}
+	profileIDs, err := profileIDsForServer(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	type deployment struct {
+		id, nodeID, runtime, profileID string
+		enabled                        bool
+	}
+	deployments := []deployment{}
+	if len(profileIDs) > 0 {
+		rows, err := tx.Query(ctx, `SELECT id::text,node_id::text,runtime_kind,profile_id::text,desired_enabled
+			FROM mcp_deployments WHERE profile_id=ANY($1::uuid[]) FOR UPDATE`, profileIDs)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var item deployment
+			if err := rows.Scan(&item.id, &item.nodeID, &item.runtime, &item.profileID, &item.enabled); err != nil {
+				rows.Close()
+				return err
+			}
+			deployments = append(deployments, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	if _, err := tx.Exec(ctx, `UPDATE mcp_servers SET archived_at=CASE WHEN $2 THEN now() ELSE NULL END,updated_at=now() WHERE id=$1`, id, archived); err != nil {
+		return err
+	}
+	if err := refreshProfileDeployments(ctx, tx, profileIDs); err != nil {
+		return err
+	}
+	for _, item := range deployments {
+		if err := s.upsertMCPDeploymentBindingsTx(ctx, tx, item.nodeID, item.runtime, item.profileID, item.id, item.enabled); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func mcpServerInActiveToolHubProfileTx(ctx context.Context, tx pgx.Tx, serverID string) (bool, error) {
+	var active bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM toolhub_profile_mcp_servers members
+		JOIN toolhub_profile_activations activations ON activations.profile_id=members.profile_id
+		WHERE members.server_id=$1)`, serverID).Scan(&active)
+	return active, err
 }
 
 func (s *Store) CreateMCPProfile(ctx context.Context, name, description, actor string, serverIDs []string) (string, error) {
@@ -261,6 +354,15 @@ func (s *Store) SetMCPProfileServers(ctx context.Context, profileID string, serv
 	managedRuntime, err := managedMCPProfileRuntimeTx(ctx, tx, profileID, true)
 	if err != nil {
 		return err
+	}
+	var managedTarget bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcp_deployments d
+		JOIN toolhub_profile_activations a ON a.node_id=d.node_id AND a.runtime_kind=d.runtime_kind
+		WHERE d.profile_id=$1)`, profileID).Scan(&managedTarget); err != nil {
+		return err
+	}
+	if managedTarget {
+		return ErrTargetManagedByProfile
 	}
 	unique := make([]string, 0, len(serverIDs))
 	seen := make(map[string]struct{}, len(serverIDs))
@@ -346,10 +448,6 @@ func (s *Store) SetMCPDeployments(ctx context.Context, profileID, actor string, 
 	if err != nil {
 		return domain.Job{}, err
 	}
-	desiredHash, err := profileHashTx(ctx, tx, profileID)
-	if err != nil {
-		return domain.Job{}, err
-	}
 	deploymentIDs := make([]string, 0, len(targets))
 	nodeIDs := make([]string, 0, len(targets))
 	for _, target := range targets {
@@ -359,24 +457,17 @@ func (s *Store) SetMCPDeployments(ctx context.Context, profileID, actor string, 
 		if target.Runtime != managedRuntime {
 			return domain.Job{}, ErrMCPProfileRuntime
 		}
-		var deploymentID string
-		err := tx.QueryRow(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,desired_hash,desired_generation,state)
-			VALUES($1,$2,$3,$4,$5,$6,1,'pending') ON CONFLICT(profile_id,node_id,runtime_kind)
-			DO UPDATE SET
-				desired_enabled=excluded.desired_enabled,
-				desired_hash=excluded.desired_hash,
-				desired_generation=CASE WHEN mcp_deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled OR mcp_deployments.desired_hash IS DISTINCT FROM excluded.desired_hash OR mcp_deployments.state='observed' THEN mcp_deployments.desired_generation + 1 ELSE mcp_deployments.desired_generation END,
-				state=CASE WHEN mcp_deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled OR mcp_deployments.desired_hash IS DISTINCT FROM excluded.desired_hash OR mcp_deployments.state='observed' THEN 'pending' ELSE mcp_deployments.state END,
-				updated_at=now()
-			RETURNING id::text`, uuid.NewString(), profileID, target.NodeID, target.Runtime, target.Enabled, desiredHash).Scan(&deploymentID)
+		if managed, err := targetManagedByProfileTx(ctx, tx, target.NodeID, target.Runtime); err != nil {
+			return domain.Job{}, err
+		} else if managed {
+			return domain.Job{}, ErrTargetManagedByProfile
+		}
+		deploymentID, err := s.upsertManagedMCPDeploymentTx(ctx, tx, profileID, target.NodeID, target.Runtime, target.Enabled)
 		if err != nil {
 			return domain.Job{}, err
 		}
 		deploymentIDs = append(deploymentIDs, deploymentID)
 		nodeIDs = append(nodeIDs, target.NodeID)
-		if err := s.upsertMCPDeploymentBindingsTx(ctx, tx, target.NodeID, target.Runtime, profileID, deploymentID, target.Enabled); err != nil {
-			return domain.Job{}, err
-		}
 	}
 	job, err := s.enqueueJobTx(ctx, tx, "mcp_sync", map[string]any{"nodeIds": nodeIDs, "profileIds": []string{profileID}, "deploymentIds": deploymentIDs, "manual": true}, dryRun, actor)
 	if err != nil {
@@ -385,16 +476,44 @@ func (s *Store) SetMCPDeployments(ctx context.Context, profileID, actor string, 
 	return job, tx.Commit(ctx)
 }
 
+func (s *Store) upsertManagedMCPDeploymentTx(ctx context.Context, tx pgx.Tx, profileID, nodeID, runtimeKind string, enabled bool) (string, error) {
+	desiredHash, err := deploymentProfileHashTx(ctx, tx, nodeID, runtimeKind, profileID)
+	if err != nil {
+		return "", err
+	}
+	var deploymentID string
+	err = tx.QueryRow(ctx, `INSERT INTO mcp_deployments(id,profile_id,node_id,runtime_kind,desired_enabled,desired_hash,desired_generation,state)
+		VALUES($1,$2,$3,$4,$5,$6,1,'pending') ON CONFLICT(profile_id,node_id,runtime_kind)
+		DO UPDATE SET
+			desired_enabled=excluded.desired_enabled,
+			desired_hash=excluded.desired_hash,
+			desired_generation=CASE WHEN mcp_deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled OR mcp_deployments.desired_hash IS DISTINCT FROM excluded.desired_hash OR mcp_deployments.state='observed' THEN mcp_deployments.desired_generation + 1 ELSE mcp_deployments.desired_generation END,
+			state=CASE WHEN mcp_deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled OR mcp_deployments.desired_hash IS DISTINCT FROM excluded.desired_hash OR mcp_deployments.state='observed' THEN 'pending' ELSE mcp_deployments.state END,
+			updated_at=now()
+		RETURNING id::text`, uuid.NewString(), profileID, nodeID, runtimeKind, enabled, desiredHash).Scan(&deploymentID)
+	if err != nil {
+		return "", err
+	}
+	if err := s.upsertMCPDeploymentBindingsTx(ctx, tx, nodeID, runtimeKind, profileID, deploymentID, enabled); err != nil {
+		return "", err
+	}
+	return deploymentID, nil
+}
+
 func (s *Store) upsertMCPDeploymentBindingsTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind, profileID, deploymentID string, deploymentEnabled bool) error {
+	serverIDs, err := effectiveMCPServerIDsTx(ctx, tx, nodeID, runtimeKind, profileID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET desired_enabled=false,
 		drift=CASE WHEN missing THEN false ELSE true END,updated_at=now()
 		WHERE node_id=$1 AND runtime_kind=$2 AND profile_id=$3
-		AND NOT EXISTS (SELECT 1 FROM mcp_profile_servers ps WHERE ps.profile_id=$3 AND ps.server_id=mcp_runtime_bindings.server_id)`, nodeID, runtimeKind, profileID); err != nil {
+		AND NOT (server_id=ANY($4::uuid[]))`, nodeID, runtimeKind, profileID, serverIDs); err != nil {
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT s.id::text,s.runtime_name,s.config_fingerprint,s.env_refs,s.header_refs,s.enabled
-		FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id
-		WHERE ps.profile_id=$1 AND s.authority='toolhub' ORDER BY s.runtime_name,s.id`, profileID)
+		FROM mcp_servers s WHERE s.id=ANY($1::uuid[]) AND s.enabled AND s.authority='toolhub' AND s.archived_at IS NULL
+		ORDER BY s.runtime_name,s.id`, serverIDs)
 	if err != nil {
 		return err
 	}
@@ -486,28 +605,45 @@ func (s *Store) mcpSecretFingerprintTx(ctx context.Context, tx pgx.Tx, key []byt
 }
 
 func (s *Store) MCPDeploymentPayload(ctx context.Context, deploymentID string) (string, protocol.ApplyMCPPayload, error) {
-	var nodeID string
-	var payload protocol.ApplyMCPPayload
-	var raw []byte
-	err := s.pool.QueryRow(ctx, `SELECT d.node_id::text,d.runtime_kind,d.desired_generation,d.desired_hash,d.desired_enabled,p.id::text,p.name,
-		CASE WHEN d.desired_enabled THEN coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (
-			SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",s.header_refs AS "headerRefs",ps.overrides
-			FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id
-			WHERE ps.profile_id=p.id AND s.enabled AND s.authority='toolhub' ORDER BY s.runtime_name,s.id
-		) x),'[]'::jsonb) ELSE '[]'::jsonb END
-		FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id
-		WHERE d.id=$1 AND d.runtime_kind IN ('codex','claude') AND p.source='toolhub'
-		AND p.name='toolhub-'||d.runtime_kind AND p.origin->>'managedRuntime'=d.runtime_kind`,
-		deploymentID).Scan(&nodeID, &payload.Runtime, &payload.DesiredGeneration, &payload.DesiredHash, &payload.Enabled, &payload.ProfileID, &payload.ProfileName, &raw)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return "", protocol.ApplyMCPPayload{}, err
 	}
-	if err := json.Unmarshal(raw, &payload.Servers); err != nil {
+	defer func() { _ = tx.Rollback(ctx) }()
+	var nodeID string
+	var payload protocol.ApplyMCPPayload
+	err = tx.QueryRow(ctx, `SELECT d.node_id::text,d.runtime_kind,d.desired_generation,d.desired_hash,d.desired_enabled,p.id::text,p.name
+		FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id
+		WHERE d.id=$1 AND d.runtime_kind IN ('codex','claude') AND p.source='toolhub'
+		AND p.name='toolhub-'||d.runtime_kind AND p.origin->>'managedRuntime'=d.runtime_kind`,
+		deploymentID).Scan(&nodeID, &payload.Runtime, &payload.DesiredGeneration, &payload.DesiredHash, &payload.Enabled, &payload.ProfileID, &payload.ProfileName)
+	if err != nil {
 		return "", protocol.ApplyMCPPayload{}, err
+	}
+	payload.Servers = []protocol.MCPServerRef{}
+	if payload.Enabled {
+		serverIDs, err := effectiveMCPServerIDsTx(ctx, tx, nodeID, payload.Runtime, payload.ProfileID)
+		if err != nil {
+			return "", protocol.ApplyMCPPayload{}, err
+		}
+		if len(serverIDs) > 0 {
+			var raw []byte
+			if err := tx.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(x)),'[]'::jsonb) FROM (
+				SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,
+				s.env_refs AS "envRefs",s.header_refs AS "headerRefs",coalesce(ps.overrides,'{}'::jsonb) AS overrides
+				FROM mcp_servers s LEFT JOIN mcp_profile_servers ps ON ps.profile_id=$1 AND ps.server_id=s.id
+				WHERE s.id=ANY($2::uuid[]) AND s.enabled AND s.authority='toolhub' AND s.archived_at IS NULL
+				ORDER BY s.runtime_name,s.id) x`, payload.ProfileID, serverIDs).Scan(&raw); err != nil {
+				return "", protocol.ApplyMCPPayload{}, err
+			}
+			if err := json.Unmarshal(raw, &payload.Servers); err != nil {
+				return "", protocol.ApplyMCPPayload{}, err
+			}
+		}
 	}
 	payload.DeploymentID = deploymentID
 	payload.MCPMProfile = "toolhub-" + payload.Runtime
-	return nodeID, payload, nil
+	return nodeID, payload, tx.Commit(ctx)
 }
 
 func managedMCPProfileRuntimeTx(ctx context.Context, tx pgx.Tx, profileID string, lock bool) (string, error) {
@@ -529,7 +665,12 @@ func managedMCPProfileRuntimeTx(ctx context.Context, tx pgx.Tx, profileID string
 }
 
 func profileIDsForServer(ctx context.Context, tx pgx.Tx, serverID string) ([]string, error) {
-	rows, err := tx.Query(ctx, "SELECT profile_id::text FROM mcp_profile_servers WHERE server_id=$1", serverID)
+	rows, err := tx.Query(ctx, `SELECT profile_id::text FROM mcp_profile_servers WHERE server_id=$1
+		UNION SELECT mp.id::text FROM toolhub_profile_mcp_servers tpm
+		JOIN toolhub_profile_activations a ON a.profile_id=tpm.profile_id AND a.state IN ('pending','active','partial')
+		JOIN mcp_profiles mp ON mp.source='toolhub' AND mp.name='toolhub-'||a.runtime_kind
+			AND mp.origin->>'managedRuntime'=a.runtime_kind
+		WHERE tpm.server_id=$1`, serverID)
 	if err != nil {
 		return nil, err
 	}
@@ -547,19 +688,107 @@ func profileIDsForServer(ctx context.Context, tx pgx.Tx, serverID string) ([]str
 
 func refreshProfileDeployments(ctx context.Context, tx pgx.Tx, profileIDs []string) error {
 	for _, profileID := range profileIDs {
-		desiredHash, err := profileHashTx(ctx, tx, profileID)
+		rows, err := tx.Query(ctx, `SELECT id::text,node_id::text,runtime_kind FROM mcp_deployments
+			WHERE profile_id=$1 FOR UPDATE`, profileID)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE mcp_deployments SET
-			desired_hash=$2,
-			desired_generation=CASE WHEN desired_hash IS DISTINCT FROM $2 THEN desired_generation + 1 ELSE desired_generation END,
-			state=CASE WHEN desired_hash IS DISTINCT FROM $2 AND state<>'observed' THEN 'pending' ELSE state END,
-			updated_at=now() WHERE profile_id=$1`, profileID, desiredHash); err != nil {
+		type deployment struct{ id, nodeID, runtime string }
+		var deployments []deployment
+		for rows.Next() {
+			var item deployment
+			if err := rows.Scan(&item.id, &item.nodeID, &item.runtime); err != nil {
+				rows.Close()
+				return err
+			}
+			deployments = append(deployments, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
 			return err
+		}
+		rows.Close()
+		for _, item := range deployments {
+			desiredHash, err := deploymentProfileHashTx(ctx, tx, item.nodeID, item.runtime, profileID)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE mcp_deployments SET desired_hash=$2,
+				desired_generation=CASE WHEN desired_hash IS DISTINCT FROM $2 THEN desired_generation + 1 ELSE desired_generation END,
+				state=CASE WHEN desired_hash IS DISTINCT FROM $2 AND state<>'observed' THEN 'pending' ELSE state END,
+				updated_at=now() WHERE id=$1`, item.id, desiredHash); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// effectiveMCPServerIDsTx resolves the server set delivered to one target. A
+// target activation wins; without one, the fixed channel's membership is used.
+func effectiveMCPServerIDsTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind, fixedProfileID string) ([]string, error) {
+	serverIDs, _, err := resolveEffectiveMCPServerIDsTx(ctx, tx, nodeID, runtimeKind, fixedProfileID)
+	return serverIDs, err
+}
+
+func resolveEffectiveMCPServerIDsTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind, fixedProfileID string) ([]string, bool, error) {
+	var activeProfileID string
+	err := tx.QueryRow(ctx, `SELECT a.profile_id::text FROM toolhub_profile_activations a
+		JOIN mcp_profiles p ON p.id=$3 AND p.enabled AND p.source='toolhub'
+			AND p.name='toolhub-'||$2 AND p.origin->>'managedRuntime'=$2
+		WHERE a.node_id=$1 AND a.runtime_kind=$2 AND a.state IN ('pending','active','partial')`,
+		nodeID, runtimeKind, fixedProfileID).Scan(&activeProfileID)
+	activated := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, err
+	}
+	query := `SELECT s.id::text FROM mcp_profile_servers members JOIN mcp_servers s ON s.id=members.server_id
+		WHERE members.profile_id=$1 AND s.enabled AND s.authority='toolhub' AND s.archived_at IS NULL
+		ORDER BY s.runtime_name,s.id`
+	profileID := fixedProfileID
+	if activated {
+		query = `SELECT s.id::text FROM toolhub_profile_mcp_servers members JOIN mcp_servers s ON s.id=members.server_id
+			WHERE members.profile_id=$1 AND s.enabled AND s.authority='toolhub' AND s.archived_at IS NULL
+			ORDER BY s.runtime_name,s.id`
+		profileID = activeProfileID
+	}
+	rows, err := tx.Query(ctx, query, profileID)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	serverIDs := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, false, err
+		}
+		serverIDs = append(serverIDs, id)
+	}
+	return serverIDs, activated, rows.Err()
+}
+
+func deploymentProfileHashTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind, fixedProfileID string) (string, error) {
+	serverIDs, activated, err := resolveEffectiveMCPServerIDsTx(ctx, tx, nodeID, runtimeKind, fixedProfileID)
+	if err != nil {
+		return "", err
+	}
+	if !activated {
+		return profileHashTx(ctx, tx, fixedProfileID)
+	}
+	var profile []byte
+	err = tx.QueryRow(ctx, `SELECT to_jsonb(q) FROM (SELECT p.id::text AS id,p.name,p.description,
+		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (
+			SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,
+			s.env_refs AS "envRefs",s.header_refs AS "headerRefs",coalesce(ps.overrides,'{}'::jsonb) AS overrides
+			FROM mcp_servers s LEFT JOIN mcp_profile_servers ps ON ps.profile_id=p.id AND ps.server_id=s.id
+			WHERE s.id=ANY($2::uuid[]) AND s.enabled AND s.authority='toolhub' AND s.archived_at IS NULL
+			ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) AS servers
+		FROM mcp_profiles p WHERE p.id=$1 AND p.enabled) q`, fixedProfileID, serverIDs).Scan(&profile)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(security.TokenHash(string(profile))), nil
 }
 
 func sortedKeys(values map[string]string) []string {

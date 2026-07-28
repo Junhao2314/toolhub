@@ -9,6 +9,7 @@ Licensed under the [MIT License](LICENSE).
 - Agent-first WSS enrollment, heartbeat, inventory, signed typed tasks, offline queues, retry, cancellation, and pinned SSH/SFTP fallback.
 - Six-hour read-only discovery for Codex, Claude, and Hermes homes, including symlink/protected-Skill reporting, explicit Skill adoption/import, and observed MCP baselines that require fixed-profile deployment.
 - Immutable Skill artifacts with canonical SHA-256, source commit, provenance, ZIP/Git path safety, review, target matrix, update approval, sync, and per-node rollback.
+- ToolHub Profiles combine Skills and MCP servers into reusable selections, with preflighted per-node/runtime activation and an effective Runtime View for drift inspection.
 - Multi-source SkillsMP/Xiaping marketplace search with normalized provenance, partial-failure isolation, fixed-commit Git import, and reviewed one-shot Xiaping ZIP intake; OpenAI-compatible structured recommendations never install automatically.
 - MCP server/profile/deployment management with automatic first-seen baselines, encrypted one-time secret capture, drift detection, native `mcpm` preference, structured fallback patches, and atomic backups.
 - HttpOnly server-side sessions, Argon2id, CSRF rotation, Admin/Operator/Viewer RBAC, encrypted secrets, redaction, and audit events.

@@ -49,7 +49,8 @@ Use these project skills when their trigger matches:
 - Imported Skill artifacts are immutable and identified by source commit, canonical SHA-256, provenance, manifest, and scan report.
 - Agent tasks use a closed typed protocol and HMAC signatures over canonical JSON (`TaskSigningBytes` in package `internal/protocol` plus `SignPayload` in package `internal/security`). Do not add arbitrary shell execution.
 - Agent task kinds accepted by the agent `Executor` are only: `scan_inventory`, `deploy_skill`, `apply_mcp`, `adopt_skill`.
-- Worker job kinds in `internal/worker/worker.go` are: `inventory_scan`, `skill_import`, `skill_adopt`, `update_check`, `sync`, `rollback` (same handler as sync), `mcp_sync`, `mcp_health` (currently a no-op stub), `archive_purge`.
+- Worker job kinds in `internal/worker/worker.go` are: `inventory_scan`, `skill_import`, `skill_adopt`, `update_check`, `sync`, `rollback` (same handler as sync), `mcp_sync`, `profile_activate`, `mcp_health` (currently a no-op stub), `archive_purge`.
+- When a ToolHub Profile activation exists for a `(node, runtime)`, that Profile exclusively owns its Skill and MCP desired state. Manual target and fixed-profile membership mutations must reject the managed target until the activation is deactivated.
 - Existing Skills are read-only during inventory and require explicit administrator adoption before ToolHub writes its marker. Existing MCP configuration is automatically captured and baselined without a first-run rewrite; later local changes are drift.
 - Secrets are encrypted at rest, referenced by ID, and must not be returned in ordinary browser API responses or logs. The intentional plaintext exception is the authorized `/agent/v1/secrets/{secretID}` response for an enabled MCP deployment on that node.
 - The control plane binds to loopback by default; Tailscale Serve/ACL is external infrastructure. Do not expose the container port publicly.

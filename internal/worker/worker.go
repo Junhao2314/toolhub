@@ -27,8 +27,9 @@ type Worker struct {
 }
 
 const (
-	jobLeaseDuration = 60 * time.Second
-	jobLeaseRenewal  = 20 * time.Second
+	jobLeaseDuration              = 60 * time.Second
+	jobLeaseRenewal               = 20 * time.Second
+	activationStatePersistTimeout = 5 * time.Second
 )
 
 func New(st *store.Store, hub *agenthub.Hub, ssh *remote.Executor, marketClient *market.Multi, logger *slog.Logger, instanceID string) *Worker {
@@ -126,6 +127,8 @@ func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
 		return w.syncSkills(ctx, job)
 	case "mcp_sync":
 		return w.syncMCP(ctx, job)
+	case "profile_activate":
+		return w.activateProfile(ctx, job)
 	case "mcp_health":
 		return map[string]any{"status": "queued_on_next_reconcile"}, nil
 	case "archive_purge":
@@ -273,39 +276,68 @@ func (w *Worker) checkUpdates(ctx context.Context, job domain.Job) (any, error) 
 }
 
 func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
-	var selectors struct {
-		NodeIDs       []string `json:"nodeIds"`
-		SkillIDs      []string `json:"skillIds"`
-		DeploymentIDs []string `json:"deploymentIds"`
-		ScopeType     string   `json:"scopeType"`
-		ScopeID       string   `json:"scopeId"`
-	}
+	var selectors skillDispatchSelectors
 	_ = json.Unmarshal(job.Payload, &selectors)
 	if selectors.ScopeType == "skill" && selectors.ScopeID != "" {
 		selectors.SkillIDs = append(selectors.SkillIDs, selectors.ScopeID)
 	}
+	summary, err := w.dispatchSkillDeployments(ctx, selectors, job.DryRun, job.ID)
+	return summary.asMap(job.DryRun), err
+}
+
+type skillDispatchSelectors struct {
+	NodeIDs       []string `json:"nodeIds"`
+	SkillIDs      []string `json:"skillIds"`
+	DeploymentIDs []string `json:"deploymentIds"`
+	Runtime       string   `json:"runtime"`
+	ScopeType     string   `json:"scopeType"`
+	ScopeID       string   `json:"scopeId"`
+}
+
+type mcpDispatchSelectors struct {
+	NodeIDs       []string `json:"nodeIds"`
+	ProfileIDs    []string `json:"profileIds"`
+	DeploymentIDs []string `json:"deploymentIds"`
+	ScopeType     string   `json:"scopeType"`
+	ScopeID       string   `json:"scopeId"`
+}
+
+type dispatchSummary struct {
+	Queued    int `json:"queued"`
+	Delivered int `json:"delivered"`
+	Skipped   int `json:"skipped"`
+}
+
+func (s dispatchSummary) pendingOffline() int { return s.Queued - s.Delivered }
+
+func (s dispatchSummary) asMap(dryRun bool) map[string]any {
+	return map[string]any{"queued": s.Queued, "delivered": s.Delivered, "pendingOffline": s.pendingOffline(), "skipped": s.Skipped, "dryRun": dryRun}
+}
+
+func (w *Worker) dispatchSkillDeployments(ctx context.Context, selectors skillDispatchSelectors, dryRun bool, jobID string) (dispatchSummary, error) {
 	nodes := makeSet(selectors.NodeIDs)
 	skillsSet := makeSet(selectors.SkillIDs)
 	deploymentIDs := makeSet(selectors.DeploymentIDs)
 	deployments, err := w.store.PendingSkillDeployments(ctx)
 	if err != nil {
-		return nil, err
+		return dispatchSummary{}, err
 	}
-	queued, delivered, skipped := 0, 0, 0
+	summary := dispatchSummary{}
 	for _, deployment := range deployments {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return summary, err
 		}
-		if (len(nodes) > 0 && !nodes[deployment.NodeID]) || (len(skillsSet) > 0 && !skillsSet[deployment.SkillID]) || (len(deploymentIDs) > 0 && !deploymentIDs[deployment.DeploymentID]) {
-			skipped++
+		if (len(nodes) > 0 && !nodes[deployment.NodeID]) || (len(skillsSet) > 0 && !skillsSet[deployment.SkillID]) ||
+			(len(deploymentIDs) > 0 && !deploymentIDs[deployment.DeploymentID]) || (selectors.Runtime != "" && selectors.Runtime != deployment.Runtime) {
+			summary.Skipped++
 			continue
 		}
 		if selectors.ScopeType == "source" && selectors.ScopeID != deployment.SourceID {
-			skipped++
+			summary.Skipped++
 			continue
 		}
 		if selectors.ScopeType == "node_group" && selectors.ScopeID != deployment.NodeGroup {
-			skipped++
+			summary.Skipped++
 			continue
 		}
 		payload := protocol.DeploySkillPayload{
@@ -317,75 +349,147 @@ func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
 			SHA256:            deployment.SHA256,
 			Enabled:           deployment.Enabled,
 		}
-		if job.DryRun {
-			queued++
+		if dryRun {
+			summary.Queued++
 			continue
 		}
-		task, err := w.store.CreateNodeTaskWithOptions(ctx, deployment.NodeID, job.ID, "deploy_skill", payload, store.NodeTaskOptions{
+		task, err := w.store.CreateNodeTaskWithOptions(ctx, deployment.NodeID, jobID, "deploy_skill", payload, store.NodeTaskOptions{
 			TargetKind:       "skill_deployment",
 			TargetID:         deployment.DeploymentID,
 			TargetGeneration: deployment.DesiredGeneration,
 			SemanticKey:      fmt.Sprintf("deploy_skill:%s:%d:%s:%t", deployment.DeploymentID, deployment.DesiredGeneration, deployment.VersionID, deployment.Enabled),
 		})
 		if err != nil {
-			return nil, err
+			return summary, err
 		}
-		queued++
+		summary.Queued++
 		if w.deliver(ctx, deployment.NodeID, task) {
-			delivered++
+			summary.Delivered++
 		}
 	}
-	return map[string]any{"queued": queued, "delivered": delivered, "pendingOffline": queued - delivered, "skipped": skipped, "dryRun": job.DryRun}, nil
+	return summary, nil
 }
 
 func (w *Worker) syncMCP(ctx context.Context, job domain.Job) (any, error) {
-	var selectors struct {
-		NodeIDs       []string `json:"nodeIds"`
-		ProfileIDs    []string `json:"profileIds"`
-		DeploymentIDs []string `json:"deploymentIds"`
-		ScopeType     string   `json:"scopeType"`
-		ScopeID       string   `json:"scopeId"`
-	}
+	var selectors mcpDispatchSelectors
 	_ = json.Unmarshal(job.Payload, &selectors)
+	summary, err := w.dispatchMCPDeployments(ctx, selectors, job.DryRun, job.ID)
+	return summary.asMap(job.DryRun), err
+}
+
+func (w *Worker) dispatchMCPDeployments(ctx context.Context, selectors mcpDispatchSelectors, dryRun bool, jobID string) (dispatchSummary, error) {
 	nodes := makeSet(selectors.NodeIDs)
 	profiles := makeSet(selectors.ProfileIDs)
 	deploymentIDs := makeSet(selectors.DeploymentIDs)
 	deployments, err := w.store.PendingMCPDeployments(ctx)
 	if err != nil {
-		return nil, err
+		return dispatchSummary{}, err
 	}
-	queued, delivered, skipped := 0, 0, 0
+	summary := dispatchSummary{}
 	for _, deployment := range deployments {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return summary, err
 		}
 		if !matchesMCPSelectors(deployment, nodes, profiles, deploymentIDs, selectors.ScopeType, selectors.ScopeID) {
-			skipped++
+			summary.Skipped++
 			continue
 		}
 		nodeID, payload, err := w.store.MCPDeploymentPayload(ctx, deployment.DeploymentID)
 		if err != nil {
-			return nil, err
+			return summary, err
 		}
-		if job.DryRun {
-			queued++
+		if dryRun {
+			summary.Queued++
 			continue
 		}
-		task, err := w.store.CreateNodeTaskWithOptions(ctx, nodeID, job.ID, "apply_mcp", payload, store.NodeTaskOptions{
+		task, err := w.store.CreateNodeTaskWithOptions(ctx, nodeID, jobID, "apply_mcp", payload, store.NodeTaskOptions{
 			TargetKind:       "mcp_deployment",
 			TargetID:         payload.DeploymentID,
 			TargetGeneration: payload.DesiredGeneration,
 			SemanticKey:      fmt.Sprintf("apply_mcp:%s:%d:%s:%t", payload.DeploymentID, payload.DesiredGeneration, payload.DesiredHash, payload.Enabled),
 		})
 		if err != nil {
-			return nil, err
+			return summary, err
 		}
-		queued++
+		summary.Queued++
 		if w.deliver(ctx, nodeID, task) {
-			delivered++
+			summary.Delivered++
 		}
 	}
-	return map[string]any{"queued": queued, "delivered": delivered, "pendingOffline": queued - delivered, "skipped": skipped, "dryRun": job.DryRun}, nil
+	return summary, nil
+}
+
+func (w *Worker) activateProfile(ctx context.Context, job domain.Job) (any, error) {
+	var input struct {
+		ActivationID       string   `json:"activationId"`
+		NodeIDs            []string `json:"nodeIds"`
+		Runtime            string   `json:"runtime"`
+		SkillIDs           []string `json:"skillIds"`
+		SkillDeploymentIDs []string `json:"skillDeploymentIds"`
+		ProfileIDs         []string `json:"profileIds"`
+		MCPDeploymentIDs   []string `json:"mcpDeploymentIds"`
+	}
+	if err := json.Unmarshal(job.Payload, &input); err != nil || input.ActivationID == "" || len(input.NodeIDs) != 1 || input.Runtime == "" {
+		return nil, errors.New("profile activation requires activationId, one nodeId, and runtime")
+	}
+	result := map[string]any{"activationId": input.ActivationID}
+	skillsSummary, err := w.dispatchSkillDeployments(ctx, skillDispatchSelectors{
+		NodeIDs: input.NodeIDs, SkillIDs: input.SkillIDs, DeploymentIDs: input.SkillDeploymentIDs, Runtime: input.Runtime,
+	}, false, job.ID)
+	result["skills"] = skillsSummary.asMap(false)
+	if err != nil {
+		state := "failed"
+		if skillsSummary.Queued > 0 {
+			state = "partial"
+		}
+		result["state"] = state
+		if stateErr := w.persistProfileActivationState(ctx, input.ActivationID, state, err.Error()); stateErr != nil {
+			return result, errors.Join(err, fmt.Errorf("persist profile activation state: %w", stateErr))
+		}
+		return result, err
+	}
+	if skillsSummary.pendingOffline() > 0 {
+		message := fmt.Sprintf("%d Skill task(s) pending while the node is offline", skillsSummary.pendingOffline())
+		if err := w.persistProfileActivationState(ctx, input.ActivationID, "partial", message); err != nil {
+			return result, err
+		}
+		result["state"] = "partial"
+		return result, nil
+	}
+
+	mcpSummary := dispatchSummary{}
+	if len(input.ProfileIDs) > 0 || len(input.MCPDeploymentIDs) > 0 {
+		mcpSummary, err = w.dispatchMCPDeployments(ctx, mcpDispatchSelectors{
+			NodeIDs: input.NodeIDs, ProfileIDs: input.ProfileIDs, DeploymentIDs: input.MCPDeploymentIDs,
+		}, false, job.ID)
+		result["mcp"] = mcpSummary.asMap(false)
+		if err != nil {
+			result["state"] = "partial"
+			if stateErr := w.persistProfileActivationState(ctx, input.ActivationID, "partial", err.Error()); stateErr != nil {
+				return result, errors.Join(err, fmt.Errorf("persist profile activation state: %w", stateErr))
+			}
+			return result, err
+		}
+		if mcpSummary.pendingOffline() > 0 {
+			message := fmt.Sprintf("%d MCP task(s) pending while the node is offline", mcpSummary.pendingOffline())
+			if err := w.persistProfileActivationState(ctx, input.ActivationID, "partial", message); err != nil {
+				return result, err
+			}
+			result["state"] = "partial"
+			return result, nil
+		}
+	}
+	if err := w.persistProfileActivationState(ctx, input.ActivationID, "active", ""); err != nil {
+		return result, err
+	}
+	result["state"] = "active"
+	return result, nil
+}
+
+func (w *Worker) persistProfileActivationState(ctx context.Context, activationID, state, lastError string) error {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activationStatePersistTimeout)
+	defer cancel()
+	return w.store.SetProfileActivationState(persistCtx, activationID, state, lastError)
 }
 
 func matchesMCPSelectors(deployment store.MCPDeploymentRef, nodes, profiles, deploymentIDs map[string]bool, scopeType, scopeID string) bool {

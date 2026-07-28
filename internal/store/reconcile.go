@@ -24,7 +24,9 @@ func (s *Store) PendingSkillDeployments(ctx context.Context) ([]SkillDeploymentT
 		FROM deployments d JOIN skills s ON s.id=d.skill_id JOIN skill_versions v ON v.id=d.desired_version_id
 		JOIN nodes n ON n.id=d.node_id
 		WHERE d.state IN ('pending','drift','failed','rolling_back') AND d.runtime_kind<>'shared'
-		AND v.approved_at IS NOT NULL AND n.archived_at IS NULL`)
+		AND v.approved_at IS NOT NULL AND n.archived_at IS NULL
+		AND NOT EXISTS (SELECT 1 FROM toolhub_profile_activations a WHERE a.node_id=d.node_id
+			AND a.runtime_kind=d.runtime_kind AND a.state='failed')`)
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +74,8 @@ func (s *Store) PendingMCPDeployments(ctx context.Context) ([]MCPDeploymentRef, 
 		FROM mcp_deployments d JOIN nodes n ON n.id=d.node_id JOIN mcp_profiles p ON p.id=d.profile_id
 		WHERE d.state IN ('pending','drift','failed') AND d.runtime_kind IN ('codex','claude') AND n.archived_at IS NULL
 		AND p.source='toolhub' AND p.name='toolhub-'||d.runtime_kind AND p.origin->>'managedRuntime'=d.runtime_kind
+		AND NOT EXISTS (SELECT 1 FROM toolhub_profile_activations a WHERE a.node_id=d.node_id
+			AND a.runtime_kind=d.runtime_kind AND a.state='failed')
 		ORDER BY d.updated_at`)
 	if err != nil {
 		return nil, err

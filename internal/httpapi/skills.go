@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -137,6 +138,10 @@ func (a *API) setSkillTargets(w http.ResponseWriter, r *http.Request) {
 	principal := principalFrom(r.Context())
 	job, err := a.store.SetSkillTargets(r.Context(), chi.URLParam(r, "id"), principal.ID, input.Targets, input.DryRun)
 	if err != nil {
+		if errors.Is(err, store.ErrTargetManagedByProfile) {
+			a.handleStoreError(w, r, err)
+			return
+		}
 		writeError(w, r, http.StatusBadRequest, "target_update_failed", err.Error())
 		return
 	}

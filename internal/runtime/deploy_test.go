@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -53,6 +54,43 @@ func TestDeployIsIdempotent(t *testing.T) {
 	second, err := deployer.Deploy(request)
 	if err != nil || second.Changed {
 		t.Fatalf("idempotent deploy failed: %+v %v", second, err)
+	}
+}
+
+func TestDeployEnableDisableCycleIsReentrant(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	archive := testSkillZIP(t)
+	pkg, err := skills.ScanZIP(archive, skills.DefaultLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deployer := Deployer{DataDir: filepath.Join(root, "data"), Paths: DefaultPaths(home)}
+	enable := DeployRequest{Runtime: "codex", SkillSlug: "example", VersionID: "v1", SHA256: pkg.SHA256, Enabled: true, Artifact: pkg.CanonicalZIP}
+	disable := enable
+	disable.Enabled = false
+	disable.Artifact = nil
+
+	for index, request := range []DeployRequest{enable, disable, enable, disable} {
+		result, err := deployer.Deploy(request)
+		if err != nil || !result.Changed {
+			t.Fatalf("cycle step %d failed: result=%+v err=%v", index+1, result, err)
+		}
+	}
+
+	disabledRoot := filepath.Join(home, ".codex", "skills", ".toolhub-disabled")
+	entries, err := os.ReadDir(disabledRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "example-") {
+			count++
+		}
+	}
+	if count > 1 {
+		t.Fatalf("disabled copies=%d, want at most 1", count)
 	}
 }
 

@@ -1025,7 +1025,7 @@ func ensureRuntimeAutoProfile(ctx context.Context, tx pgx.Tx, nodeID, runtimeKin
 func profileHashTx(ctx context.Context, tx pgx.Tx, profileID string) (string, error) {
 	var profile []byte
 	err := tx.QueryRow(ctx, `SELECT to_jsonb(q) FROM (SELECT p.id::text AS id,p.name,p.description,
-		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",s.header_refs AS "headerRefs",ps.overrides FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id WHERE ps.profile_id=p.id AND s.enabled AND s.authority='toolhub' ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) AS servers
+		coalesce((SELECT jsonb_agg(to_jsonb(x)) FROM (SELECT s.id::text AS id,s.runtime_name AS name,s.transport,s.command,s.args,s.url,s.env_refs AS "envRefs",s.header_refs AS "headerRefs",ps.overrides FROM mcp_profile_servers ps JOIN mcp_servers s ON s.id=ps.server_id WHERE ps.profile_id=p.id AND s.enabled AND s.authority='toolhub' AND s.archived_at IS NULL ORDER BY s.runtime_name,s.id) x),'[]'::jsonb) AS servers
 		FROM mcp_profiles p WHERE p.id=$1 AND p.enabled) q`, profileID).Scan(&profile)
 	if err != nil {
 		return "", err

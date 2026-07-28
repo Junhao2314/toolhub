@@ -89,7 +89,7 @@ paths:
   /skills/{id}/review:
     post: {operationId: reviewSkill, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /skills/{id}/deployments:
-    post: {operationId: setSkillTargets, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
+    post: {operationId: setSkillTargets, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}}
   /sources:
     get: {operationId: listSources, responses: {'200': {$ref: '#/components/responses/JSON'}}}
   /deployments:
@@ -180,6 +180,18 @@ paths:
     delete: {operationId: deleteMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Deleted}, '409': {$ref: '#/components/responses/Error'}}}
   /mcp/servers/{id}/health:
     post: {operationId: checkMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
+  /mcp/servers/{id}/archive:
+    post:
+      operationId: archiveMCPServer
+      description: Hides an MCP server from the default library and excludes it from effective delivery. Servers used by an active ToolHub Profile return `409 target_managed_by_profile`.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'204': {description: Archived}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /mcp/servers/{id}/unarchive:
+    post:
+      operationId: unarchiveMCPServer
+      description: Restores an archived MCP server. An active ToolHub Profile must be deactivated first, preserving remote-secret confirmation boundaries.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'204': {description: Restored}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
   /mcp/profiles:
     get:
       operationId: listMCPProfiles
@@ -199,7 +211,67 @@ paths:
       operationId: deployMCPProfile
       description: Explicitly transitions an observed fixed profile deployment to pending and queues mcp_sync. The profile managedRuntime must exactly match the Codex or Claude target runtime; arbitrary profiles are never dispatched to the fixed native anchor.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MCPDeploymentRequest'}}}}
-      responses: {'202': {$ref: '#/components/responses/JSON'}}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles:
+    get:
+      operationId: listToolHubProfiles
+      description: Lists user-defined selection sets. These are distinct from the fixed MCP delivery profiles under `/mcp/profiles`.
+      responses: {'200': {$ref: '#/components/responses/JSON'}}
+    post:
+      operationId: createToolHubProfile
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ToolHubProfileRequest'}}}}
+      responses: {'201': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{id}:
+    get:
+      operationId: getToolHubProfile
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
+    patch:
+      operationId: updateToolHubProfile
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ToolHubProfileRequest'}}}}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+    delete:
+      operationId: deleteToolHubProfile
+      description: Active Profiles cannot be deleted.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      responses: {'204': {description: Deleted}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{id}/members:
+    put:
+      operationId: setToolHubProfileMembers
+      description: Replaces the MCP and Skill selection. Active Profiles must be deactivated before membership changes.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ToolHubProfileMembersRequest'}}}}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{id}/preflight:
+    post:
+      operationId: preflightToolHubProfileActivation
+      description: Validates target availability, members, fixed delivery profiles, and remote secret key names without changing desired state. Blocking issues return a structured `409`.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProfileTargetRequest'}}}}
+      responses:
+        '200': {description: Preflight passed, content: {application/json: {schema: {$ref: '#/components/schemas/ActivationPreflight'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/ActivationConflict'}
+  /profiles/{id}/activate:
+    post:
+      operationId: activateToolHubProfile
+      description: Atomically claims one `(node, runtime)` target, writes Profile-owned desired state, and queues one-attempt `profile_activate` orchestration. Agent task kinds remain `deploy_skill` and `apply_mcp`.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProfileActivationRequest'}}}}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/ActivationConflict'}}
+  /targets/{nodeId}/{runtime}:
+    get:
+      operationId: getRuntimeTarget
+      description: Aggregates Profile ownership, effective MCP membership, Skill desired/actual state, capabilities, and drift for one target. Grok reports Claude MCP as read-only inherited state.
+      parameters: [{$ref: '#/components/parameters/NodeID'}, {$ref: '#/components/parameters/Runtime'}]
+      responses: {'200': {description: Runtime target view, content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeTargetView'}}}}, '404': {$ref: '#/components/responses/Error'}}
+  /targets/{nodeId}/{runtime}/deactivate:
+    post:
+      operationId: deactivateToolHubProfileTarget
+      description: Releases Profile ownership without changing existing Skill or MCP desired-state rows. Manual target APIs become editable again.
+      parameters: [{$ref: '#/components/parameters/NodeID'}, {$ref: '#/components/parameters/Runtime'}]
+      responses: {'204': {description: Profile ownership released}, '404': {$ref: '#/components/responses/Error'}}
   /settings:
     get: {operationId: getSettings, responses: {'200': {$ref: '#/components/responses/JSON'}}}
     patch: {operationId: updateSettings, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
@@ -213,11 +285,14 @@ components:
     sessionCookie: {type: apiKey, in: cookie, name: toolhub_session}
   parameters:
     ID: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+    NodeID: {name: nodeId, in: path, required: true, schema: {type: string, format: uuid}}
+    Runtime: {name: runtime, in: path, required: true, schema: {type: string, enum: [codex, claude, hermes, grok, openclaw]}}
   requestBodies:
     JSON: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
   responses:
     JSON: {description: JSON response, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
     Error: {description: Error response, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    ActivationConflict: {description: Profile activation preflight failed, content: {application/json: {schema: {$ref: '#/components/schemas/ActivationConflict'}}}}
   schemas:
     LoginRequest:
       type: object
@@ -288,6 +363,67 @@ components:
               runtime: {type: string, enum: [codex, claude]}
               enabled: {type: boolean}
         dryRun: {type: boolean, default: false}
+    ToolHubProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+        description: {type: string, maxLength: 1000}
+    ToolHubProfileMembersRequest:
+      type: object
+      additionalProperties: false
+      required: [mcpServerIds, skillIds]
+      properties:
+        mcpServerIds: {type: array, maxItems: 1000, uniqueItems: true, items: {type: string, format: uuid}}
+        skillIds: {type: array, maxItems: 1000, uniqueItems: true, items: {type: string, format: uuid}}
+    ProfileTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [nodeId, runtime]
+      properties:
+        nodeId: {type: string, format: uuid}
+        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw]}
+    ProfileActivationRequest:
+      type: object
+      additionalProperties: false
+      required: [nodeId, runtime]
+      properties:
+        nodeId: {type: string, format: uuid}
+        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw]}
+        confirmSecrets: {type: boolean, default: false}
+    ActivationIssue:
+      type: object
+      properties:
+        code: {type: string, description: Blocking issue code.}
+        scope: {type: string, enum: [node, runtime, skills, mcp]}
+        reason: {type: string, description: Non-blocking skip reason.}
+        detail: {type: string}
+    ActivationPreflight:
+      type: object
+      required: [ok, errors, skipped, remoteSecretKeys, nodeIsLocal, nodeName]
+      properties:
+        ok: {type: boolean}
+        errors: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
+        skipped: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
+        remoteSecretKeys: {type: array, items: {type: string}, description: Secret key names only; values are never returned.}
+        nodeIsLocal: {type: boolean}
+        nodeName: {type: string}
+    ActivationConflict:
+      allOf:
+        - {$ref: '#/components/schemas/Error'}
+      description: The error object additionally contains `issues`, `skipped`, `nodeName`, and `secretKeys`; secretKeys contains names only.
+    RuntimeTargetView:
+      type: object
+      required: [node, runtime, capabilities, activation, mcp, skills, drift]
+      properties:
+        node: {type: object, additionalProperties: true}
+        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw]}
+        capabilities: {type: object, properties: {skills: {type: boolean}, mcp: {type: boolean}, mcpNote: {type: string}}}
+        activation: {oneOf: [{type: 'null'}, {type: object, additionalProperties: true}]}
+        mcp: {type: object, additionalProperties: true}
+        skills: {type: array, items: {type: object, additionalProperties: true}}
+        drift: {type: object, properties: {mcp: {type: integer}, skills: {type: integer}}}
     Error:
       type: object
       required: [error]
@@ -295,7 +431,14 @@ components:
         error:
           type: object
           required: [code, message]
-          properties: {code: {type: string}, message: {type: string}, requestId: {type: string}}
+          properties:
+            code: {type: string}
+            message: {type: string}
+            requestId: {type: string}
+            issues: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
+            skipped: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
+            nodeName: {type: string}
+            secretKeys: {type: array, items: {type: string}, description: Secret key names only.}
     MarketResult:
       type: object
       description: Normalized marketplace listing independent of the provider payload shape.

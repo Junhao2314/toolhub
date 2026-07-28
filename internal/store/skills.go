@@ -128,17 +128,12 @@ func (s *Store) SetSkillTargets(ctx context.Context, skillID, actor string, targ
 		if !domain.IsSkillRuntime(target.Runtime) {
 			return domain.Job{}, errors.New("Skill delivery supports materialized runtime targets only")
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO deployments(id,node_id,runtime_kind,skill_id,desired_version_id,desired_enabled,desired_generation,state)
-			VALUES($1,$2,$3,$4,$5,$6,1,'pending')
-			ON CONFLICT(node_id,runtime_kind,skill_id) DO UPDATE SET
-				previous_version_id=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id THEN deployments.desired_version_id ELSE deployments.previous_version_id END,
-				desired_version_id=excluded.desired_version_id,
-				desired_enabled=excluded.desired_enabled,
-				desired_generation=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id OR deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled THEN deployments.desired_generation + 1 ELSE deployments.desired_generation END,
-				state=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id OR deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled THEN 'pending' ELSE deployments.state END,
-				updated_at=now()`,
-			uuid.NewString(), target.NodeID, target.Runtime, skillID, versionID, target.Enabled)
-		if err != nil {
+		if managed, err := targetManagedByProfileTx(ctx, tx, target.NodeID, target.Runtime); err != nil {
+			return domain.Job{}, err
+		} else if managed {
+			return domain.Job{}, ErrTargetManagedByProfile
+		}
+		if _, err := upsertSkillDeploymentTx(ctx, tx, target.NodeID, target.Runtime, skillID, versionID, target.Enabled); err != nil {
 			return domain.Job{}, err
 		}
 	}
@@ -208,7 +203,17 @@ func (s *Store) RollbackDeployment(ctx context.Context, deploymentID, actor stri
 		return domain.Job{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var nodeID, skillID string
+	var nodeID, skillID, runtimeKind string
+	if err := tx.QueryRow(ctx, `SELECT node_id::text,runtime_kind FROM deployments WHERE id=$1 FOR UPDATE`, deploymentID).Scan(&nodeID, &runtimeKind); errors.Is(err, pgx.ErrNoRows) {
+		return domain.Job{}, ErrNotFound
+	} else if err != nil {
+		return domain.Job{}, err
+	}
+	if managed, err := targetManagedByProfileTx(ctx, tx, nodeID, runtimeKind); err != nil {
+		return domain.Job{}, err
+	} else if managed {
+		return domain.Job{}, ErrTargetManagedByProfile
+	}
 	err = tx.QueryRow(ctx, `UPDATE deployments SET
 		desired_version_id=CASE WHEN previous_version_id IS NOT NULL THEN previous_version_id ELSE desired_version_id END,
 		previous_version_id=CASE WHEN previous_version_id IS NOT NULL THEN desired_version_id ELSE previous_version_id END,
@@ -227,6 +232,28 @@ func (s *Store) RollbackDeployment(ctx context.Context, deploymentID, actor stri
 		return domain.Job{}, err
 	}
 	return job, tx.Commit(ctx)
+}
+
+func upsertSkillDeploymentTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind, skillID, versionID string, enabled bool) (string, error) {
+	var deploymentID string
+	err := tx.QueryRow(ctx, `INSERT INTO deployments(id,node_id,runtime_kind,skill_id,desired_version_id,desired_enabled,desired_generation,state)
+		VALUES($1,$2,$3,$4,$5,$6,1,'pending')
+		ON CONFLICT(node_id,runtime_kind,skill_id) DO UPDATE SET
+			previous_version_id=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id THEN deployments.desired_version_id ELSE deployments.previous_version_id END,
+			desired_version_id=excluded.desired_version_id,
+			desired_enabled=excluded.desired_enabled,
+			desired_generation=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id OR deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled THEN deployments.desired_generation + 1 ELSE deployments.desired_generation END,
+			state=CASE WHEN deployments.desired_version_id IS DISTINCT FROM excluded.desired_version_id OR deployments.desired_enabled IS DISTINCT FROM excluded.desired_enabled THEN 'pending' ELSE deployments.state END,
+			updated_at=now()
+		RETURNING id::text`, uuid.NewString(), nodeID, runtimeKind, skillID, versionID, enabled).Scan(&deploymentID)
+	return deploymentID, err
+}
+
+func targetManagedByProfileTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind string) (bool, error) {
+	var managed bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM toolhub_profile_activations
+		WHERE node_id=$1 AND runtime_kind=$2)`, nodeID, runtimeKind).Scan(&managed)
+	return managed, err
 }
 
 func (s *Store) Artifact(ctx context.Context, versionID string) ([]byte, string, error) {
