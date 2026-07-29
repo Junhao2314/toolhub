@@ -70,7 +70,7 @@ export default function App() {
     : path.startsWith('/marketplace') ? <Marketplace />
     : path.startsWith('/nodes') ? <Nodes />
     : path.startsWith('/jobs') ? <Jobs />
-    : path.startsWith('/mcp') ? <MCP />
+    : path.startsWith('/mcp') ? <MCP canOperate={canOperate} canImport={isAdmin} />
     : path.startsWith('/profiles') ? <Profiles canOperate={canOperate} />
     : path.startsWith('/targets') ? <Targets canOperate={canOperate} />
     : path.startsWith('/account') ? <Account user={session.user} signedOut={signedOut} />

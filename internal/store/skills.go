@@ -125,7 +125,7 @@ func (s *Store) SetSkillTargets(ctx context.Context, skillID, actor string, targ
 		return domain.Job{}, err
 	}
 	for _, target := range targets {
-		if !domain.IsSkillRuntime(target.Runtime) {
+		if !domain.IsSkillTargetRuntime(target.Runtime) {
 			return domain.Job{}, errors.New("Skill delivery supports materialized runtime targets only")
 		}
 		if managed, err := targetManagedByProfileTx(ctx, tx, target.NodeID, target.Runtime); err != nil {
@@ -209,6 +209,9 @@ func (s *Store) RollbackDeployment(ctx context.Context, deploymentID, actor stri
 	} else if err != nil {
 		return domain.Job{}, err
 	}
+	if !domain.IsSkillTargetRuntime(runtimeKind) {
+		return domain.Job{}, ErrHermesReadOnly
+	}
 	if managed, err := targetManagedByProfileTx(ctx, tx, nodeID, runtimeKind); err != nil {
 		return domain.Job{}, err
 	} else if managed {
@@ -235,6 +238,9 @@ func (s *Store) RollbackDeployment(ctx context.Context, deploymentID, actor stri
 }
 
 func upsertSkillDeploymentTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind, skillID, versionID string, enabled bool) (string, error) {
+	if !domain.IsSkillTargetRuntime(runtimeKind) {
+		return "", ErrHermesReadOnly
+	}
 	var deploymentID string
 	err := tx.QueryRow(ctx, `INSERT INTO deployments(id,node_id,runtime_kind,skill_id,desired_version_id,desired_enabled,desired_generation,state)
 		VALUES($1,$2,$3,$4,$5,$6,1,'pending')
@@ -252,7 +258,7 @@ func upsertSkillDeploymentTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind
 func targetManagedByProfileTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind string) (bool, error) {
 	var managed bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM toolhub_profile_activations
-		WHERE node_id=$1 AND runtime_kind=$2)`, nodeID, runtimeKind).Scan(&managed)
+		WHERE node_id=$1 AND runtime_kind=$2 AND state IN ('pending','active','partial','failed'))`, nodeID, runtimeKind).Scan(&managed)
 	return managed, err
 }
 

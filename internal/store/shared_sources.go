@@ -193,17 +193,26 @@ func upsertSharedMCPBindingTx(ctx context.Context, tx pgx.Tx, nodeID, sourceID, 
 	envKeys := jsonStringArray(binding.EnvKeys)
 	headerKeys := jsonStringArray(binding.HeaderKeys)
 	identity := protocol.MCPIdentity(runtimeKind, binding.ServerName)
+	desiredEnabled := binding.Enabled
+	drift := binding.Drift
+	controlMode := "managed_target"
+	if runtimeKind == domain.RuntimeHermes {
+		desiredEnabled = false
+		drift = false
+		controlMode = "read_only_source"
+	}
 	command, err := tx.Exec(ctx, `INSERT INTO mcp_runtime_bindings(id,node_id,runtime_kind,server_name,identity,server_id,env_keys,observed_config_fingerprint,observed_secret_fingerprint,
-		desired_config_fingerprint,desired_secret_fingerprint,desired_enabled,missing,drift,last_seen_at,shared_source_id,header_keys,desired_fingerprint,actual_fingerprint)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$8,$9,$10,$11,$12,now(),$13,$14,$15,$16)
+		desired_config_fingerprint,desired_secret_fingerprint,desired_enabled,missing,drift,last_seen_at,shared_source_id,header_keys,desired_fingerprint,actual_fingerprint,control_mode)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$8,$9,$10,$11,$12,now(),$13,$14,$15,$16,$17)
 		ON CONFLICT(node_id,runtime_kind,server_name) DO UPDATE SET identity=excluded.identity,server_id=excluded.server_id,env_keys=excluded.env_keys,
 		observed_config_fingerprint=excluded.observed_config_fingerprint,observed_secret_fingerprint=excluded.observed_secret_fingerprint,
 		desired_config_fingerprint=excluded.desired_config_fingerprint,desired_secret_fingerprint=excluded.desired_secret_fingerprint,
 		desired_enabled=excluded.desired_enabled,missing=excluded.missing,drift=excluded.drift,last_seen_at=now(),shared_source_id=excluded.shared_source_id,
-		header_keys=excluded.header_keys,desired_fingerprint=excluded.desired_fingerprint,actual_fingerprint=excluded.actual_fingerprint,updated_at=now()
+		header_keys=excluded.header_keys,desired_fingerprint=excluded.desired_fingerprint,actual_fingerprint=excluded.actual_fingerprint,
+		control_mode=excluded.control_mode,updated_at=now()
 		WHERE mcp_runtime_bindings.shared_source_id=excluded.shared_source_id`, uuid.NewString(), nodeID, runtimeKind, binding.ServerName, identity, serverID,
-		envKeys, descriptor.ConfigFingerprint, descriptor.SecretFingerprint, binding.Enabled, binding.Missing, binding.Drift, sourceID, headerKeys,
-		binding.DesiredFingerprint, binding.ActualFingerprint)
+		envKeys, descriptor.ConfigFingerprint, descriptor.SecretFingerprint, desiredEnabled, binding.Missing, drift, sourceID, headerKeys,
+		binding.DesiredFingerprint, binding.ActualFingerprint, controlMode)
 	if err != nil {
 		return false, err
 	}

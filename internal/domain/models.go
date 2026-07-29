@@ -12,6 +12,8 @@ const (
 	RuntimeGrok     = "grok"
 	RuntimeOpenClaw = "openclaw"
 	RuntimeShared   = "shared"
+
+	CapabilityHermesReadOnlyImportV1 = "hermes_read_only_import_v1"
 )
 
 func IsConsumerRuntime(kind string) bool {
@@ -27,8 +29,21 @@ func IsSkillRuntime(kind string) bool {
 	return IsConsumerRuntime(kind)
 }
 
+func IsSkillTargetRuntime(kind string) bool {
+	switch kind {
+	case RuntimeCodex, RuntimeClaude, RuntimeGrok, RuntimeOpenClaw:
+		return true
+	default:
+		return false
+	}
+}
+
 func IsMCPRuntime(kind string) bool {
 	return IsConsumerRuntime(kind)
+}
+
+func IsManagedMCPRuntime(kind string) bool {
+	return kind == RuntimeCodex || kind == RuntimeClaude
 }
 
 type Principal struct {
@@ -95,6 +110,7 @@ type AgentInventory struct {
 	Runtimes      []InventoryRuntime      `json:"runtimes"`
 	SharedSources []SharedSourceInventory `json:"sharedSources,omitempty"`
 	MCPImports    []MCPDescriptor         `json:"mcpImports,omitempty"`
+	Capabilities  []string                `json:"capabilities,omitempty"`
 }
 
 type MCPDescriptor struct {

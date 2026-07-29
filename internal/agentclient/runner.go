@@ -176,7 +176,7 @@ func taskDeadline(kind string) time.Duration {
 	switch kind {
 	case "scan_inventory":
 		return 2 * time.Minute
-	case "deploy_skill", "apply_mcp", "adopt_skill":
+	case "deploy_skill", "apply_mcp", "adopt_skill", "import_skill_snapshot":
 		return 10 * time.Minute
 	default:
 		return time.Minute

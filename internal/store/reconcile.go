@@ -23,7 +23,7 @@ func (s *Store) PendingSkillDeployments(ctx context.Context) ([]SkillDeploymentT
 	rows, err := s.pool.Query(ctx, `SELECT d.id::text,d.node_id::text,d.runtime_kind,s.slug,s.id::text,coalesce(s.source_id::text,''),coalesce(n.labels->>'group',''),d.desired_version_id::text,v.content_sha256,d.desired_enabled,d.desired_generation
 		FROM deployments d JOIN skills s ON s.id=d.skill_id JOIN skill_versions v ON v.id=d.desired_version_id
 		JOIN nodes n ON n.id=d.node_id
-		WHERE d.state IN ('pending','drift','failed','rolling_back') AND d.runtime_kind<>'shared'
+		WHERE d.state IN ('pending','drift','failed','rolling_back') AND d.runtime_kind IN ('codex','claude','grok','openclaw')
 		AND v.approved_at IS NOT NULL AND n.archived_at IS NULL
 		AND NOT EXISTS (SELECT 1 FROM toolhub_profile_activations a WHERE a.node_id=d.node_id
 			AND a.runtime_kind=d.runtime_kind AND a.state='failed')`)

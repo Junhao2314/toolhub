@@ -217,18 +217,18 @@ function ActivationModal({ profile, nodes, close, activated }: { profile: Profil
   const { t } = useI18n()
   const initialNode = nodes.find((node) => node.isLocal) ?? nodes[0]
   const [nodeID, setNodeID] = useState(initialNode?.id ?? '')
-  const [runtime, setRuntime] = useState(initialNode?.runtimeKinds.filter((item) => item !== 'shared')[0] ?? '')
+  const [runtime, setRuntime] = useState(initialNode?.runtimeKinds.filter(isProfileTargetRuntime)[0] ?? '')
   const [result, setResult] = useState<ActivationPreflight | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [confirmingSecrets, setConfirmingSecrets] = useState(false)
   const selectedNode = nodes.find((node) => node.id === nodeID)
-  const runtimes = selectedNode?.runtimeKinds.filter((item) => item !== 'shared') ?? []
+  const runtimes = selectedNode?.runtimeKinds.filter(isProfileTargetRuntime) ?? []
 
   const changeNode = (id: string) => {
     const node = nodes.find((item) => item.id === id)
     setNodeID(id)
-    setRuntime(node?.runtimeKinds.filter((item) => item !== 'shared')[0] ?? '')
+    setRuntime(node?.runtimeKinds.filter(isProfileTargetRuntime)[0] ?? '')
     setResult(null)
     setError('')
   }
@@ -300,4 +300,8 @@ function preflightFromError(error: APIError): ActivationPreflight {
 
 function stringDetail(details: Dict, key: string): string {
   return typeof details[key] === 'string' ? details[key] as string : ''
+}
+
+function isProfileTargetRuntime(runtime: string): boolean {
+  return runtime !== 'shared' && runtime !== 'hermes'
 }

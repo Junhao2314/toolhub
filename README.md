@@ -1,17 +1,17 @@
 # ToolHub
 
-ToolHub is a Tailnet-only operations console for managing Codex, Claude, and Hermes Skills and MCP configuration across multiple nodes. It ships as one Go control-plane container with an embedded React UI, one PostgreSQL container, and a cross-platform Go Agent.
+ToolHub is a Tailnet-only operations console for managing Skills and MCP configuration across multiple nodes. Codex and Claude are managed MCP targets; Hermes is an automatic read-only discovery source whose Skills and MCP entries enter ToolHub only after an administrator explicitly imports a snapshot. It ships as one Go control-plane container with an embedded React UI, one PostgreSQL container, and a cross-platform Go Agent.
 
 Licensed under the [MIT License](LICENSE).
 
 ## What Is Implemented
 
 - Agent-first WSS enrollment, heartbeat, inventory, signed typed tasks, offline queues, retry, cancellation, and pinned SSH/SFTP fallback.
-- Six-hour read-only discovery for Codex, Claude, and Hermes homes, including symlink/protected-Skill reporting, explicit Skill adoption/import, and observed MCP baselines that require fixed-profile deployment.
-- Immutable Skill artifacts with canonical SHA-256, source commit, provenance, ZIP/Git path safety, review, target matrix, update approval, sync, and per-node rollback.
+- Six-hour discovery for Codex, Claude, Hermes, Grok, and OpenClaw homes, including symlink/protected-Skill reporting. Hermes discoveries remain read-only until an administrator explicitly imports or re-imports a snapshot.
+- Immutable Skill artifacts with canonical SHA-256, source commit, provenance, ZIP/Git path safety, review, update approval, sync, and per-node rollback. Materialized targets are Codex, Claude, Grok, and OpenClaw; Hermes is never a target.
 - ToolHub Profiles combine Skills and MCP servers into reusable selections, with preflighted per-node/runtime activation and an effective Runtime View for drift inspection.
 - Multi-source SkillsMP/Xiaping marketplace search with normalized provenance, partial-failure isolation, fixed-commit Git import, and reviewed one-shot Xiaping ZIP intake; OpenAI-compatible structured recommendations never install automatically.
-- MCP server/profile/deployment management with automatic first-seen baselines, encrypted one-time secret capture, drift detection, native `mcpm` preference, structured fallback patches, and atomic backups.
+- MCP server/profile/deployment management for Codex and Claude with automatic first-seen baselines, encrypted one-time secret capture, drift detection, native `mcpm` preference, structured fallback patches, and atomic backups. Hermes MCP is observed and imported explicitly, never reconciled back to Hermes.
 - HttpOnly server-side sessions, Argon2id, CSRF rotation, Admin/Operator/Viewer RBAC, encrypted secrets, redaction, and audit events.
 
 ## Quick Start
@@ -58,9 +58,9 @@ sudo systemctl enable --now toolhub-agent
 
 The unit keeps the system read-only but allows writes to the configured home because atomic replacement of top-level files such as `~/.claude.json` requires creating a same-directory temporary file. If the Agent manages another user's home, set the service `User=` and enrollment `--home` consistently (or add equivalent `ReadWritePaths=` overrides).
 
-Service templates are under `packaging/systemd`, `packaging/launchd`, and `packaging/windows`. Enrollment immediately scans existing runtime homes. Existing Skills remain read-only until an administrator adopts one from the Discovered view; the Agent writes the management marker only after the backend imports and verifies the snapshot.
+Service templates are under `packaging/systemd`, `packaging/launchd`, and `packaging/windows`. Enrollment immediately scans existing runtime homes. Existing non-Hermes Skills remain read-only until an administrator adopts one from the Discovered view; the Agent writes the management marker only after the backend imports and verifies the snapshot. Hermes uses Import/Re-import instead: the Agent uploads an immutable snapshot but never writes `.toolhub-managed.json` into the Hermes tree.
 
-Existing MCP servers are scanned and imported. The Agent sends normalized commands, arguments, URLs, key names, import provenance, and per-node HMAC fingerprints through the authenticated channel. It uploads plaintext values only when the backend issues a short-lived one-time capture token; values are encrypted immediately and never enter browser APIs, inventory JSON, jobs, audit metadata, or logs. mcpm discovery seeds fixed `toolhub-codex` and `toolhub-claude` profiles in an observed/no-write state, using recognized legacy native anchors instead of blindly mirroring a known single-runtime `all-mcp` profile. After an explicit deployment, ToolHub writes the node-local mcpm registry plus one native relay anchor and treats later edits or deletion as drift. The Codex relay carries a 60-second startup window instead of Codex's default 10 seconds so a cold aggregate has time to initialize. Because stdio members start once per active runtime client, keep fixed profile membership deliberately small on memory-constrained nodes.
+Existing MCP servers are scanned as normalized commands, arguments, URLs, key names, import provenance, and per-node HMAC fingerprints. Codex/Claude first-seen entries can be captured and baselined automatically. Hermes entries remain candidates: ordinary scans create no central server or secret, and only an administrator's generation-pinned import can authorize one short-lived capture. Every Hermes re-import creates a new enabled central server without adding it to a Profile. Captured values are encrypted immediately and never enter browser APIs, inventory JSON, jobs, audit metadata, or logs. mcpm discovery seeds fixed `toolhub-codex` and `toolhub-claude` profiles in an observed/no-write state, using recognized legacy native anchors instead of blindly mirroring a known single-runtime `all-mcp` profile. After an explicit deployment, ToolHub writes the node-local mcpm registry plus one native relay anchor and treats later edits or deletion as drift. The Codex relay carries a 60-second startup window instead of Codex's default 10 seconds so a cold aggregate has time to initialize. Because stdio members start once per active runtime client, keep fixed profile membership deliberately small on memory-constrained nodes.
 
 Nodes also provides an SSH fallback form. It accepts `user@host`, one pinned `known_hosts` line, and a private key. The key is encrypted before storage; fallback permits only signed task upload and the fixed Agent task runner. Once the project-host inventory is online, its discovered runtimes are preselected in the Skill target matrix as the default single-node canary.
 
@@ -80,7 +80,7 @@ The Vite development server uses `127.0.0.1:18481` and proxies API requests to t
 
 - Update checks discover upstream commit/content changes and build a reviewable candidate. They never change desired state.
 - Admin approval marks the candidate version approved and advances existing deployments to that desired version.
-- Reconcile writes approved Skill desired state and centrally managed MCP desired state. Offline nodes retain pending tasks for the next Agent connection.
+- Reconcile writes approved Skill desired state for Codex, Claude, Grok, and OpenClaw plus centrally managed MCP desired state for Codex and Claude. Hermes observations are excluded. Offline nodes retain pending tasks for the next Agent connection.
 - Inventory runs on Agent connection and every six hours. Global defaults are update checks at `02:00` and Skill + MCP reconciliation at `03:30 Asia/Shanghai`; more-specific policy scopes take precedence.
 - Deleted Skills and Nodes are archived. Skill artifact purge starts only after 30 days.
 

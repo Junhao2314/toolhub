@@ -12,8 +12,8 @@ ToolHub assumes the host and Tailnet are trusted administrative infrastructure. 
 - Session and Agent bearer tokens are stored only as SHA-256 hashes.
 - AI keys, centrally managed MCP environment/header values, SSH keys, and Agent task keys use XChaCha20-Poly1305 with record ID associated data.
 - `XIAPING_API_KEY` remains control-plane environment state: browser APIs expose only a configured boolean, public search never receives the key, and authenticated download requests cannot redirect it outside the configured HTTPS origin. Provider-supplied archive URLs use proxy-free DNS-pinned public-address dialing and are revalidated on redirects.
-- MCP inventory contains normalized non-secret descriptors plus environment/header key names only. Secret comparison uses HMAC-SHA256 under the per-node task key; unknown MCP values are requested through an expiring, one-time, node/identity-bound capture token and encrypted immediately.
-- Agent secret resolution permits only `mcp-env` and `mcp-header` secrets referenced by an enabled, desired, ToolHub-authoritative MCP deployment on that node. An Agent cannot fetch AI keys, SSH keys, disabled/unreferenced MCP values, or another node's values.
+- MCP inventory contains normalized non-secret descriptors plus environment/header key names only. Secret comparison uses HMAC-SHA256 under the per-node task key; unknown managed-runtime values are requested through an expiring, one-time, node/identity-bound capture token and encrypted immediately. Hermes receives no capture token during ordinary discovery; only an administrator-confirmed, generation-pinned import can authorize one candidate.
+- Agent secret resolution permits only `mcp-env` and `mcp-header` secrets referenced by an enabled, desired, ToolHub-authoritative MCP deployment on that node. When a browser secret edit atomically swaps to new encrypted records, an old reference remains authorized only while a pending, delivered, or running `apply_mcp` task for that node explicitly names it; terminal tasks grant no historical access. An Agent cannot fetch AI keys, SSH keys, disabled/unreferenced MCP values, or another node's values.
 - Observed-only and arbitrary/mismatched MCP profiles are excluded from Agent secret authorization; a fixed profile must first enter the explicit deployment state for its matching runtime.
 - Mirrored `shared-file` MCP rows remain node-local observations. When a legacy manifest entry is imported as a central candidate, its values cross only the authenticated one-time capture route, are fingerprint-verified, and are encrypted immediately; ordinary inventory still contains key names only.
 - Audit metadata, persisted inventory, and AI inputs recursively redact credential-shaped fields. Secret-bearing browser responses are prevented at their specific store/handler boundaries; there is no universal response-redaction middleware.
@@ -30,7 +30,7 @@ The Nodes page never reads SSH private keys back. Saving a replacement disables 
 
 Archives reject absolute paths, traversal, backslashes, duplicate paths, symlinks, oversized files, and multiple package roots. Review reports expose scripts, executables, URLs, allowed tools, possible credentials, and license presence. Imported content is immutable and remains Library-only until an administrator approves it and assigns targets.
 
-Discovered runtime Skills remain read-only until an administrator queues adoption. The Agent rejects `.system`, escaped, or symlinked paths; the backend rescans the uploaded canonical ZIP and verifies its discovery hash. The Agent writes the managed marker only after that import succeeds. Shared-source adoption is import-only and intentionally leaves the legacy source unmodified.
+Discovered non-Hermes runtime Skills remain read-only until an administrator queues adoption. The Agent rejects `.system`, escaped, or symlinked paths; the backend rescans the uploaded canonical ZIP and verifies its discovery hash. The Agent writes the managed marker only after that import succeeds. Shared-source adoption is import-only and intentionally leaves the legacy source unmodified. Hermes uses a separate signed snapshot task and upload authorization; it accepts a managed source directory as input when safely bounded but never writes a marker or any other file into Hermes.
 
 ## Deployment Safety
 
@@ -41,6 +41,8 @@ For ToolHub-authoritative MCP, native non-relay discoveries are automatically ba
 The mcpm delivery boundary is narrow and reversible:
 
 - `apply_mcp` is accepted only for Codex/Claude with the exact fixed profile name. Hermes, Grok, and OpenClaw remain outside the writer.
+- `deploy_skill` and `adopt_skill` reject Hermes in Store, worker, Agent, and runtime boundaries. Database constraints prevent new Hermes Skill/MCP deployments or Profile activations; migrated historical rows are inert `legacy_read_only`/`archived` state.
+- Hermes source changes update observation/import metadata only. They do not create drift, desired state, automatic sync, rollback, or node writes.
 - Profile membership edits preserve an `observed` deployment instead of making it schedulable. Only the explicit fixed-profile deployment transition can move it to `pending`.
 - Secret values are fetched only through `AgentSecretValue` authorization for an enabled desired deployment. They are materialized only into the node-local mcpm registry, which is written at mode `0600`.
 - The structured patch preserves unknown servers and fields, refuses to replace an unowned conflicting definition, updates only the selected profile tag, and uses a same-directory fsynced temporary file plus atomic rename.

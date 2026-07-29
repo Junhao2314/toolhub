@@ -24,7 +24,10 @@ func (e *Executor) discoverInventory(ctx context.Context) (domain.AgentInventory
 	if err != nil {
 		return domain.AgentInventory{}, err
 	}
-	inventory := domain.AgentInventory{Runtimes: scan.Runtimes, SharedSources: scan.SharedSources, MCPImports: scan.MCPImports}
+	publishHermesReadOnlyCapability(scan.Runtimes)
+	inventory := domain.AgentInventory{
+		Runtimes: scan.Runtimes, SharedSources: scan.SharedSources, MCPImports: scan.MCPImports,
+	}
 	var response struct {
 		CaptureRequests []domain.MCPCaptureRequest `json:"captureRequests"`
 	}
@@ -49,6 +52,40 @@ func (e *Executor) discoverInventory(ctx context.Context) (domain.AgentInventory
 		}
 	}
 	return inventory, nil
+}
+
+// Runtime config is an open object understood by older control planes. Keeping
+// the capability there preserves rolling-upgrade compatibility.
+func publishHermesReadOnlyCapability(runtimes []domain.InventoryRuntime) {
+	for index := range runtimes {
+		if runtimes[index].Kind != domain.RuntimeHermes {
+			continue
+		}
+		if runtimes[index].Config == nil {
+			runtimes[index].Config = map[string]any{}
+		}
+		capabilities := []string{}
+		switch configured := runtimes[index].Config["capabilities"].(type) {
+		case []string:
+			capabilities = append(capabilities, configured...)
+		case []any:
+			for _, value := range configured {
+				if capability, ok := value.(string); ok {
+					capabilities = append(capabilities, capability)
+				}
+			}
+		}
+		seen := map[string]bool{}
+		result := make([]string, 0, len(capabilities)+1)
+		for _, capability := range append(capabilities, domain.CapabilityHermesReadOnlyImportV1) {
+			capability = strings.TrimSpace(capability)
+			if capability != "" && !seen[capability] {
+				seen[capability] = true
+				result = append(result, capability)
+			}
+		}
+		runtimes[index].Config["capabilities"] = result
+	}
 }
 
 func (e *Executor) postAgentJSON(ctx context.Context, endpoint string, payload any, target any) error {

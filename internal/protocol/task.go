@@ -23,6 +23,21 @@ type DeploySkillResult struct {
 	Changed       bool   `json:"changed"`
 }
 
+type ImportSkillSnapshotPayload struct {
+	DiscoveryID string `json:"discoveryId"`
+	Runtime     string `json:"runtime"`
+	Path        string `json:"path"`
+	SHA256      string `json:"sha256"`
+}
+
+type ImportSkillSnapshotResult struct {
+	DiscoveryID   string `json:"discoveryId"`
+	SkillID       string `json:"skillId"`
+	VersionID     string `json:"versionId"`
+	SHA256        string `json:"sha256"`
+	MarkerWritten bool   `json:"markerWritten"`
+}
+
 type ApplyMCPPayload struct {
 	DeploymentID      string         `json:"deploymentId"`
 	DesiredGeneration int64          `json:"desiredGeneration"`

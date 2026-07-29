@@ -65,6 +65,8 @@ func (e *Executor) Execute(ctx context.Context, task domain.AgentTask) (string, 
 		result, err = e.applyMCP(ctx, task.Payload)
 	case "adopt_skill":
 		result, err = e.adoptSkill(ctx, task.ID, task.Payload)
+	case "import_skill_snapshot":
+		result, err = e.importSkillSnapshot(ctx, task.ID, task.Payload)
 	default:
 		err = fmt.Errorf("unsupported task kind %q", task.Kind)
 	}
@@ -100,6 +102,9 @@ func (e *Executor) deploySkill(ctx context.Context, raw json.RawMessage) (any, e
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, err
 	}
+	if request.Runtime == domain.RuntimeHermes {
+		return nil, errors.New("Hermes is a read-only import source")
+	}
 	var artifact []byte
 	var err error
 	if request.Enabled {
@@ -117,6 +122,9 @@ func (e *Executor) applyMCP(ctx context.Context, raw json.RawMessage) (any, erro
 	var request protocol.ApplyMCPPayload
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, err
+	}
+	if request.Runtime == domain.RuntimeHermes {
+		return nil, errors.New("Hermes is a read-only import source")
 	}
 	resolver := func(ctx context.Context, id string) (string, error) {
 		body, err := e.fetchBytes(ctx, "/agent/v1/secrets/"+id, 1<<20)
@@ -230,6 +238,9 @@ func (e *Executor) adoptSkill(ctx context.Context, taskID string, raw json.RawMe
 	if err := json.Unmarshal(raw, &request); err != nil {
 		return nil, err
 	}
+	if request.Runtime == domain.RuntimeHermes {
+		return nil, errors.New("Hermes Skills can only be imported as read-only snapshots")
+	}
 	paths := e.config.Paths
 	var pkg skills.Package
 	var err error
@@ -253,33 +264,9 @@ func (e *Executor) adoptSkill(ctx context.Context, taskID string, raw json.RawMe
 	if err != nil {
 		return nil, err
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.config.ServerURL, "/")+"/agent/v1/discoveries/"+request.DiscoveryID+"/skill", bytes.NewReader(pkg.CanonicalZIP))
+	imported, err := e.uploadSkillSnapshot(ctx, taskID, request.DiscoveryID, "/skill", pkg)
 	if err != nil {
 		return nil, err
-	}
-	e.authorizeAgentRequest(httpRequest)
-	httpRequest.Header.Set("Content-Type", "application/zip")
-	httpRequest.Header.Set("X-ToolHub-Task-ID", taskID)
-	httpRequest.Header.Set("X-Content-SHA256", pkg.SHA256)
-	response, err := e.http.Do(httpRequest)
-	if err != nil {
-		return nil, fmt.Errorf("upload discovered Skill: %w", err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
-	if err != nil {
-		return nil, err
-	}
-	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("control plane rejected discovered Skill with HTTP %d", response.StatusCode)
-	}
-	var imported struct {
-		SkillID   string `json:"skillId"`
-		VersionID string `json:"versionId"`
-		SHA256    string `json:"sha256"`
-	}
-	if err := json.Unmarshal(body, &imported); err != nil {
-		return nil, errors.New("control plane returned an invalid Skill adoption response")
 	}
 	marker := runtimeadapter.AdoptedSkillMarker{SkillID: imported.SkillID, VersionID: imported.VersionID, SHA256: imported.SHA256}
 	if request.Runtime != domain.RuntimeShared {
@@ -288,6 +275,62 @@ func (e *Executor) adoptSkill(ctx context.Context, taskID string, raw json.RawMe
 		}
 	}
 	return map[string]any{"discoveryId": request.DiscoveryID, "skillId": imported.SkillID, "versionId": imported.VersionID, "sha256": imported.SHA256, "markerWritten": request.Runtime != domain.RuntimeShared}, nil
+}
+
+func (e *Executor) importSkillSnapshot(ctx context.Context, taskID string, raw json.RawMessage) (any, error) {
+	var request protocol.ImportSkillSnapshotPayload
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return nil, err
+	}
+	if request.Runtime != domain.RuntimeHermes {
+		return nil, errors.New("read-only Skill snapshots are supported only for Hermes")
+	}
+	pkg, err := runtimeadapter.PackageHermesSkillSnapshot(e.config.Paths, request.Path, request.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	imported, err := e.uploadSkillSnapshot(ctx, taskID, request.DiscoveryID, "/skill-snapshot", pkg)
+	if err != nil {
+		return nil, err
+	}
+	return protocol.ImportSkillSnapshotResult{
+		DiscoveryID: request.DiscoveryID, SkillID: imported.SkillID, VersionID: imported.VersionID,
+		SHA256: imported.SHA256, MarkerWritten: false,
+	}, nil
+}
+
+type skillSnapshotImportResponse struct {
+	SkillID   string `json:"skillId"`
+	VersionID string `json:"versionId"`
+	SHA256    string `json:"sha256"`
+}
+
+func (e *Executor) uploadSkillSnapshot(ctx context.Context, taskID, discoveryID, suffix string, pkg skills.Package) (skillSnapshotImportResponse, error) {
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(e.config.ServerURL, "/")+"/agent/v1/discoveries/"+discoveryID+suffix, bytes.NewReader(pkg.CanonicalZIP))
+	if err != nil {
+		return skillSnapshotImportResponse{}, err
+	}
+	e.authorizeAgentRequest(httpRequest)
+	httpRequest.Header.Set("Content-Type", "application/zip")
+	httpRequest.Header.Set("X-ToolHub-Task-ID", taskID)
+	httpRequest.Header.Set("X-Content-SHA256", pkg.SHA256)
+	response, err := e.http.Do(httpRequest)
+	if err != nil {
+		return skillSnapshotImportResponse{}, fmt.Errorf("upload discovered Skill: %w", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 2<<20))
+	if err != nil {
+		return skillSnapshotImportResponse{}, err
+	}
+	if response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusOK {
+		return skillSnapshotImportResponse{}, fmt.Errorf("control plane rejected discovered Skill with HTTP %d", response.StatusCode)
+	}
+	var imported skillSnapshotImportResponse
+	if err := json.Unmarshal(body, &imported); err != nil {
+		return skillSnapshotImportResponse{}, errors.New("control plane returned an invalid Skill snapshot response")
+	}
+	return imported, nil
 }
 
 func marshalResult(value any) json.RawMessage {

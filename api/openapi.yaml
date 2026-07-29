@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: ToolHub API
   version: 0.1.0
-  description: Tailnet-only control plane with PostgreSQL desired state, materialized Skills, and mcpm-backed MCP delivery for Codex and Claude. Node-local shared sources are read-only import inputs.
+  description: Tailnet-only control plane with PostgreSQL desired state, materialized Skills, and mcpm-backed MCP delivery for Codex and Claude. Hermes and node-local shared sources are read-only import inputs, never deployment targets.
 servers:
   - url: /api/v1
 security:
@@ -116,15 +116,30 @@ paths:
   /discoveries:
     get:
       operationId: listRuntimeDiscoveries
-      description: Lists read-only Skill discoveries and automatically managed MCP runtime bindings. Secret fingerprints and values are omitted.
-      responses: {'200': {$ref: '#/components/responses/JSON'}}
+      description: Lists Skill discoveries and MCP runtime bindings. Hermes rows include read-only import state, observed generation, and secret key names. Secret IDs, fingerprints, and values are omitted.
+      responses:
+        '200': {description: Redacted runtime discoveries, content: {application/json: {schema: {$ref: '#/components/schemas/DiscoveryList'}}}}
   /discoveries/{id}/adopt-skill:
     post:
       operationId: adoptDiscoveredSkill
-      description: Administrator-only request that queues a signed Agent adoption task. The imported snapshot remains pending review.
+      description: Administrator-only request for non-Hermes discoveries that queues a signed Agent adoption task. The imported snapshot remains pending review.
       parameters: [{$ref: '#/components/parameters/ID'}]
       requestBody: {$ref: '#/components/requestBodies/JSON'}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /discoveries/{id}/import-skill:
+    post:
+      operationId: importHermesSkillSnapshot
+      description: Administrator-only explicit import of the currently observed Hermes Skill snapshot. The Agent packages and uploads the snapshot without writing a management marker. Re-import creates review state or an update candidate and never changes desired state.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/HermesSkillImportRequest'}}}}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '412': {$ref: '#/components/responses/Error'}}
+  /discoveries/{id}/import-mcp:
+    post:
+      operationId: importHermesMCPSnapshot
+      description: Administrator-only explicit import pinned to the observed Hermes MCP generation. Secret-bearing candidates require key-name confirmation before a one-time Agent capture. Every re-import creates a new enabled central server without Profile membership.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/HermesMCPImportRequest'}}}}
+      responses: {'202': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '412': {$ref: '#/components/responses/Error'}}
   /shared-sources:
     get:
       operationId: listSharedSources
@@ -168,15 +183,21 @@ paths:
   /mcp/servers:
     get:
       operationId: listMCPServers
-      description: Lists central servers plus redacted import provenance. mcpm imports are enabled baselines; unique legacy shared-manifest imports are disabled review candidates, while structurally equivalent shared duplicates are suppressed or archived.
-      responses: {'200': {$ref: '#/components/responses/JSON'}}
+      description: Lists central servers plus redacted import provenance and secret key names. Secret reference IDs, fingerprints, and values are omitted. Hermes imports are ordinary enabled central assets but have no automatic Profile membership.
+      responses:
+        '200': {description: Redacted MCP servers, content: {application/json: {schema: {$ref: '#/components/schemas/MCPServerList'}}}}
     post:
       operationId: createMCPServer
       description: Creates a ToolHub-authoritative MCP server. Environment and HTTP header values are encrypted and ordinary responses contain references only.
       requestBody: {$ref: '#/components/requestBodies/JSON'}
       responses: {'201': {$ref: '#/components/responses/JSON'}}
   /mcp/servers/{id}:
-    patch: {operationId: updateMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}}
+    patch:
+      operationId: updateMCPServer
+      description: Updates central configuration and optional write-only secret deltas. Replacing or removing secrets used by desired Codex/Claude targets first returns `409 secret_confirmation_required` with target and key names; retry with `confirmTargets=true`. Active ToolHub Profile ownership returns `409 target_managed_by_profile` until deactivated.
+      parameters: [{$ref: '#/components/parameters/ID'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MCPServerPatch'}}}}
+      responses: {'200': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
     delete: {operationId: deleteMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Deleted}, '409': {$ref: '#/components/responses/Error'}}}
   /mcp/servers/{id}/health:
     post: {operationId: checkMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
@@ -340,6 +361,119 @@ components:
         profileIds: {type: array, items: {type: string, format: uuid}}
         mcpDeploymentIds: {type: array, items: {type: string, format: uuid}}
         dryRun: {type: boolean, default: false}
+    DiscoveryList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/RuntimeDiscovery'}}
+    RuntimeDiscovery:
+      type: object
+      additionalProperties: false
+      required: [id, kind, nodeId, nodeName, runtime, name, missing, status, controlMode, sourceChanged, importStatus, observedGeneration, envKeys, headerKeys]
+      properties:
+        id: {type: string, format: uuid}
+        kind: {type: string, enum: [skill, mcp]}
+        nodeId: {type: string, format: uuid}
+        nodeName: {type: string}
+        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw, shared]}
+        name: {type: string}
+        path: {type: string}
+        sha256: {type: string, description: Canonical Skill snapshot hash; empty for MCP rows.}
+        managed: {type: boolean}
+        protected: {type: boolean}
+        disabled: {type: boolean}
+        missing: {type: boolean}
+        drift: {type: boolean, description: Always false for Hermes read-only observations.}
+        status: {type: string}
+        lastError: {type: string}
+        adoptedSkillId: {type: string}
+        lastSeenAt: {type: [string, 'null'], format: date-time}
+        source: {type: string}
+        serverId: {type: string}
+        profileId: {type: string}
+        deploymentId: {type: string}
+        controlMode: {type: string, enum: [managed_target, read_only_source]}
+        sourceChanged: {type: boolean}
+        importStatus: {type: string, enum: [not_applicable, available, queued, importing, imported, failed]}
+        observedGeneration: {type: integer, format: int64, minimum: 0}
+        envKeys: {type: array, items: {type: string}, description: Key names only.}
+        headerKeys: {type: array, items: {type: string}, description: Header names only.}
+        linkCoverage: {type: object, additionalProperties: {type: string}}
+    HermesSkillImportRequest:
+      type: object
+      additionalProperties: false
+      required: [expectedSha256]
+      properties:
+        expectedSha256: {type: string, minLength: 1, description: Exact canonical hash returned by the latest discovery.}
+    HermesMCPImportRequest:
+      type: object
+      additionalProperties: false
+      required: [observedGeneration, confirmSecrets]
+      properties:
+        observedGeneration: {type: integer, format: int64, minimum: 1}
+        confirmSecrets: {type: boolean, description: Explicit confirmation of the envKeys/headerKeys named by the discovery or conflict response.}
+    MCPServerList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/MCPServerSummary'}}
+    MCPServerSummary:
+      type: object
+      additionalProperties: true
+      required: [id, name, runtimeName, transport, args, envKeys, headerKeys, enabled, source, authority]
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        runtimeName: {type: string}
+        transport: {type: string, enum: [stdio, sse, streamable-http]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        envKeys: {type: array, items: {type: string}, description: Key names only; encrypted secret reference IDs are omitted.}
+        headerKeys: {type: array, items: {type: string}, description: Header names only; encrypted secret reference IDs are omitted.}
+        enabled: {type: boolean}
+        source: {type: string}
+        origin: {type: object, additionalProperties: true}
+        authority: {type: string}
+        credentialMode: {type: string}
+        healthStatus: {type: string}
+        bindingCount: {type: integer}
+        hasDrift: {type: boolean}
+        archivedAt: {type: [string, 'null'], format: date-time}
+    MCPServerPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        name: {type: string, maxLength: 100}
+        enabled: {type: boolean}
+        transport: {type: string, enum: [stdio, sse, streamable-http]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        secretChanges: {$ref: '#/components/schemas/MCPSecretChanges'}
+        confirmTargets: {type: boolean, default: false}
+    MCPSecretChanges:
+      type: object
+      additionalProperties: false
+      properties:
+        env: {$ref: '#/components/schemas/MCPSecretDelta'}
+        headers: {$ref: '#/components/schemas/MCPSecretDelta'}
+    MCPSecretDelta:
+      type: object
+      additionalProperties: false
+      properties:
+        set: {type: object, additionalProperties: {type: string, minLength: 1}, description: Write-only new or replacement values.}
+        remove: {type: array, uniqueItems: true, items: {type: string}}
+    MCPAffectedTarget:
+      type: object
+      additionalProperties: false
+      required: [nodeId, nodeName, runtime]
+      properties:
+        nodeId: {type: string, format: uuid}
+        nodeName: {type: string}
+        runtime: {type: string, enum: [codex, claude]}
     MCPProfileServersRequest:
       type: object
       additionalProperties: false
@@ -383,14 +517,14 @@ components:
       required: [nodeId, runtime]
       properties:
         nodeId: {type: string, format: uuid}
-        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw]}
+        runtime: {type: string, enum: [codex, claude, grok, openclaw], description: Hermes is observation/import-only and cannot be Profile-owned.}
     ProfileActivationRequest:
       type: object
       additionalProperties: false
       required: [nodeId, runtime]
       properties:
         nodeId: {type: string, format: uuid}
-        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw]}
+        runtime: {type: string, enum: [codex, claude, grok, openclaw], description: Hermes is observation/import-only and cannot be activated.}
         confirmSecrets: {type: boolean, default: false}
     ActivationIssue:
       type: object
@@ -439,6 +573,14 @@ components:
             skipped: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
             nodeName: {type: string}
             secretKeys: {type: array, items: {type: string}, description: Secret key names only.}
+            envKeys: {type: array, items: {type: string}, description: Environment key names only.}
+            headerKeys: {type: array, items: {type: string}, description: HTTP header names only.}
+            targets: {type: array, items: {$ref: '#/components/schemas/MCPAffectedTarget'}}
+            status: {type: string, description: Current import state for import_in_progress.}
+            expectedSha256: {type: string}
+            observedSha256: {type: string}
+            expectedGeneration: {type: integer, format: int64}
+            observedGeneration: {type: integer, format: int64}
     MarketResult:
       type: object
       description: Normalized marketplace listing independent of the provider payload shape.

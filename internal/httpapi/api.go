@@ -53,6 +53,7 @@ func (a *API) Router() http.Handler {
 	router.Post("/agent/v1/discoveries/descriptors", a.agentDiscoveryDescriptors)
 	router.Post("/agent/v1/discoveries/capture", a.agentDiscoveryCapture)
 	router.Post("/agent/v1/discoveries/{id}/skill", a.agentSkillAdoptionUpload)
+	router.Post("/agent/v1/discoveries/{id}/skill-snapshot", a.agentSkillSnapshotUpload)
 	router.Post("/api/v1/auth/login", a.login)
 	router.Get("/api/v1/auth/session", a.session)
 
@@ -131,6 +132,8 @@ func (a *API) Router() http.Handler {
 			admin.Get("/audit", a.listAudit)
 			admin.Post("/skills/{id}/review", a.reviewSkill)
 			admin.Post("/discoveries/{id}/adopt-skill", a.adoptDiscoveredSkill)
+			admin.Post("/discoveries/{id}/import-skill", a.importHermesSkill)
+			admin.Post("/discoveries/{id}/import-mcp", a.importHermesMCP)
 			admin.Post("/updates/{id}/approve", a.approveUpdate)
 			admin.Get("/settings", a.getSettings)
 			admin.Patch("/settings", a.updateSettings)

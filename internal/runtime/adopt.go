@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
@@ -22,6 +23,17 @@ type AdoptedSkillMarker struct {
 }
 
 func PackageDiscoveredSkill(paths Paths, runtimeKind, discoveredPath, expectedSHA256 string) (skills.Package, error) {
+	if runtimeKind == domain.RuntimeHermes {
+		return skills.Package{}, errors.New("Hermes Skills can only be imported as read-only snapshots")
+	}
+	return packageDiscoveredSkill(paths, runtimeKind, discoveredPath, expectedSHA256, false)
+}
+
+func PackageHermesSkillSnapshot(paths Paths, discoveredPath, expectedSHA256 string) (skills.Package, error) {
+	return packageDiscoveredSkill(paths, domain.RuntimeHermes, discoveredPath, expectedSHA256, true)
+}
+
+func packageDiscoveredSkill(paths Paths, runtimeKind, discoveredPath, expectedSHA256 string, allowManaged bool) (skills.Package, error) {
 	root := paths.RuntimeRoots[runtimeKind]
 	if root == "" {
 		return skills.Package{}, errors.New("unknown runtime")
@@ -30,7 +42,7 @@ func PackageDiscoveredSkill(paths Paths, runtimeKind, discoveredPath, expectedSH
 	if err != nil {
 		return skills.Package{}, err
 	}
-	if fileExists(filepath.Join(target, ".toolhub-managed.json")) {
+	if !allowManaged && fileExists(filepath.Join(target, ".toolhub-managed.json")) {
 		return skills.Package{}, errors.New("skill is already ToolHub-managed")
 	}
 	if err := rejectSymlinks(root, target); err != nil {
@@ -80,6 +92,9 @@ func PackageSharedDiscoveredSkill(source SharedSourceConfig, discoveredPath, exp
 }
 
 func MarkAdoptedSkill(paths Paths, runtimeKind, discoveredPath, expectedSHA256 string, marker AdoptedSkillMarker) error {
+	if runtimeKind == domain.RuntimeHermes {
+		return errors.New("Hermes is a read-only import source")
+	}
 	_, target, err := validateDiscoveredSkillPath(paths.RuntimeRoots[runtimeKind], discoveredPath)
 	if err != nil {
 		return err

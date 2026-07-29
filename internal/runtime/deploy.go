@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/skills"
 )
 
@@ -41,6 +42,9 @@ type DeployResult struct {
 }
 
 func (d *Deployer) Deploy(request DeployRequest) (DeployResult, error) {
+	if request.Runtime == domain.RuntimeHermes {
+		return DeployResult{}, errors.New("Hermes is a read-only import source")
+	}
 	root := d.Paths.RuntimeRoots[request.Runtime]
 	if root == "" {
 		return DeployResult{}, errors.New("unknown runtime")

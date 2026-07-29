@@ -121,6 +121,8 @@ func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
 		return w.importSkill(ctx, job)
 	case "skill_adopt":
 		return w.adoptSkill(ctx, job)
+	case "skill_snapshot_import":
+		return w.importSkillSnapshot(ctx, job)
 	case "update_check":
 		return w.checkUpdates(ctx, job)
 	case "sync", "rollback":
@@ -160,15 +162,80 @@ func (w *Worker) adoptSkill(ctx context.Context, job domain.Job) (any, error) {
 	return map[string]any{"taskId": task.ID, "delivered": delivered, "pendingOffline": !delivered}, nil
 }
 
+func (w *Worker) importSkillSnapshot(ctx context.Context, job domain.Job) (result any, resultErr error) {
+	var input struct {
+		DiscoveryID    string `json:"discoveryId"`
+		ExpectedSHA256 string `json:"expectedSha256"`
+	}
+	if err := json.Unmarshal(job.Payload, &input); err != nil || input.DiscoveryID == "" || input.ExpectedSHA256 == "" {
+		return nil, errors.New("Hermes Skill snapshot import requires discoveryId and expectedSha256")
+	}
+	defer func() {
+		if resultErr != nil {
+			w.store.FailHermesSkillImport(context.WithoutCancel(ctx), input.DiscoveryID, job.ID, resultErr)
+		}
+	}()
+	target, err := w.store.HermesSkillSnapshotForImport(ctx, input.DiscoveryID, input.ExpectedSHA256, job.ID)
+	if err != nil {
+		return nil, err
+	}
+	payload := protocol.ImportSkillSnapshotPayload{
+		DiscoveryID: target.DiscoveryID,
+		Runtime:     target.Runtime,
+		Path:        target.Path,
+		SHA256:      target.SHA256,
+	}
+	task, err := w.store.CreateNodeTaskWithOptions(ctx, target.NodeID, job.ID, "import_skill_snapshot", payload, store.NodeTaskOptions{
+		TargetKind:  "skill_discovery",
+		TargetID:    target.DiscoveryID,
+		SemanticKey: fmt.Sprintf("import_skill_snapshot:%s:%s", target.DiscoveryID, target.SHA256),
+	})
+	if err != nil {
+		return nil, err
+	}
+	delivered := w.deliver(ctx, target.NodeID, task)
+	return map[string]any{"taskId": task.ID, "delivered": delivered, "pendingOffline": !delivered}, nil
+}
+
 func (w *Worker) inventoryScan(ctx context.Context, job domain.Job) (any, error) {
 	var input struct {
-		NodeID string `json:"nodeId"`
+		NodeID          string `json:"nodeId"`
+		HermesMCPImport *struct {
+			DiscoveryID        string `json:"discoveryId"`
+			ObservedGeneration int64  `json:"observedGeneration"`
+		} `json:"hermesMcpImport"`
 	}
 	if err := json.Unmarshal(job.Payload, &input); err != nil || input.NodeID == "" {
 		return nil, errors.New("inventory scan requires nodeId")
 	}
-	task, err := w.store.CreateNodeTask(ctx, input.NodeID, job.ID, "scan_inventory", map[string]any{"readOnly": true})
+	options := store.NodeTaskOptions{}
+	if input.HermesMCPImport != nil {
+		candidate := input.HermesMCPImport
+		if candidate.DiscoveryID == "" || candidate.ObservedGeneration <= 0 {
+			return nil, errors.New("Hermes MCP snapshot import requires discoveryId and observedGeneration")
+		}
+		nodeID, err := w.store.HermesMCPImportForScan(ctx, candidate.DiscoveryID, candidate.ObservedGeneration, job.ID)
+		if err != nil {
+			w.store.FailHermesMCPImport(context.WithoutCancel(ctx), candidate.DiscoveryID, job.ID, err)
+			return nil, err
+		}
+		if nodeID != input.NodeID {
+			err := errors.New("Hermes MCP import node does not match the queued scan")
+			w.store.FailHermesMCPImport(context.WithoutCancel(ctx), candidate.DiscoveryID, job.ID, err)
+			return nil, err
+		}
+		options = store.NodeTaskOptions{
+			TargetKind:       "mcp_discovery",
+			TargetID:         candidate.DiscoveryID,
+			TargetGeneration: candidate.ObservedGeneration,
+			SemanticKey:      fmt.Sprintf("hermes_mcp_snapshot:%s:%d", candidate.DiscoveryID, candidate.ObservedGeneration),
+		}
+	}
+	task, err := w.store.CreateNodeTaskWithOptions(ctx, input.NodeID, job.ID, "scan_inventory", map[string]any{"readOnly": true}, options)
 	if err != nil {
+		if input.HermesMCPImport != nil {
+			w.store.FailHermesMCPImport(context.WithoutCancel(ctx), input.HermesMCPImport.DiscoveryID, job.ID, err)
+		}
 		return nil, err
 	}
 	delivered := w.deliver(ctx, input.NodeID, task)
@@ -332,6 +399,9 @@ func (w *Worker) dispatchSkillDeployments(ctx context.Context, selectors skillDi
 			summary.Skipped++
 			continue
 		}
+		if !domain.IsSkillTargetRuntime(deployment.Runtime) {
+			return summary, fmt.Errorf("runtime %q is not a writable Skill target", deployment.Runtime)
+		}
 		if selectors.ScopeType == "source" && selectors.ScopeID != deployment.SourceID {
 			summary.Skipped++
 			continue
@@ -431,6 +501,9 @@ func (w *Worker) activateProfile(ctx context.Context, job domain.Job) (any, erro
 	}
 	if err := json.Unmarshal(job.Payload, &input); err != nil || input.ActivationID == "" || len(input.NodeIDs) != 1 || input.Runtime == "" {
 		return nil, errors.New("profile activation requires activationId, one nodeId, and runtime")
+	}
+	if input.Runtime == domain.RuntimeHermes {
+		return nil, store.ErrHermesReadOnly
 	}
 	result := map[string]any{"activationId": input.ActivationID}
 	skillsSummary, err := w.dispatchSkillDeployments(ctx, skillDispatchSelectors{

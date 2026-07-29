@@ -53,6 +53,8 @@ type captureGrant struct {
 	Runtime   string
 	Name      string
 	Identity  string
+	Purpose   string
+	BindingID string
 	ExpiresAt time.Time
 	Used      bool
 }
@@ -78,6 +80,10 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	capabilities, _ := json.Marshal(inventoryAgentCapabilities(inventory))
+	if _, err := tx.Exec(ctx, `UPDATE nodes SET agent_capabilities=$2,updated_at=now() WHERE id=$1`, nodeID, string(capabilities)); err != nil {
+		return nil, err
+	}
 	type priorBinding struct {
 		ID             string
 		Drift          bool
@@ -104,10 +110,15 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 	}
 	rows.Close()
 	if _, err := tx.Exec(ctx, `UPDATE skill_discoveries SET missing=true,
-		drift=CASE WHEN adopted_skill_id IS NOT NULL THEN true ELSE drift END,updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
+		drift=CASE WHEN control_mode='read_only_source' THEN false WHEN adopted_skill_id IS NOT NULL THEN true ELSE drift END,
+		updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET missing=desired_enabled,drift=desired_enabled,updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET
+		missing=CASE WHEN control_mode='read_only_source' THEN true ELSE desired_enabled END,
+		drift=CASE WHEN control_mode='read_only_source' THEN false ELSE desired_enabled END,
+		source_changed=CASE WHEN control_mode='read_only_source' AND last_imported_generation IS NOT NULL THEN true ELSE source_changed END,
+		updated_at=now() WHERE node_id=$1`, nodeID); err != nil {
 		return nil, err
 	}
 	if err := upsertSharedInventoryTx(ctx, tx, nodeID, inventory.SharedSources); err != nil {
@@ -118,6 +129,7 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 		Descriptor domain.MCPDescriptor
 	}
 	var unknownImports []domain.MCPDescriptor
+	var hermesImports []hermesMCPImportCandidate
 	var drifted []string
 	anchorObservations := map[string]managedMCPAnchorObservation{}
 	seenBindings := map[string]bool{}
@@ -149,6 +161,18 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 					return nil, errors.New("MCP descriptor secret fingerprint is required")
 				}
 			}
+			bindingKey := runtime.Kind + "\x00" + descriptor.Name
+			seenBindings[bindingKey] = true
+			if runtime.Kind == domain.RuntimeHermes {
+				candidate, err := observeHermesMCPDescriptorTx(ctx, tx, nodeID, descriptor)
+				if err != nil {
+					return nil, err
+				}
+				if candidate.BindingID != "" {
+					hermesImports = append(hermesImports, candidate)
+				}
+				continue
+			}
 			var bindingID, desiredConfig, desiredSecret string
 			var desiredEnabled bool
 			err = tx.QueryRow(ctx, `SELECT id::text,desired_config_fingerprint,desired_secret_fingerprint,desired_enabled
@@ -165,11 +189,10 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 				return nil, err
 			}
 			drift := !desiredEnabled || descriptor.ConfigFingerprint != desiredConfig || descriptor.SecretFingerprint != desiredSecret
-			bindingKey := runtime.Kind + "\x00" + descriptor.Name
-			seenBindings[bindingKey] = true
 			envKeys := jsonStringArray(descriptor.EnvKeys)
-			if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET identity=$2,env_keys=$3,
-				observed_config_fingerprint=$4,observed_secret_fingerprint=$5,missing=false,drift=$6,last_seen_at=now(),updated_at=now() WHERE id=$1`, bindingID, descriptor.Identity, envKeys, descriptor.ConfigFingerprint, descriptor.SecretFingerprint, drift); err != nil {
+			headerKeys := jsonStringArray(descriptor.HeaderKeys)
+			if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET identity=$2,env_keys=$3,header_keys=$4,
+				observed_config_fingerprint=$5,observed_secret_fingerprint=$6,missing=false,drift=$7,last_seen_at=now(),updated_at=now() WHERE id=$1`, bindingID, descriptor.Identity, envKeys, headerKeys, descriptor.ConfigFingerprint, descriptor.SecretFingerprint, drift); err != nil {
 				return nil, err
 			}
 			if drift && !priorBindings[bindingKey].Drift {
@@ -199,6 +222,23 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 			drifted = append(drifted, prior.ID)
 		}
 	}
+	if _, err := tx.Exec(ctx, `UPDATE skill_discoveries SET
+		source_changed=last_imported_sha256<>'',
+		import_status=CASE WHEN import_status IN ('queued','importing') THEN 'failed' ELSE import_status END,
+		import_error=CASE WHEN import_status IN ('queued','importing') THEN 'source_changed: Hermes Skill disappeared after import was requested' ELSE import_error END,
+		updated_at=now()
+		WHERE node_id=$1 AND control_mode='read_only_source' AND missing`, nodeID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET
+		source_changed=last_imported_generation IS NOT NULL,
+		import_status=CASE WHEN import_status IN ('queued','importing') THEN 'failed' ELSE import_status END,
+		import_error=CASE WHEN import_status IN ('queued','importing') THEN 'source_changed: Hermes MCP disappeared after import was requested' ELSE import_error END,
+		pinned_generation=CASE WHEN import_status IN ('queued','importing') THEN NULL ELSE pinned_generation END,
+		updated_at=now()
+		WHERE node_id=$1 AND control_mode='read_only_source' AND missing`, nodeID); err != nil {
+		return nil, err
+	}
 	driftedDeployments, err := projectManagedMCPDeploymentDriftTx(ctx, tx, nodeID, anchorObservations)
 	if err != nil {
 		return nil, err
@@ -218,7 +258,23 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 	if !issueCaptureTokens {
 		return nil, nil
 	}
-	requests := make([]domain.MCPCaptureRequest, 0, len(unknown))
+	requests := make([]domain.MCPCaptureRequest, 0, len(unknown)+len(hermesImports))
+	for _, candidate := range hermesImports {
+		if len(candidate.Descriptor.EnvKeys) == 0 && len(candidate.Descriptor.HeaderKeys) == 0 {
+			result, importErr := s.importHermesMCPDescriptor(ctx, candidate.BindingID, candidate.ObservedGeneration, nil, nil)
+			if importErr != nil {
+				s.FailHermesMCPImport(ctx, candidate.BindingID, "", importErr)
+				return nil, importErr
+			}
+			_ = s.Audit(ctx, domain.AuditEvent{Action: "hermes_mcp_snapshot_import", ResourceType: "mcp_server", ResourceID: result.ServerID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "bindingId": candidate.BindingID, "observedGeneration": candidate.ObservedGeneration}})
+			continue
+		}
+		request, err := s.createMCPCaptureToken(ctx, nodeID, domain.RuntimeHermes, candidate.Descriptor, "hermes_snapshot", candidate.BindingID)
+		if err != nil {
+			return nil, err
+		}
+		requests = append(requests, request)
+	}
 	for _, item := range unknown {
 		if len(item.Descriptor.EnvKeys) == 0 && len(item.Descriptor.HeaderKeys) == 0 {
 			result, adoptErr := s.adoptRuntimeMCP(ctx, nodeID, item.Runtime, item.Descriptor, nil, nil)
@@ -228,7 +284,7 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 			_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_auto_adopt", ResourceType: "mcp_binding", ResourceID: result.BindingID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": item.Runtime, "serverName": item.Descriptor.Name, "reused": result.Reused}})
 			continue
 		}
-		request, err := s.createMCPCaptureToken(ctx, nodeID, item.Runtime, item.Descriptor)
+		request, err := s.createMCPCaptureToken(ctx, nodeID, item.Runtime, item.Descriptor, "runtime_baseline", "")
 		if err != nil {
 			return nil, err
 		}
@@ -243,7 +299,7 @@ func (s *Store) ProcessAgentInventory(ctx context.Context, nodeID string, invent
 			_ = s.Audit(ctx, domain.AuditEvent{Action: "mcp_candidate_import", ResourceType: "mcp_server", ResourceID: result.ServerID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "source": descriptor.ImportSource, "sourceName": descriptor.ImportSourceName, "serverName": descriptor.Name}})
 			continue
 		}
-		request, err := s.createMCPCaptureToken(ctx, nodeID, descriptor.ImportRuntime, descriptor)
+		request, err := s.createMCPCaptureToken(ctx, nodeID, descriptor.ImportRuntime, descriptor, "mcp_import", "")
 		if err != nil {
 			return nil, err
 		}
@@ -401,6 +457,28 @@ func upsertSkillDiscoveries(ctx context.Context, tx pgx.Tx, nodeID string, runti
 				continue
 			}
 		}
+		if runtime.Kind == domain.RuntimeHermes {
+			_, err := tx.Exec(ctx, `INSERT INTO skill_discoveries(
+				id,node_id,runtime_kind,canonical_path,name,directory_hash,managed,protected,disabled,last_seen_at,control_mode,import_status)
+				VALUES($1,$2,'hermes',$3,$4,$5,false,$6,$7,now(),'read_only_source','available')
+				ON CONFLICT(node_id,runtime_kind,canonical_path) DO UPDATE SET
+					name=excluded.name,directory_hash=excluded.directory_hash,managed=false,protected=excluded.protected,
+					disabled=excluded.disabled,missing=false,drift=false,last_seen_at=now(),updated_at=now(),
+					source_changed=skill_discoveries.last_imported_sha256<>'' AND excluded.directory_hash<>skill_discoveries.last_imported_sha256,
+					import_status=CASE
+						WHEN skill_discoveries.import_status IN ('queued','importing') AND excluded.directory_hash<>skill_discoveries.directory_hash THEN 'failed'
+						ELSE skill_discoveries.import_status
+					END,
+					import_error=CASE
+						WHEN skill_discoveries.import_status IN ('queued','importing') AND excluded.directory_hash<>skill_discoveries.directory_hash
+							THEN 'source_changed: Hermes Skill changed after the import was requested'
+						ELSE skill_discoveries.import_error
+					END`, uuid.NewString(), nodeID, pathValue, name, hash, protected, disabled)
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		_, err := tx.Exec(ctx, `INSERT INTO skill_discoveries(id,node_id,runtime_kind,canonical_path,name,directory_hash,managed,protected,disabled,last_seen_at)
 			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
 			ON CONFLICT(node_id,runtime_kind,canonical_path) DO UPDATE SET name=excluded.name,directory_hash=excluded.directory_hash,
@@ -415,7 +493,7 @@ func upsertSkillDiscoveries(ctx context.Context, tx pgx.Tx, nodeID string, runti
 	return nil
 }
 
-func (s *Store) createMCPCaptureToken(ctx context.Context, nodeID, runtimeKind string, descriptor domain.MCPDescriptor) (domain.MCPCaptureRequest, error) {
+func (s *Store) createMCPCaptureToken(ctx context.Context, nodeID, runtimeKind string, descriptor domain.MCPDescriptor, purpose, bindingID string) (domain.MCPCaptureRequest, error) {
 	token, err := security.RandomToken(32)
 	if err != nil {
 		return domain.MCPCaptureRequest{}, err
@@ -432,8 +510,11 @@ func (s *Store) createMCPCaptureToken(ctx context.Context, nodeID, runtimeKind s
 	if _, err := tx.Exec(ctx, `UPDATE mcp_capture_tokens SET used_at=now() WHERE node_id=$1 AND runtime_kind=$2 AND server_name=$3 AND used_at IS NULL`, nodeID, runtimeKind, descriptor.Name); err != nil {
 		return domain.MCPCaptureRequest{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO mcp_capture_tokens(id,token_hash,node_id,runtime_kind,server_name,identity,descriptor,config_fingerprint,secret_fingerprint,expires_at)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.NewString(), security.TokenHash(token), nodeID, runtimeKind, descriptor.Name, descriptor.Identity, string(body), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, time.Now().UTC().Add(mcpCaptureTTL)); err != nil {
+	if purpose == "" {
+		purpose = "runtime_baseline"
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO mcp_capture_tokens(id,token_hash,node_id,runtime_kind,server_name,identity,descriptor,config_fingerprint,secret_fingerprint,expires_at,purpose,discovery_binding_id)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, uuid.NewString(), security.TokenHash(token), nodeID, runtimeKind, descriptor.Name, descriptor.Identity, string(body), descriptor.ConfigFingerprint, descriptor.SecretFingerprint, time.Now().UTC().Add(mcpCaptureTTL), purpose, nullString(bindingID)); err != nil {
 		return domain.MCPCaptureRequest{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -456,9 +537,9 @@ func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MC
 	var descriptorJSON []byte
 	var configFingerprint, secretFingerprint string
 	var usedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT node_id::text,runtime_kind,server_name,identity,descriptor,config_fingerprint,secret_fingerprint,expires_at,used_at
+	err = tx.QueryRow(ctx, `SELECT node_id::text,runtime_kind,server_name,identity,descriptor,config_fingerprint,secret_fingerprint,purpose,coalesce(discovery_binding_id::text,''),expires_at,used_at
 		FROM mcp_capture_tokens WHERE token_hash=$1 FOR UPDATE`, security.TokenHash(capture.Token)).
-		Scan(&grant.NodeID, &grant.Runtime, &grant.Name, &grant.Identity, &descriptorJSON, &configFingerprint, &secretFingerprint, &grant.ExpiresAt, &usedAt)
+		Scan(&grant.NodeID, &grant.Runtime, &grant.Name, &grant.Identity, &descriptorJSON, &configFingerprint, &secretFingerprint, &grant.Purpose, &grant.BindingID, &grant.ExpiresAt, &usedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MCPAdoptionResult{}, ErrNotFound
 	}
@@ -488,7 +569,14 @@ func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MC
 		return MCPAdoptionResult{}, errors.New("captured secrets do not match the descriptor fingerprint")
 	}
 	var result MCPAdoptionResult
-	if descriptor.ImportSource != "" {
+	if grant.Purpose == "hermes_snapshot" {
+		var generation int64
+		if err := tx.QueryRow(ctx, `SELECT observed_generation FROM mcp_runtime_bindings
+			WHERE id=$1 AND node_id=$2 AND runtime_kind='hermes'`, grant.BindingID, nodeID).Scan(&generation); err != nil {
+			return MCPAdoptionResult{}, errors.New("Hermes capture binding is unavailable")
+		}
+		result, err = s.importHermesMCPDescriptorTx(ctx, tx, grant.BindingID, generation, capture.Env, capture.Headers)
+	} else if descriptor.ImportSource != "" {
 		result, err = s.importMCPDescriptorTx(ctx, tx, nodeID, descriptor, capture.Env, capture.Headers)
 	} else {
 		result, err = s.adoptRuntimeMCPTx(ctx, tx, nodeID, capture.Runtime, descriptor, capture.Env, capture.Headers)
@@ -503,11 +591,14 @@ func (s *Store) CaptureRuntimeMCP(ctx context.Context, nodeID string, capture MC
 		return MCPAdoptionResult{}, err
 	}
 	resourceType, resourceID, action := "mcp_binding", result.BindingID, "runtime_auto_adopt"
-	if descriptor.ImportSource != "" {
+	source := descriptor.ImportSource
+	if grant.Purpose == "hermes_snapshot" {
+		resourceType, resourceID, action, source = "mcp_server", result.ServerID, "hermes_mcp_snapshot_import", "hermes"
+	} else if descriptor.ImportSource != "" {
 		resourceType, resourceID, action = "mcp_server", result.ServerID, "mcp_candidate_import"
 	}
 	_ = s.Audit(ctx, domain.AuditEvent{Action: "runtime_secret_capture", ResourceType: resourceType, ResourceID: resourceID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "envNames": mapKeys(capture.Env), "headerNames": mapKeys(capture.Headers)}})
-	_ = s.Audit(ctx, domain.AuditEvent{Action: action, ResourceType: resourceType, ResourceID: resourceID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "source": descriptor.ImportSource, "reused": result.Reused}})
+	_ = s.Audit(ctx, domain.AuditEvent{Action: action, ResourceType: resourceType, ResourceID: resourceID, Outcome: "success", Metadata: map[string]any{"nodeId": nodeID, "runtime": capture.Runtime, "serverName": capture.Name, "source": source, "reused": result.Reused}})
 	return result, nil
 }
 
@@ -1092,17 +1183,26 @@ func (s *Store) ListDiscoveries(ctx context.Context) (json.RawMessage, error) {
 	return s.JSONList(ctx, `SELECT * FROM (
 		SELECT sd.id::text AS id,'skill'::text AS kind,sd.node_id::text AS "nodeId",n.name AS "nodeName",sd.runtime_kind AS runtime,
 			sd.name,sd.canonical_path AS path,sd.directory_hash AS sha256,sd.managed,sd.protected,sd.disabled,sd.missing,sd.drift,
-			sd.adoption_status AS status,coalesce(nullif(sd.adoption_error,''),sd.scan_error) AS "lastError",coalesce(sd.adopted_skill_id::text,'') AS "adoptedSkillId",sd.last_seen_at AS "lastSeenAt",
+			CASE WHEN sd.control_mode='read_only_source' THEN sd.import_status ELSE sd.adoption_status END AS status,
+			CASE WHEN sd.control_mode='read_only_source' THEN sd.import_error ELSE coalesce(nullif(sd.adoption_error,''),sd.scan_error) END AS "lastError",
+			coalesce(sd.imported_skill_id::text,sd.adopted_skill_id::text,'') AS "adoptedSkillId",sd.last_seen_at AS "lastSeenAt",
 			''::text AS source,''::text AS "serverId",''::text AS "profileId",''::text AS "deploymentId",
+			sd.control_mode AS "controlMode",sd.source_changed AS "sourceChanged",sd.import_status AS "importStatus",
+			0::bigint AS "observedGeneration",'[]'::jsonb AS "envKeys",'[]'::jsonb AS "headerKeys",
 			coalesce((SELECT jsonb_object_agg(c.consumer_kind,l.state) FROM shared_skill_links l JOIN shared_consumers c ON c.id=l.consumer_id
 				WHERE l.source_path=sd.canonical_path),'{}'::jsonb) AS "linkCoverage"
 		FROM skill_discoveries sd JOIN nodes n ON n.id=sd.node_id
 		UNION ALL
 		SELECT mb.id::text AS id,'mcp'::text AS kind,mb.node_id::text AS "nodeId",n.name AS "nodeName",mb.runtime_kind AS runtime,
 			mb.server_name AS name,''::text AS path,''::text AS sha256,false AS managed,false AS protected,false AS disabled,mb.missing,mb.drift,
-			CASE WHEN mb.drift THEN 'drift' WHEN mb.missing THEN 'missing' ELSE 'managed' END AS status,''::text AS "lastError",''::text AS "adoptedSkillId",mb.last_seen_at AS "lastSeenAt",
-			coalesce(ms.authority,'runtime-auto')::text AS source,coalesce(mb.server_id::text,'') AS "serverId",coalesce(mb.profile_id::text,'') AS "profileId",coalesce(mb.deployment_id::text,'') AS "deploymentId",'{}'::jsonb AS "linkCoverage"
+			CASE WHEN mb.control_mode='read_only_source' THEN mb.import_status WHEN mb.drift THEN 'drift' WHEN mb.missing THEN 'missing' ELSE 'managed' END AS status,
+			CASE WHEN mb.control_mode='read_only_source' THEN mb.import_error ELSE '' END AS "lastError",''::text AS "adoptedSkillId",mb.last_seen_at AS "lastSeenAt",
+			CASE WHEN mb.control_mode='read_only_source' THEN 'hermes-read-only' ELSE coalesce(ms.authority,'runtime-auto') END::text AS source,
+			coalesce(mb.server_id::text,'') AS "serverId",coalesce(mb.profile_id::text,'') AS "profileId",coalesce(mb.deployment_id::text,'') AS "deploymentId",
+			mb.control_mode AS "controlMode",mb.source_changed AS "sourceChanged",mb.import_status AS "importStatus",
+			mb.observed_generation AS "observedGeneration",mb.env_keys AS "envKeys",mb.header_keys AS "headerKeys",'{}'::jsonb AS "linkCoverage"
 		FROM mcp_runtime_bindings mb JOIN nodes n ON n.id=mb.node_id LEFT JOIN mcp_servers ms ON ms.id=mb.server_id
+		WHERE mb.runtime_kind<>'hermes' OR mb.import_status<>'not_applicable'
 	) discoveries ORDER BY kind,"nodeName",runtime,name`)
 }
 
@@ -1113,14 +1213,22 @@ func (s *Store) SkillDiscoveryForAdoption(ctx context.Context, discoveryID strin
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var target SkillAdoptionTarget
-	err = tx.QueryRow(ctx, `SELECT id::text,node_id::text,runtime_kind,canonical_path,directory_hash FROM skill_discoveries
-		WHERE id=$1 AND NOT missing AND NOT managed AND NOT protected FOR UPDATE`, discoveryID).
-		Scan(&target.DiscoveryID, &target.NodeID, &target.Runtime, &target.Path, &target.SHA256)
+	var controlMode string
+	var missing, managed, protected bool
+	err = tx.QueryRow(ctx, `SELECT id::text,node_id::text,runtime_kind,canonical_path,directory_hash,control_mode,missing,managed,protected
+		FROM skill_discoveries WHERE id=$1 FOR UPDATE`, discoveryID).
+		Scan(&target.DiscoveryID, &target.NodeID, &target.Runtime, &target.Path, &target.SHA256, &controlMode, &missing, &managed, &protected)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SkillAdoptionTarget{}, ErrNotFound
 	}
 	if err != nil {
 		return SkillAdoptionTarget{}, err
+	}
+	if target.Runtime == domain.RuntimeHermes || controlMode == "read_only_source" {
+		return SkillAdoptionTarget{}, ErrHermesReadOnly
+	}
+	if missing || managed || protected {
+		return SkillAdoptionTarget{}, ErrStateConflict
 	}
 	if target.SHA256 == "" {
 		return SkillAdoptionTarget{}, errors.New("discovered skill could not be safely hashed")
@@ -1129,6 +1237,27 @@ func (s *Store) SkillDiscoveryForAdoption(ctx context.Context, discoveryID strin
 		return SkillAdoptionTarget{}, err
 	}
 	return target, tx.Commit(ctx)
+}
+
+func (s *Store) ValidateSkillDiscoveryAdoption(ctx context.Context, discoveryID string) error {
+	var runtimeKind, controlMode string
+	var missing, managed, protected bool
+	err := s.pool.QueryRow(ctx, `SELECT runtime_kind,control_mode,missing,managed,protected
+		FROM skill_discoveries WHERE id=$1`, discoveryID).
+		Scan(&runtimeKind, &controlMode, &missing, &managed, &protected)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if runtimeKind == domain.RuntimeHermes || controlMode == "read_only_source" {
+		return ErrHermesReadOnly
+	}
+	if missing || managed || protected {
+		return ErrStateConflict
+	}
+	return nil
 }
 
 func (s *Store) FailSkillAdoption(ctx context.Context, discoveryID string, cause error) {

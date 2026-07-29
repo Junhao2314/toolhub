@@ -37,3 +37,19 @@ func TestApplyMCPPayloadSigningIsCanonical(t *testing.T) {
 		t.Fatal("empty signing bytes")
 	}
 }
+
+func TestImportSkillSnapshotPayloadSigningIsCanonical(t *testing.T) {
+	first := json.RawMessage(`{"discoveryId":"discovery-1","runtime":"hermes","path":"/home/test/.hermes/skills/example","sha256":"abc"}`)
+	second := json.RawMessage(`{"sha256":"abc","path":"/home/test/.hermes/skills/example","runtime":"hermes","discoveryId":"discovery-1"}`)
+	a, err := TaskSigningBytes("task-1", "import_skill_snapshot", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := TaskSigningBytes("task-1", "import_skill_snapshot", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(a) != string(b) {
+		t.Fatalf("snapshot signing bytes differ: %q != %q", a, b)
+	}
+}

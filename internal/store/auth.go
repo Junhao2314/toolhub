@@ -30,6 +30,11 @@ var (
 	ErrStateConflict           = errors.New("state conflict")
 	ErrLeaseLost               = errors.New("lease lost")
 	ErrJobCancelled            = errors.New("job cancelled")
+	ErrHermesReadOnly          = errors.New("Hermes is a read-only import source")
+	ErrSourceChanged           = errors.New("discovery source changed")
+	ErrSecretConfirmation      = errors.New("secret confirmation required")
+	ErrImportInProgress        = errors.New("import is already in progress")
+	ErrAgentUpgradeRequired    = errors.New("Agent upgrade is required")
 )
 
 func (s *Store) UserByIdentifier(ctx context.Context, identifier string) (domain.User, error) {

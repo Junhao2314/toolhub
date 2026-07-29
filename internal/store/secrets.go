@@ -53,8 +53,9 @@ func (s *Store) SecretValue(ctx context.Context, id string) ([]byte, error) {
 
 func (s *Store) AgentSecretValue(ctx context.Context, nodeID, id string) ([]byte, error) {
 	var ciphertext []byte
-	err := s.pool.QueryRow(ctx, `SELECT es.ciphertext FROM encrypted_secrets es WHERE es.id=$2 AND es.kind IN ('mcp-env','mcp-header') AND EXISTS (
-		SELECT 1 FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id
+	err := s.pool.QueryRow(ctx, `SELECT es.ciphertext FROM encrypted_secrets es WHERE es.id=$2 AND es.kind IN ('mcp-env','mcp-header') AND (
+		EXISTS (
+			SELECT 1 FROM mcp_deployments d JOIN mcp_profiles p ON p.id=d.profile_id
 		JOIN mcp_servers ms ON ms.enabled AND ms.authority='toolhub' AND ms.archived_at IS NULL CROSS JOIN LATERAL (
 			SELECT value FROM jsonb_each_text(ms.env_refs)
 			UNION ALL
@@ -66,9 +67,20 @@ func (s *Store) AgentSecretValue(ctx context.Context, nodeID, id string) ([]byte
 			EXISTS (SELECT 1 FROM toolhub_profile_activations a
 				JOIN toolhub_profile_mcp_servers members ON members.profile_id=a.profile_id AND members.server_id=ms.id
 				WHERE a.node_id=d.node_id AND a.runtime_kind=d.runtime_kind AND a.state IN ('pending','active','partial'))
-			OR (NOT EXISTS (SELECT 1 FROM toolhub_profile_activations a WHERE a.node_id=d.node_id
-				AND a.runtime_kind=d.runtime_kind AND a.state IN ('pending','active','partial'))
-				AND EXISTS (SELECT 1 FROM mcp_profile_servers members WHERE members.profile_id=d.profile_id AND members.server_id=ms.id))
+				OR (NOT EXISTS (SELECT 1 FROM toolhub_profile_activations a WHERE a.node_id=d.node_id
+					AND a.runtime_kind=d.runtime_kind AND a.state IN ('pending','active','partial'))
+					AND EXISTS (SELECT 1 FROM mcp_profile_servers members WHERE members.profile_id=d.profile_id AND members.server_id=ms.id))
+			))
+		OR EXISTS (
+			SELECT 1 FROM node_tasks task
+			CROSS JOIN LATERAL jsonb_array_elements(coalesce(task.payload->'servers','[]'::jsonb)) server
+			CROSS JOIN LATERAL (
+				SELECT value FROM jsonb_each_text(coalesce(server->'envRefs','{}'::jsonb))
+				UNION ALL
+				SELECT value FROM jsonb_each_text(coalesce(server->'headerRefs','{}'::jsonb))
+			) task_ref
+			WHERE task.node_id=$1 AND task.kind='apply_mcp' AND task.status IN ('pending','delivered','running')
+				AND task.payload->>'runtime' IN ('codex','claude') AND task_ref.value=$2::text
 		))`, nodeID, id).Scan(&ciphertext)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

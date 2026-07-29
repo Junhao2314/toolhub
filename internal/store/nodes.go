@@ -208,6 +208,9 @@ func (s *Store) CreateNodeTaskWithOptions(ctx context.Context, nodeID, jobID, ki
 	if err != nil {
 		return domain.AgentTask{}, err
 	}
+	if err := validateAgentTaskWriteBoundary(kind, encoded); err != nil {
+		return domain.AgentTask{}, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.AgentTask{}, err
@@ -344,12 +347,12 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, atte
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var kind, currentStatus string
+	var kind, currentStatus, jobID string
 	var payload, currentResult []byte
 	var currentAttempt int
 	var cancelRequestedAt *time.Time
-	if err := tx.QueryRow(ctx, "SELECT kind,payload,status,attempt,result,cancel_requested_at FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE", id, nodeID).
-		Scan(&kind, &payload, &currentStatus, &currentAttempt, &currentResult, &cancelRequestedAt); err != nil {
+	if err := tx.QueryRow(ctx, "SELECT kind,payload,status,attempt,result,cancel_requested_at,coalesce(job_id::text,'') FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE", id, nodeID).
+		Scan(&kind, &payload, &currentStatus, &currentAttempt, &currentResult, &cancelRequestedAt, &jobID); err != nil {
 		return "", err
 	}
 	if attempt > 0 && attempt != currentAttempt {
@@ -383,7 +386,11 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, atte
 	finalResult := result
 	var projection TaskCompletionOutcome = TaskCompletionRecorded
 	var completedInventory *domain.AgentInventory
-	if status == "succeeded" && kind == "scan_inventory" {
+	switch kind {
+	case "scan_inventory":
+		if status != "succeeded" {
+			break
+		}
 		var inventory domain.AgentInventory
 		if err := json.Unmarshal(result, &inventory); err != nil {
 			finalStatus = "failed"
@@ -391,47 +398,40 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, atte
 		} else {
 			completedInventory = &inventory
 		}
-	} else if kind == "deploy_skill" {
+	case "deploy_skill":
 		outcome, projectedStatus, projectedResult, err := completeDeploySkillTx(ctx, tx, payload, finalStatus, finalResult)
 		if err != nil {
 			return "", err
 		}
 		projection, finalStatus, finalResult = outcome, projectedStatus, projectedResult
-	} else if kind == "apply_mcp" {
+	case "apply_mcp":
 		outcome, projectedStatus, projectedResult, err := completeApplyMCPTx(ctx, tx, payload, finalStatus, finalResult)
 		if err != nil {
 			return "", err
 		}
 		projection, finalStatus, finalResult = outcome, projectedStatus, projectedResult
-	} else if status == "succeeded" && kind == "adopt_skill" {
+	case "adopt_skill":
 		var task struct {
 			DiscoveryID string `json:"discoveryId"`
 		}
-		if json.Unmarshal(payload, &task) == nil {
+		if finalStatus == "succeeded" && json.Unmarshal(payload, &task) == nil {
 			_, _ = tx.Exec(ctx, `UPDATE skill_discoveries SET managed=runtime_kind<>'shared',missing=false,drift=false,
 				adoption_status=CASE WHEN runtime_kind='shared' THEN 'imported' ELSE 'adopted' END,
 				adoption_error='',updated_at=now() WHERE id=$1`, task.DiscoveryID)
-		}
-	} else if finalStatus == "failed" {
-		var task struct {
-			DeploymentID string `json:"deploymentId"`
-		}
-		if json.Unmarshal(payload, &task) == nil && task.DeploymentID != "" {
+		} else if finalStatus == "failed" && json.Unmarshal(payload, &task) == nil && task.DiscoveryID != "" {
 			message := truncateSharedError(taskResultMessage(finalResult))
-			if kind == "deploy_skill" {
-				_, _ = tx.Exec(ctx, "UPDATE deployments SET state='failed',last_error=$2,updated_at=now() WHERE id=$1", task.DeploymentID, message)
-			} else if kind == "apply_mcp" {
-				_, _ = tx.Exec(ctx, "UPDATE mcp_deployments SET state='failed',last_error=$2,updated_at=now() WHERE id=$1", task.DeploymentID, message)
-			}
+			_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET adoption_status='failed',adoption_error=$2,updated_at=now() WHERE id=$1 AND NOT managed", task.DiscoveryID, message)
 		}
-		if kind == "adopt_skill" {
-			var adoption struct {
-				DiscoveryID string `json:"discoveryId"`
-			}
-			if json.Unmarshal(payload, &adoption) == nil && adoption.DiscoveryID != "" {
-				message := truncateSharedError(taskResultMessage(finalResult))
-				_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET adoption_status='failed',adoption_error=$2,updated_at=now() WHERE id=$1 AND NOT managed", adoption.DiscoveryID, message)
-			}
+	case "import_skill_snapshot":
+		projectedStatus, projectedResult, err := completeHermesSkillSnapshotTx(ctx, tx, payload, finalStatus, finalResult)
+		if err != nil {
+			return "", err
+		}
+		finalStatus, finalResult = projectedStatus, projectedResult
+	}
+	if kind == "scan_inventory" && finalStatus == "failed" && jobID != "" {
+		if err := failHermesMCPScanTx(ctx, tx, jobID, finalResult); err != nil {
+			return "", err
 		}
 	}
 	if err := terminalizeTaskTx(ctx, tx, id, nodeID, finalStatus, finalResult); err != nil {
@@ -446,6 +446,90 @@ func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, atte
 		}
 	}
 	return projection, nil
+}
+
+func validateAgentTaskWriteBoundary(kind string, payload json.RawMessage) error {
+	switch kind {
+	case "deploy_skill":
+		var task protocol.DeploySkillPayload
+		if json.Unmarshal(payload, &task) == nil && task.Runtime == domain.RuntimeHermes {
+			return ErrHermesReadOnly
+		}
+	case "apply_mcp":
+		var task protocol.ApplyMCPPayload
+		if json.Unmarshal(payload, &task) == nil && task.Runtime == domain.RuntimeHermes {
+			return ErrHermesReadOnly
+		}
+	case "adopt_skill":
+		var task struct {
+			Runtime string `json:"runtime"`
+		}
+		if json.Unmarshal(payload, &task) == nil && task.Runtime == domain.RuntimeHermes {
+			return ErrHermesReadOnly
+		}
+	case "import_skill_snapshot":
+		var task protocol.ImportSkillSnapshotPayload
+		if json.Unmarshal(payload, &task) != nil || task.Runtime != domain.RuntimeHermes || task.DiscoveryID == "" || task.Path == "" || task.SHA256 == "" {
+			return errors.New("invalid Hermes Skill snapshot task")
+		}
+	}
+	return nil
+}
+
+func completeHermesSkillSnapshotTx(ctx context.Context, tx pgx.Tx, payload []byte, status string, result json.RawMessage) (string, json.RawMessage, error) {
+	var task protocol.ImportSkillSnapshotPayload
+	if json.Unmarshal(payload, &task) != nil || task.DiscoveryID == "" || task.Runtime != domain.RuntimeHermes || task.SHA256 == "" {
+		return "failed", marshalTaskError("import_skill_snapshot task payload is invalid", "invalid_payload"), nil
+	}
+	if status == "succeeded" {
+		var actual protocol.ImportSkillSnapshotResult
+		if json.Unmarshal(result, &actual) != nil || actual.DiscoveryID != task.DiscoveryID || actual.SHA256 != task.SHA256 ||
+			actual.SkillID == "" || actual.VersionID == "" || actual.MarkerWritten {
+			status = "failed"
+			result = marshalTaskError("import_skill_snapshot task returned an invalid result", "invalid_result")
+		} else {
+			var recorded bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM skill_discoveries
+				WHERE id=$1 AND runtime_kind='hermes' AND control_mode='read_only_source' AND import_status='imported'
+				AND imported_skill_id=$2 AND imported_version_id=$3 AND last_imported_sha256=$4)`,
+				task.DiscoveryID, actual.SkillID, actual.VersionID, actual.SHA256).Scan(&recorded); err != nil {
+				return "", nil, err
+			}
+			if !recorded {
+				status = "failed"
+				result = marshalTaskError("Hermes Skill snapshot upload was not recorded", "snapshot_not_recorded")
+			}
+		}
+	}
+	if status == "failed" {
+		message := truncateSharedError(taskResultMessage(result))
+		if _, err := tx.Exec(ctx, `UPDATE skill_discoveries SET import_status='failed',import_error=$2,updated_at=now()
+			WHERE id=$1 AND control_mode='read_only_source'`, task.DiscoveryID, message); err != nil {
+			return "", nil, err
+		}
+	}
+	return status, result, nil
+}
+
+func failHermesMCPScanTx(ctx context.Context, tx pgx.Tx, jobID string, result json.RawMessage) error {
+	var payload []byte
+	if err := tx.QueryRow(ctx, "SELECT payload FROM jobs WHERE id=$1 AND kind='inventory_scan'", jobID).Scan(&payload); errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	var input struct {
+		HermesMCPImport *struct {
+			DiscoveryID string `json:"discoveryId"`
+		} `json:"hermesMcpImport"`
+	}
+	if json.Unmarshal(payload, &input) != nil || input.HermesMCPImport == nil || input.HermesMCPImport.DiscoveryID == "" {
+		return nil
+	}
+	message := truncateSharedError(taskResultMessage(result))
+	_, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET import_status='failed',import_error=$2,pinned_generation=NULL,updated_at=now()
+		WHERE id=$1 AND control_mode='read_only_source' AND import_status IN ('queued','importing')`, input.HermesMCPImport.DiscoveryID, message)
+	return err
 }
 
 func nodeTaskBySemanticKeyTx(ctx context.Context, tx pgx.Tx, semanticKey string) (domain.AgentTask, error) {

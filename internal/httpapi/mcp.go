@@ -45,7 +45,17 @@ func (a *API) updateMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := a.store.UpdateMCPServer(r.Context(), chi.URLParam(r, "id"), input); err != nil {
+	principal := principalFrom(r.Context())
+	input.Actor = principal.ID
+	id := chi.URLParam(r, "id")
+	if err := a.store.UpdateMCPServer(r.Context(), id, input); err != nil {
+		var confirmation *store.SecretConfirmationRequiredError
+		if errors.As(err, &confirmation) {
+			writeErrorDetails(w, r, http.StatusConflict, "secret_confirmation_required", "Confirm the affected targets before replacing MCP secrets", map[string]any{
+				"envKeys": confirmation.EnvKeys, "headerKeys": confirmation.HeaderKeys, "targets": confirmation.Targets,
+			})
+			return
+		}
 		if errors.Is(err, store.ErrSourceFileAuthoritative) || errors.Is(err, store.ErrTargetManagedByProfile) {
 			a.handleStoreError(w, r, err)
 			return
@@ -53,7 +63,28 @@ func (a *API) updateMCPServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "mcp_update_failed", err.Error())
 		return
 	}
+	metadata := map[string]any{"confirmTargets": input.ConfirmTargets}
+	if input.SecretChanges != nil {
+		metadata["envKeys"] = changedSecretKeyNames(input.SecretChanges.Env)
+		metadata["headerKeys"] = changedSecretKeyNames(input.SecretChanges.Headers)
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update", ResourceType: "mcp_server", ResourceID: id, Outcome: "success", IPAddress: clientIP(r), Metadata: metadata})
 	writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
+}
+
+func changedSecretKeyNames(delta store.MCPSecretDelta) []string {
+	set := make(map[string]struct{}, len(delta.Set)+len(delta.Remove))
+	for key := range delta.Set {
+		set[key] = struct{}{}
+	}
+	for _, key := range delta.Remove {
+		set[key] = struct{}{}
+	}
+	result := make([]string, 0, len(set))
+	for key := range set {
+		result = append(result, key)
+	}
+	return result
 }
 
 func (a *API) deleteMCPServer(w http.ResponseWriter, r *http.Request) {

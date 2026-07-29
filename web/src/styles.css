@@ -161,6 +161,8 @@ main { padding: 32px clamp(20px, 4vw, 48px) 64px; max-width: 1600px; margin: 0 a
 
 /* Toolbars & Forms */
 .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; min-height: 44px; }
+.segment-scroll { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+.segment-scroll .segments { min-width: max-content; }
 .segments { display: inline-flex; border: 1px solid rgba(255, 255, 255, 0.1); background: rgba(15, 23, 42, 0.6); border-radius: 8px; padding: 4px; overflow: hidden; }
 .segments button { height: 32px; border: 0; background: transparent; padding: 0 16px; color: var(--muted); font-size: 13px; font-weight: 500; border-radius: 6px; }
 .segments button:hover { color: var(--ink); }
@@ -275,8 +277,16 @@ td small { color: var(--muted); margin-top: 4px; display: block; max-width: 360p
 .preflight-result li span { display: block; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .preflight-result li small { display: block; margin-top: 3px; color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
 .secret-confirmation { display: grid; gap: 12px; padding: 18px; border-left: 4px solid var(--amber); border-radius: 0 8px 8px 0; background: var(--amber-soft); }
+.secret-confirmation > header { display: flex; align-items: center; gap: 9px; color: #fde68a; }
+.secret-confirmation section { display: grid; gap: 8px; }
 .secret-confirmation span { color: var(--muted); line-height: 1.5; }
 .secret-confirmation code { color: #fde68a; }
+.secret-editor { display: grid; gap: 12px; padding-top: 4px; }
+.secret-editor > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.secret-editor > header small { color: var(--muted); font-size: 12px; }
+.secret-key-list { max-height: 180px; }
+.secret-key-list label { min-height: 44px; }
+.secret-key-list code { overflow-wrap: anywhere; }
 
 /* Runtime View */
 .runtime-selector { display: flex; align-items: end; gap: 16px; padding: 18px 0; margin-bottom: 8px; border-top: var(--glass-border); border-bottom: var(--glass-border); }

@@ -52,7 +52,8 @@ func (s *Store) ListToolHubProfiles(ctx context.Context) (json.RawMessage, error
 	return s.JSONList(ctx, `SELECT p.id::text AS id,p.name,p.description,p.created_at AS "createdAt",p.updated_at AS "updatedAt",
 		(SELECT count(*) FROM toolhub_profile_mcp_servers m WHERE m.profile_id=p.id) AS "mcpServerCount",
 		(SELECT count(*) FROM toolhub_profile_skills sk WHERE sk.profile_id=p.id) AS "skillCount",
-		(SELECT count(*) FROM toolhub_profile_activations a WHERE a.profile_id=p.id) AS "activationCount"
+		(SELECT count(*) FROM toolhub_profile_activations a WHERE a.profile_id=p.id
+			AND a.state IN ('pending','active','partial','failed')) AS "activationCount"
 		FROM toolhub_profiles p ORDER BY lower(p.name),p.id`)
 }
 
@@ -62,7 +63,8 @@ func (s *Store) GetToolHubProfile(ctx context.Context, id string) (json.RawMessa
 		coalesce((SELECT array_agg(sk.skill_id::text ORDER BY sk.skill_id::text) FROM toolhub_profile_skills sk WHERE sk.profile_id=p.id),ARRAY[]::text[]) AS "skillIds",
 		coalesce((SELECT jsonb_agg(jsonb_build_object('id',a.id::text,'nodeId',a.node_id::text,'nodeName',n.name,
 			'runtime',a.runtime_kind,'state',a.state,'lastError',a.last_error,'skipped',a.skipped,'activatedAt',a.activated_at)
-			ORDER BY n.name,a.runtime_kind) FROM toolhub_profile_activations a JOIN nodes n ON n.id=a.node_id WHERE a.profile_id=p.id),'[]'::jsonb) AS activations
+			ORDER BY n.name,a.runtime_kind) FROM toolhub_profile_activations a JOIN nodes n ON n.id=a.node_id
+			WHERE a.profile_id=p.id AND a.state IN ('pending','active','partial','failed')),'[]'::jsonb) AS activations
 		FROM toolhub_profiles p WHERE p.id=$1`, id)
 }
 
@@ -134,7 +136,8 @@ func (s *Store) SetToolHubProfileMembers(ctx context.Context, id string, mcpServ
 		return err
 	}
 	var active bool
-	if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM toolhub_profile_activations WHERE profile_id=$1)", id).Scan(&active); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM toolhub_profile_activations WHERE profile_id=$1
+		AND state IN ('pending','active','partial','failed'))`, id).Scan(&active); err != nil {
 		return err
 	}
 	if active {
@@ -210,7 +213,8 @@ func (s *Store) DeleteToolHubProfile(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var activationCount int
-	if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM toolhub_profile_activations WHERE profile_id=p.id)
+	if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM toolhub_profile_activations WHERE profile_id=p.id
+		AND state IN ('pending','active','partial','failed'))
 		FROM toolhub_profiles p WHERE p.id=$1 FOR UPDATE`, id).Scan(&activationCount); errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
@@ -218,6 +222,10 @@ func (s *Store) DeleteToolHubProfile(ctx context.Context, id string) error {
 	}
 	if activationCount > 0 {
 		return ErrStateConflict
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM toolhub_profile_activations WHERE profile_id=$1
+		AND state IN ('legacy_read_only','archived')`, id); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, "DELETE FROM toolhub_profiles WHERE id=$1", id); err != nil {
 		return err
@@ -240,6 +248,10 @@ func (s *Store) PreflightProfileActivation(ctx context.Context, profileID, nodeI
 
 func (s *Store) preflightProfileActivationTx(ctx context.Context, tx pgx.Tx, profileID, nodeID, runtimeKind string, confirmSecrets, lock bool) (ActivationPreflight, error) {
 	result := ActivationPreflight{Errors: []ActivationIssue{}, Skipped: []ActivationIssue{}, RemoteSecretKeys: []string{}}
+	if runtimeKind == domain.RuntimeHermes {
+		result.Errors = append(result.Errors, ActivationIssue{Code: "hermes_read_only", Scope: "runtime", Detail: "Hermes is a read-only import source"})
+		return result, nil
+	}
 	if !domain.IsConsumerRuntime(runtimeKind) {
 		result.Errors = append(result.Errors, ActivationIssue{Code: "runtime_unavailable", Scope: "runtime", Detail: "Unsupported runtime"})
 		return result, nil
@@ -546,11 +558,52 @@ func (s *Store) TargetView(ctx context.Context, nodeID, runtimeKind string) (jso
 		a.state,a.last_error AS "lastError",a.skipped,a.activated_at AS "activatedAt",coalesce(u.username,'') AS "activatedBy"
 		FROM toolhub_profile_activations a JOIN toolhub_profiles p ON p.id=a.profile_id
 		LEFT JOIN toolhub_profiles previous ON previous.id=a.previous_profile_id LEFT JOIN users u ON u.id=a.activated_by
-		WHERE a.node_id=$1 AND a.runtime_kind=$2) q`, nodeID, runtimeKind).Scan(&activationRaw)
+		WHERE a.node_id=$1 AND a.runtime_kind=$2 AND a.state IN ('pending','active','partial','failed')) q`, nodeID, runtimeKind).Scan(&activationRaw)
 	if err == nil {
 		activation = json.RawMessage(activationRaw)
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
+	}
+
+	if runtimeKind == domain.RuntimeHermes {
+		var mcpServers, skillsRaw []byte
+		if err := tx.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(q)),'[]'::jsonb) FROM (
+			SELECT binding.id::text AS id,binding.server_name AS name,binding.server_name AS "runtimeName",
+				coalesce(nullif(binding.descriptor->>'transport',''),'stdio') AS transport,
+				CASE WHEN coalesce(nullif(binding.descriptor->>'transport',''),'stdio')='stdio'
+					THEN coalesce(binding.descriptor->>'command','') ELSE coalesce(binding.descriptor->>'url','') END AS endpoint,
+				NOT binding.missing AS enabled,'hermes-read-only'::text AS source,'Hermes'::text AS "originName",
+				binding.missing,false AS drift,binding.observed_generation AS "observedGeneration",
+				binding.env_keys AS "envKeys",binding.header_keys AS "headerKeys",
+				binding.import_status AS "importStatus",binding.source_changed AS "sourceChanged",true AS "readOnly"
+			FROM mcp_runtime_bindings binding WHERE binding.node_id=$1 AND binding.runtime_kind='hermes'
+				AND binding.control_mode='read_only_source' ORDER BY binding.server_name,binding.id) q`, nodeID).Scan(&mcpServers); err != nil {
+			return nil, err
+		}
+		if err := tx.QueryRow(ctx, `SELECT coalesce(jsonb_agg(to_jsonb(q)),'[]'::jsonb) FROM (
+			SELECT discovery.id::text AS "discoveryId",coalesce(discovery.imported_skill_id::text,'') AS "skillId",
+				discovery.name,discovery.name AS slug,discovery.canonical_path AS path,false AS "desiredEnabled",
+				NOT discovery.missing AS "actualEnabled",'read_only'::text AS state,''::text AS "desiredVersionId",
+				coalesce(discovery.imported_version_id::text,'') AS "actualVersionId",discovery.directory_hash AS sha256,
+				discovery.import_error AS "lastError",discovery.missing,discovery.protected,discovery.disabled,
+				discovery.import_status AS "importStatus",discovery.source_changed AS "sourceChanged",true AS "readOnly"
+			FROM skill_discoveries discovery WHERE discovery.node_id=$1 AND discovery.runtime_kind='hermes'
+				AND discovery.control_mode='read_only_source' ORDER BY discovery.name,discovery.id) q`, nodeID).Scan(&skillsRaw); err != nil {
+			return nil, err
+		}
+		result := map[string]any{
+			"node": node, "runtime": runtimeKind,
+			"capabilities": map[string]any{"skills": false, "mcp": false, "readOnly": true, "mcpNote": "MCP is observed read-only from ~/.hermes/config.yaml"},
+			"activation":   nil,
+			"mcp":          map[string]any{"mcpmProfile": "", "deploymentId": "", "state": "read_only", "servers": json.RawMessage(mcpServers)},
+			"skills":       json.RawMessage(skillsRaw),
+			"drift":        map[string]int{"mcp": 0, "skills": 0},
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		return encoded, tx.Commit(ctx)
 	}
 
 	mcpRuntime := runtimeKind
@@ -558,8 +611,6 @@ func (s *Store) TargetView(ctx context.Context, nodeID, runtimeKind string) (jso
 	if runtimeKind == domain.RuntimeGrok {
 		mcpRuntime = domain.RuntimeClaude
 		mcpNote = "MCP follows claude on this node"
-	} else if runtimeKind == domain.RuntimeHermes {
-		mcpNote = "MCP is read-only from ~/.hermes/config.yaml"
 	} else if runtimeKind == domain.RuntimeOpenClaw {
 		mcpNote = "MCP is read-only from the OpenClaw mcporter configuration"
 	}
@@ -654,7 +705,7 @@ func (s *Store) TargetView(ctx context.Context, nodeID, runtimeKind string) (jso
 	}
 	result := map[string]any{
 		"node": node, "runtime": runtimeKind,
-		"capabilities": map[string]any{"skills": domain.IsSkillRuntime(runtimeKind), "mcp": mcpCapable, "mcpNote": mcpNote},
+		"capabilities": map[string]any{"skills": domain.IsSkillTargetRuntime(runtimeKind), "mcp": mcpCapable, "readOnly": runtimeKind == domain.RuntimeHermes, "mcpNote": mcpNote},
 		"activation":   activation, "mcp": mcpDeployment, "skills": json.RawMessage(skillsRaw),
 		"drift": map[string]int{"mcp": mcpDrift, "skills": skillDrift},
 	}

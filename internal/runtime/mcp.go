@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/protocol"
 )
 
@@ -13,6 +14,9 @@ type SecretResolver func(context.Context, string) (string, error)
 // the runtime's single native anchor. If the anchor edit fails, the mcpm store
 // is restored to its pre-task snapshot.
 func ApplyMCP(ctx context.Context, paths Paths, dataDir string, request protocol.ApplyMCPPayload, resolve SecretResolver) (protocol.ApplyMCPResult, error) {
+	if request.Runtime == domain.RuntimeHermes {
+		return protocol.ApplyMCPResult{}, errors.New("Hermes is a read-only import source")
+	}
 	if request.MCPMProfile == "" {
 		request.MCPMProfile = MCPMProfileForRuntime(request.Runtime)
 	}

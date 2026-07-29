@@ -25,7 +25,8 @@ func (s *Store) ListNodes(ctx context.Context) (json.RawMessage, error) {
 		(SELECT count(*) FROM mcp_runtime_bindings mb WHERE mb.node_id=n.id AND (mb.drift OR mb.missing)) AS "discoveryAttentionCount",
 		coalesce((SELECT array_agg(DISTINCT r.kind ORDER BY r.kind) FROM runtimes r WHERE r.node_id=n.id),ARRAY[]::text[]) AS "runtimeKinds",
 		coalesce((SELECT jsonb_agg(jsonb_build_object('runtime',a.runtime_kind,'profileId',a.profile_id::text,'profileName',p.name,'state',a.state)
-			ORDER BY a.runtime_kind) FROM toolhub_profile_activations a JOIN toolhub_profiles p ON p.id=a.profile_id WHERE a.node_id=n.id),'[]'::jsonb) AS activations
+			ORDER BY a.runtime_kind) FROM toolhub_profile_activations a JOIN toolhub_profiles p ON p.id=a.profile_id
+			WHERE a.node_id=n.id AND a.state IN ('pending','active','partial','failed')),'[]'::jsonb) AS activations
 		FROM nodes n WHERE n.archived_at IS NULL ORDER BY (n.labels->>'scope'='local') DESC,n.name`)
 }
 
@@ -80,7 +81,9 @@ func (s *Store) ListAudit(ctx context.Context) (json.RawMessage, error) {
 }
 
 func (s *Store) ListMCPServers(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT id::text AS id,name,runtime_name AS "runtimeName",transport,command,args,url,env_refs AS "envRefs",header_refs AS "headerRefs",enabled,source,origin,
+	return s.JSONList(ctx, `SELECT id::text AS id,name,runtime_name AS "runtimeName",transport,command,args,url,
+		coalesce((SELECT jsonb_agg(key ORDER BY key) FROM jsonb_object_keys(env_refs) key),'[]'::jsonb) AS "envKeys",
+		coalesce((SELECT jsonb_agg(key ORDER BY key) FROM jsonb_object_keys(header_refs) key),'[]'::jsonb) AS "headerKeys",enabled,source,origin,
 		authority,coalesce(shared_source_id::text,'') AS "sharedSourceId",credential_mode AS "credentialMode",health_status AS "healthStatus",usage,update_policy AS "updatePolicy",archived_at AS "archivedAt",created_at AS "createdAt",
 		(SELECT count(*) FROM mcp_runtime_bindings b WHERE b.server_id=mcp_servers.id) AS "bindingCount",
 		EXISTS(SELECT 1 FROM mcp_runtime_bindings b WHERE b.server_id=mcp_servers.id AND (b.drift OR b.missing)) AS "hasDrift"

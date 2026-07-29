@@ -107,16 +107,33 @@ func (s *Store) CreateMCPServer(ctx context.Context, input MCPServerInput, actor
 }
 
 type MCPServerPatch struct {
-	Name      string    `json:"name"`
-	Enabled   *bool     `json:"enabled"`
-	Transport *string   `json:"transport"`
-	Command   *string   `json:"command"`
-	Args      *[]string `json:"args"`
-	URL       *string   `json:"url"`
+	Name           string            `json:"name"`
+	Enabled        *bool             `json:"enabled"`
+	Transport      *string           `json:"transport"`
+	Command        *string           `json:"command"`
+	Args           *[]string         `json:"args"`
+	URL            *string           `json:"url"`
+	SecretChanges  *MCPSecretChanges `json:"secretChanges"`
+	ConfirmTargets bool              `json:"confirmTargets"`
+	Actor          string            `json:"-"`
+}
+
+type MCPSecretChanges struct {
+	Env     MCPSecretDelta `json:"env"`
+	Headers MCPSecretDelta `json:"headers"`
+}
+
+type MCPSecretDelta struct {
+	Set    map[string]string `json:"set"`
+	Remove []string          `json:"remove"`
 }
 
 func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerPatch) error {
-	if patch.Enabled == nil && strings.TrimSpace(patch.Name) == "" && patch.Transport == nil && patch.Command == nil && patch.Args == nil && patch.URL == nil {
+	envSet, envRemove, headerSet, headerRemove, secretsChanged, err := normalizeMCPSecretChanges(patch.SecretChanges)
+	if err != nil {
+		return err
+	}
+	if patch.Enabled == nil && strings.TrimSpace(patch.Name) == "" && patch.Transport == nil && patch.Command == nil && patch.Args == nil && patch.URL == nil && !secretsChanged {
 		return errors.New("no MCP server changes supplied")
 	}
 	tx, err := s.pool.Begin(ctx)
@@ -138,14 +155,12 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerP
 	if authority == "shared-file" {
 		return ErrSourceFileAuthoritative
 	}
-	if patch.Enabled != nil && *patch.Enabled != enabled {
-		managed, err := mcpServerInActiveToolHubProfileTx(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if managed {
-			return ErrTargetManagedByProfile
-		}
+	managed, err := mcpServerInActiveToolHubProfileTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return ErrTargetManagedByProfile
 	}
 	var args []string
 	var refs map[string]string
@@ -153,6 +168,47 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerP
 	_ = json.Unmarshal(argsJSON, &args)
 	_ = json.Unmarshal(refsJSON, &refs)
 	_ = json.Unmarshal(headerRefsJSON, &headerRefs)
+	if refs == nil {
+		refs = map[string]string{}
+	}
+	if headerRefs == nil {
+		headerRefs = map[string]string{}
+	}
+	if secretsChanged && !patch.ConfirmTargets {
+		targets, err := mcpServerAffectedTargetsTx(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if len(targets) > 0 {
+			return &SecretConfirmationRequiredError{
+				EnvKeys:    sortedUnique(append(mapKeys(envSet), envRemove...)),
+				HeaderKeys: sortedUnique(append(mapKeys(headerSet), headerRemove...)),
+				Targets:    targets,
+			}
+		}
+	}
+	for _, key := range envRemove {
+		delete(refs, key)
+	}
+	for _, key := range headerRemove {
+		delete(headerRefs, key)
+	}
+	for key, value := range envSet {
+		secretID, err := s.createSecret(ctx, tx, "mcp:"+id+":env:"+key+":"+uuid.NewString(), "mcp-env", []byte(value),
+			map[string]any{"mcpServerId": id, "envName": key, "revision": "secret-delta"}, patch.Actor)
+		if err != nil {
+			return err
+		}
+		refs[key] = secretID
+	}
+	for key, value := range headerSet {
+		secretID, err := s.createSecret(ctx, tx, "mcp:"+id+":header:"+key+":"+uuid.NewString(), "mcp-header", []byte(value),
+			map[string]any{"mcpServerId": id, "headerName": key, "revision": "secret-delta"}, patch.Actor)
+		if err != nil {
+			return err
+		}
+		headerRefs[key] = secretID
+	}
 	if patch.Transport != nil {
 		transport = *patch.Transport
 	}
@@ -179,11 +235,51 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerP
 		return err
 	}
 	argsJSON, _ = json.Marshal(descriptor.Args)
-	if _, err := tx.Exec(ctx, `UPDATE mcp_servers SET name=$2,runtime_name=$3,transport=$4,command=$5,args=$6,url=$7,enabled=$8,config_fingerprint=$9,updated_at=now() WHERE id=$1`, id, name, runtimeName, descriptor.Transport, descriptor.Command, string(argsJSON), descriptor.URL, enabled, descriptor.ConfigFingerprint); err != nil {
+	refsJSON, _ = json.Marshal(refs)
+	headerRefsJSON, _ = json.Marshal(headerRefs)
+	if _, err := tx.Exec(ctx, `UPDATE mcp_servers SET name=$2,runtime_name=$3,transport=$4,command=$5,args=$6,url=$7,
+		env_refs=$8,header_refs=$9,enabled=$10,config_fingerprint=$11,updated_at=now() WHERE id=$1`, id, name, runtimeName,
+		descriptor.Transport, descriptor.Command, string(argsJSON), descriptor.URL, string(refsJSON), string(headerRefsJSON), enabled, descriptor.ConfigFingerprint); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET desired_config_fingerprint=$2,desired_enabled=$3,drift=true,updated_at=now() WHERE server_id=$1`, id, descriptor.ConfigFingerprint, enabled); err != nil {
 		return err
+	}
+	if secretsChanged {
+		rows, err := tx.Query(ctx, `SELECT id::text,node_id::text FROM mcp_runtime_bindings
+			WHERE server_id=$1 AND control_mode='managed_target' FOR UPDATE`, id)
+		if err != nil {
+			return err
+		}
+		type bindingTarget struct{ id, nodeID string }
+		var bindings []bindingTarget
+		for rows.Next() {
+			var binding bindingTarget
+			if err := rows.Scan(&binding.id, &binding.nodeID); err != nil {
+				rows.Close()
+				return err
+			}
+			bindings = append(bindings, binding)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, binding := range bindings {
+			key, err := agentTaskKeyTx(ctx, tx, binding.nodeID, s.cipher)
+			if err != nil {
+				return err
+			}
+			fingerprint, err := s.mcpSecretFingerprintTx(ctx, tx, key, refs, headerRefs)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET desired_secret_fingerprint=$2,drift=true,updated_at=now()
+				WHERE id=$1`, binding.id, fingerprint); err != nil {
+				return err
+			}
+		}
 	}
 	profileIDs, err := profileIDsForServer(ctx, tx, id)
 	if err != nil {
@@ -193,6 +289,99 @@ func (s *Store) UpdateMCPServer(ctx context.Context, id string, patch MCPServerP
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func normalizeMCPSecretChanges(changes *MCPSecretChanges) (map[string]string, []string, map[string]string, []string, bool, error) {
+	if changes == nil {
+		return nil, nil, nil, nil, false, nil
+	}
+	envSet := map[string]string{}
+	for raw, value := range changes.Env.Set {
+		key := strings.TrimSpace(raw)
+		if key == "" || len(key) > 128 || value == "" {
+			return nil, nil, nil, nil, false, errors.New("MCP environment names and secret values cannot be empty")
+		}
+		if _, exists := envSet[key]; exists {
+			return nil, nil, nil, nil, false, errors.New("duplicate MCP environment name")
+		}
+		envSet[key] = value
+	}
+	envRemove, err := normalizeSecretRemovals(changes.Env.Remove, func(value string) (string, error) {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 128 {
+			return "", errors.New("invalid MCP environment name")
+		}
+		return value, nil
+	})
+	if err != nil {
+		return nil, nil, nil, nil, false, err
+	}
+	headerSet := map[string]string{}
+	for raw, value := range changes.Headers.Set {
+		key, err := protocol.NormalizeHeaderName(raw)
+		if err != nil || value == "" {
+			return nil, nil, nil, nil, false, errors.New("MCP header names and secret values must be valid and non-empty")
+		}
+		if _, exists := headerSet[key]; exists {
+			return nil, nil, nil, nil, false, errors.New("duplicate MCP HTTP header name")
+		}
+		headerSet[key] = value
+	}
+	headerRemove, err := normalizeSecretRemovals(changes.Headers.Remove, protocol.NormalizeHeaderName)
+	if err != nil {
+		return nil, nil, nil, nil, false, err
+	}
+	for _, key := range envRemove {
+		if _, exists := envSet[key]; exists {
+			return nil, nil, nil, nil, false, errors.New("an MCP environment key cannot be both set and removed")
+		}
+	}
+	for _, key := range headerRemove {
+		if _, exists := headerSet[key]; exists {
+			return nil, nil, nil, nil, false, errors.New("an MCP header key cannot be both set and removed")
+		}
+	}
+	changed := len(envSet)+len(envRemove)+len(headerSet)+len(headerRemove) > 0
+	return envSet, envRemove, headerSet, headerRemove, changed, nil
+}
+
+func normalizeSecretRemovals(values []string, normalize func(string) (string, error)) ([]string, error) {
+	set := map[string]struct{}{}
+	for _, value := range values {
+		normalized, err := normalize(value)
+		if err != nil {
+			return nil, err
+		}
+		set[normalized] = struct{}{}
+	}
+	result := make([]string, 0, len(set))
+	for value := range set {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func mcpServerAffectedTargetsTx(ctx context.Context, tx pgx.Tx, serverID string) ([]MCPAffectedTarget, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT deployment.node_id::text,node.name,deployment.runtime_kind
+		FROM mcp_profile_servers member JOIN mcp_deployments deployment ON deployment.profile_id=member.profile_id
+		JOIN nodes node ON node.id=deployment.node_id
+		WHERE member.server_id=$1 AND deployment.desired_enabled AND deployment.state<>'observed'
+		AND deployment.runtime_kind IN ('codex','claude') AND node.archived_at IS NULL
+		ORDER BY node.name,deployment.runtime_kind`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var targets []MCPAffectedTarget
+	for rows.Next() {
+		var target MCPAffectedTarget
+		if err := rows.Scan(&target.NodeID, &target.NodeName, &target.Runtime); err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, rows.Err()
 }
 
 func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
@@ -308,7 +497,7 @@ func mcpServerInActiveToolHubProfileTx(ctx context.Context, tx pgx.Tx, serverID 
 	var active bool
 	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM toolhub_profile_mcp_servers members
 		JOIN toolhub_profile_activations activations ON activations.profile_id=members.profile_id
-		WHERE members.server_id=$1)`, serverID).Scan(&active)
+		WHERE members.server_id=$1 AND activations.state IN ('pending','active','partial','failed'))`, serverID).Scan(&active)
 	return active, err
 }
 
@@ -358,7 +547,7 @@ func (s *Store) SetMCPProfileServers(ctx context.Context, profileID string, serv
 	var managedTarget bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcp_deployments d
 		JOIN toolhub_profile_activations a ON a.node_id=d.node_id AND a.runtime_kind=d.runtime_kind
-		WHERE d.profile_id=$1)`, profileID).Scan(&managedTarget); err != nil {
+		WHERE d.profile_id=$1 AND a.state IN ('pending','active','partial','failed'))`, profileID).Scan(&managedTarget); err != nil {
 		return err
 	}
 	if managedTarget {
@@ -477,6 +666,9 @@ func (s *Store) SetMCPDeployments(ctx context.Context, profileID, actor string, 
 }
 
 func (s *Store) upsertManagedMCPDeploymentTx(ctx context.Context, tx pgx.Tx, profileID, nodeID, runtimeKind string, enabled bool) (string, error) {
+	if !domain.IsManagedMCPRuntime(runtimeKind) {
+		return "", ErrHermesReadOnly
+	}
 	desiredHash, err := deploymentProfileHashTx(ctx, tx, nodeID, runtimeKind, profileID)
 	if err != nil {
 		return "", err
@@ -501,6 +693,9 @@ func (s *Store) upsertManagedMCPDeploymentTx(ctx context.Context, tx pgx.Tx, pro
 }
 
 func (s *Store) upsertMCPDeploymentBindingsTx(ctx context.Context, tx pgx.Tx, nodeID, runtimeKind, profileID, deploymentID string, deploymentEnabled bool) error {
+	if !domain.IsManagedMCPRuntime(runtimeKind) {
+		return ErrHermesReadOnly
+	}
 	serverIDs, err := effectiveMCPServerIDsTx(ctx, tx, nodeID, runtimeKind, profileID)
 	if err != nil {
 		return err
