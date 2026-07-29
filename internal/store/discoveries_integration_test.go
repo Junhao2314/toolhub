@@ -352,6 +352,96 @@ func TestAdoptSkillCompletionProjectsSharedOwnershipIntegration(t *testing.T) {
 	}
 }
 
+func TestEquivalentSharedMCPImportIsSuppressedIntegration(t *testing.T) {
+	databaseURL := strings.TrimSpace(os.Getenv("TOOLHUB_TEST_DATABASE_URL"))
+	if databaseURL == "" {
+		t.Skip("TOOLHUB_TEST_DATABASE_URL is not set")
+	}
+	if !strings.Contains(databaseURL, "toolhub_discovery_test") {
+		t.Fatal("integration test database URL must target toolhub_discovery_test")
+	}
+	ctx := context.Background()
+	cipher, err := security.NewCipher(bytes.Repeat([]byte{4}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(ctx, databaseURL, cipher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = st.BootstrapAdmin(ctx, "admin", "admin@example.test", "Admin", "ToolHub-Test-Password-2026")
+	var adminID string
+	if err := st.pool.QueryRow(ctx, "SELECT id::text FROM users WHERE username='admin'").Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+
+	makeDescriptors := func(name string) (domain.MCPDescriptor, domain.MCPDescriptor) {
+		t.Helper()
+		input := domain.MCPDescriptor{Name: name, Transport: "stdio", Command: "npx", Args: []string{"-y", "equivalent-server"}}
+		live, err := protocol.NormalizeMCPDescriptor(domain.RuntimeCodex, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shared, err := protocol.NormalizeMCPDescriptor(domain.RuntimeClaude, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shared.ImportSource = "shared-manifest"
+		shared.ImportSourceName = "root-shared"
+		shared.ImportRuntime = domain.RuntimeClaude
+		shared.ImportEnabled = false
+		return live, shared
+	}
+
+	suffix := strings.Split(uuid.NewString(), "-")[0]
+	nodeID, _ := enrollTestNode(t, st, adminID, "dedupe-node-"+suffix)
+	live, shared := makeDescriptors("equivalent-" + suffix)
+	requests, err := st.ProcessAgentInventory(ctx, nodeID, domain.AgentInventory{Runtimes: testInventory(live), MCPImports: []domain.MCPDescriptor{shared}}, true)
+	if err != nil || len(requests) != 0 {
+		t.Fatalf("equivalent inventory requests=%+v err=%v", requests, err)
+	}
+	var runtimeCount, sharedCount int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE source='runtime-auto'),count(*) FILTER (WHERE source='shared-import')
+		FROM mcp_servers WHERE runtime_name=$1`, live.Name).Scan(&runtimeCount, &sharedCount); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeCount != 1 || sharedCount != 0 {
+		t.Fatalf("simultaneous equivalent imports runtime=%d shared=%d", runtimeCount, sharedCount)
+	}
+
+	secondNodeID, _ := enrollTestNode(t, st, adminID, "dedupe-late-node-"+suffix)
+	lateLive, lateShared := makeDescriptors("equivalent-late-" + suffix)
+	if requests, err = st.ProcessAgentInventory(ctx, secondNodeID, domain.AgentInventory{MCPImports: []domain.MCPDescriptor{lateShared}}, true); err != nil || len(requests) != 0 {
+		t.Fatalf("shared-first inventory requests=%+v err=%v", requests, err)
+	}
+	var candidateID string
+	if err := st.pool.QueryRow(ctx, `SELECT id::text FROM mcp_servers WHERE runtime_name=$1 AND source='shared-import' AND archived_at IS NULL`, lateShared.Name).Scan(&candidateID); err != nil {
+		t.Fatal(err)
+	}
+	if requests, err = st.ProcessAgentInventory(ctx, secondNodeID, domain.AgentInventory{Runtimes: testInventory(lateLive), MCPImports: []domain.MCPDescriptor{lateShared}}, true); err != nil || len(requests) != 0 {
+		t.Fatalf("runtime takeover inventory requests=%+v err=%v", requests, err)
+	}
+	var archived bool
+	if err := st.pool.QueryRow(ctx, "SELECT archived_at IS NOT NULL AND NOT enabled FROM mcp_servers WHERE id=$1", candidateID).Scan(&archived); err != nil {
+		t.Fatal(err)
+	}
+	if !archived {
+		t.Fatal("preexisting equivalent shared candidate was not archived")
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE source='runtime-auto' AND archived_at IS NULL),
+		count(*) FILTER (WHERE source='shared-import' AND archived_at IS NULL) FROM mcp_servers WHERE runtime_name=$1`, lateLive.Name).
+		Scan(&runtimeCount, &sharedCount); err != nil {
+		t.Fatal(err)
+	}
+	if runtimeCount != 1 || sharedCount != 0 {
+		t.Fatalf("late equivalent imports runtime=%d active-shared=%d", runtimeCount, sharedCount)
+	}
+}
+
 func TestMCPMImportSeedsManagedProfilesAndRequiresExplicitDeploymentIntegration(t *testing.T) {
 	databaseURL := strings.TrimSpace(os.Getenv("TOOLHUB_TEST_DATABASE_URL"))
 	if databaseURL == "" {

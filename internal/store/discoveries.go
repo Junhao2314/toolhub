@@ -522,6 +522,12 @@ func (s *Store) observeMCPImportTx(ctx context.Context, tx pgx.Tx, nodeID string
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return false, nil, nil, err
 	}
+	if !known && descriptor.ImportSource == "shared-manifest" {
+		_, known, err = equivalentNonSharedMCPServerTx(ctx, tx, nodeID, descriptor)
+		if err != nil {
+			return false, nil, nil, err
+		}
+	}
 	if descriptor.ImportSource != "mcpm" {
 		return known, nil, nil, nil
 	}
@@ -584,10 +590,22 @@ func (s *Store) importMCPDescriptorTx(ctx context.Context, tx pgx.Tx, nodeID str
 		WHERE authority='toolhub' AND origin->>'nodeId'=$1 AND origin->>'importSource'=$2
 		AND origin->>'importSourceName'=$3 AND origin->>'serverName'=$4`, nodeID, descriptor.ImportSource, descriptor.ImportSourceName, descriptor.Name).Scan(&existingID)
 	if err == nil {
+		if descriptor.ImportSource == "mcpm" {
+			if err := archiveEquivalentSharedMCPImportsTx(ctx, tx, nodeID, descriptor); err != nil {
+				return MCPAdoptionResult{}, err
+			}
+		}
 		return MCPAdoptionResult{ServerID: existingID, Reused: true}, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return MCPAdoptionResult{}, err
+	}
+	if descriptor.ImportSource == "shared-manifest" {
+		if serverID, found, err := equivalentNonSharedMCPServerTx(ctx, tx, nodeID, descriptor); err != nil {
+			return MCPAdoptionResult{}, err
+		} else if found {
+			return MCPAdoptionResult{ServerID: serverID, Reused: true}, nil
+		}
 	}
 	serverID := uuid.NewString()
 	name, err := s.importedMCPServerNameTx(ctx, tx, descriptor)
@@ -626,6 +644,9 @@ func (s *Store) importMCPDescriptorTx(ctx context.Context, tx pgx.Tx, nodeID str
 	result := MCPAdoptionResult{ServerID: serverID}
 	if descriptor.ImportSource != "mcpm" {
 		return result, nil
+	}
+	if err := archiveEquivalentSharedMCPImportsTx(ctx, tx, nodeID, descriptor); err != nil {
+		return MCPAdoptionResult{}, err
 	}
 	for _, runtimeKind := range descriptor.TargetRuntimes {
 		profileID, err := ensureManagedMCPProfileTx(ctx, tx, runtimeKind, nodeID)
@@ -671,6 +692,33 @@ func (s *Store) importMCPDescriptorTx(ctx context.Context, tx pgx.Tx, nodeID str
 		}
 	}
 	return result, nil
+}
+
+func equivalentNonSharedMCPServerTx(ctx context.Context, tx pgx.Tx, nodeID string, descriptor domain.MCPDescriptor) (string, bool, error) {
+	var serverID string
+	err := tx.QueryRow(ctx, `SELECT server.id::text FROM mcp_servers server
+		WHERE server.authority='toolhub' AND server.source<>'shared-import' AND server.archived_at IS NULL
+		AND server.runtime_name=$2 AND server.transport=$3 AND server.command=$4 AND server.args=$5::jsonb AND server.url=$6
+		AND (coalesce(server.origin->>'nodeId','')=$1::text OR EXISTS(
+			SELECT 1 FROM mcp_runtime_bindings binding
+			WHERE binding.server_id=server.id AND binding.node_id=$1::uuid AND binding.server_name=$2))
+		ORDER BY CASE server.source WHEN 'mcpm-import' THEN 0 WHEN 'runtime-auto' THEN 1 ELSE 2 END,server.created_at
+		LIMIT 1`, nodeID, descriptor.Name, descriptor.Transport, descriptor.Command, jsonStringArray(descriptor.Args), descriptor.URL).Scan(&serverID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return serverID, true, nil
+}
+
+func archiveEquivalentSharedMCPImportsTx(ctx context.Context, tx pgx.Tx, nodeID string, descriptor domain.MCPDescriptor) error {
+	_, err := tx.Exec(ctx, `UPDATE mcp_servers SET enabled=false,archived_at=coalesce(archived_at,now()),updated_at=now()
+		WHERE source='shared-import' AND archived_at IS NULL AND origin->>'nodeId'=$1
+		AND runtime_name=$2 AND transport=$3 AND command=$4 AND args=$5::jsonb AND url=$6`,
+		nodeID, descriptor.Name, descriptor.Transport, descriptor.Command, jsonStringArray(descriptor.Args), descriptor.URL)
+	return err
 }
 
 func (s *Store) importedMCPServerNameTx(ctx context.Context, tx pgx.Tx, descriptor domain.MCPDescriptor) (string, error) {
@@ -815,6 +863,9 @@ func (s *Store) adoptRuntimeMCPTx(ctx context.Context, tx pgx.Tx, nodeID, runtim
 		FROM mcp_runtime_bindings WHERE node_id=$1 AND runtime_kind=$2 AND server_name=$3`, nodeID, runtimeKind, descriptor.Name).
 		Scan(&existing.BindingID, &existing.ServerID, &existing.ProfileID, &existing.DeploymentID)
 	if err == nil {
+		if err := archiveEquivalentSharedMCPImportsTx(ctx, tx, nodeID, descriptor); err != nil {
+			return MCPAdoptionResult{}, err
+		}
 		existing.Reused = true
 		return existing, nil
 	}
@@ -830,6 +881,9 @@ func (s *Store) adoptRuntimeMCPTx(ctx context.Context, tx pgx.Tx, nodeID, runtim
 		if err != nil {
 			return MCPAdoptionResult{}, err
 		}
+	}
+	if err := archiveEquivalentSharedMCPImportsTx(ctx, tx, nodeID, descriptor); err != nil {
+		return MCPAdoptionResult{}, err
 	}
 	profileID, err := ensureRuntimeAutoProfile(ctx, tx, nodeID, runtimeKind)
 	if err != nil {

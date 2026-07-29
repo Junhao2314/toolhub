@@ -12,6 +12,7 @@ async function expectMobileNavigationClosed(page: Page, projectName: string) {
 test('login and core navigation render without overlap', async ({ page }, testInfo) => {
   const email = process.env.TOOLHUB_E2E_EMAIL
   const username = process.env.TOOLHUB_E2E_USERNAME ?? 'admin'
+  const localNodeName = process.env.TOOLHUB_E2E_LOCAL_NODE_NAME ?? 'project-host'
   const password = process.env.TOOLHUB_E2E_PASSWORD
   if (!email || !password) throw new Error('TOOLHUB_E2E_EMAIL and TOOLHUB_E2E_PASSWORD are required')
   const consoleErrors: string[] = []
@@ -48,6 +49,7 @@ test('login and core navigation render without overlap', async ({ page }, testIn
   await page.getByRole('button', { name: 'Skills', exact: true }).click()
   await expectMobileNavigationClosed(page, testInfo.project.name)
   await expect(page.getByRole('heading', { name: 'Skills' })).toBeVisible()
+  await expect(page.getByLabel('Skill provenance')).toBeVisible()
   await expect(page.locator('main')).toHaveCSS('overflow-x', 'visible')
 
   const viewport = page.viewportSize()!
@@ -64,7 +66,16 @@ test('login and core navigation render without overlap', async ({ page }, testIn
   if (testInfo.project.name === 'mobile') {
     await page.getByRole('button', { name: 'Open navigation' }).click()
   }
-  await page.getByRole('button', { name: 'Profiles', exact: true }).click()
+  await page.getByRole('button', { name: 'MCP', exact: true }).click()
+  await expectMobileNavigationClosed(page, testInfo.project.name)
+  await expect(page.getByRole('heading', { name: 'MCP', exact: true })).toBeVisible()
+  await expect(page.getByLabel('MCP provenance')).toBeVisible()
+  await page.screenshot({ path: `../test-results/${testInfo.project.name}-mcp.png`, fullPage: true })
+
+  if (testInfo.project.name === 'mobile') {
+    await page.getByRole('button', { name: 'Open navigation' }).click()
+  }
+  await page.getByRole('navigation').getByRole('button', { name: 'Profiles', exact: true }).click()
   await expectMobileNavigationClosed(page, testInfo.project.name)
   await expect(page.getByRole('heading', { name: 'Profiles' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Add Profile' })).toBeVisible()
@@ -92,7 +103,7 @@ test('login and core navigation render without overlap', async ({ page }, testIn
   await page.getByRole('button', { name: 'Close', exact: true }).click()
   await page.getByRole('button', { name: 'Enroll project host' }).click()
   await expect(page.getByRole('heading', { name: /Enroll project host/ })).toBeVisible()
-  await expect(page.getByLabel('Node name')).toHaveValue('project-host')
+  await expect(page.getByLabel('Node name')).toHaveValue(localNodeName)
   await page.getByRole('button', { name: 'Close', exact: true }).click()
   await page.screenshot({ path: `../test-results/${testInfo.project.name}-nodes.png`, fullPage: true })
   await page.getByRole('button', { name: 'Sign out' }).click()

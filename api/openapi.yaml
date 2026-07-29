@@ -168,7 +168,7 @@ paths:
   /mcp/servers:
     get:
       operationId: listMCPServers
-      description: Lists central servers plus redacted import provenance. mcpm imports are enabled baselines; legacy shared-manifest imports are disabled review candidates and may carry a conflict-renamed display name.
+      description: Lists central servers plus redacted import provenance. mcpm imports are enabled baselines; unique legacy shared-manifest imports are disabled review candidates, while structurally equivalent shared duplicates are suppressed or archived.
       responses: {'200': {$ref: '#/components/responses/JSON'}}
     post:
       operationId: createMCPServer
