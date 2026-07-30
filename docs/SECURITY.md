@@ -1,55 +1,103 @@
 # Security Model
 
-## Trust Boundary
+## Identity And Sessions
 
-ToolHub assumes the host and Tailnet are trusted administrative infrastructure. Docker publishes only `127.0.0.1:18480`; Tailscale Serve should terminate HTTPS/WSS. PostgreSQL is attached only to the internal Compose network.
+PostgreSQL enforces one `account` row. Usernames are normalized lowercase
+identifiers; passwords are Argon2id (`m=65536 KiB`, `t=3`, `p=2`, 16-byte salt,
+32-byte key) and must be 12-1024 characters.
 
-## Credentials
+Login uses a dummy hash for unknown usernames and a per-IP limit of 10 attempts
+per 10 minutes. Session and CSRF tokens are random; only SHA-256 hashes are
+stored. The cookie is HttpOnly, SameSite=Strict, and Secure by default. Changing
+username or password revokes all sessions. There is no RBAC or second account.
 
-- Passwords use Argon2id with 64 MiB memory, three iterations, random salt, and constant-time verification.
-- Browser login accepts a case-insensitive username or email identifier and returns one uniform invalid-credentials error.
-- Random temporary passwords use the operating system CSPRNG, are returned once, and are never written to audit metadata or logs. Username/password changes revoke all sessions for the target user.
-- Session and Agent bearer tokens are stored only as SHA-256 hashes.
-- AI keys, centrally managed MCP environment/header values, SSH keys, and Agent task keys use XChaCha20-Poly1305 with record ID associated data.
-- `XIAPING_API_KEY` remains control-plane environment state: browser APIs expose only a configured boolean, public search never receives the key, and authenticated download requests cannot redirect it outside the configured HTTPS origin. Provider-supplied archive URLs use proxy-free DNS-pinned public-address dialing and are revalidated on redirects.
-- MCP inventory contains normalized non-secret descriptors plus environment/header key names only. Secret comparison uses HMAC-SHA256 under the per-node task key; unknown managed-runtime values are requested through an expiring, one-time, node/identity-bound capture token and encrypted immediately. Hermes receives no capture token during ordinary discovery; only an administrator-confirmed, generation-pinned import can authorize one candidate.
-- Agent secret resolution permits only `mcp-env` and `mcp-header` secrets referenced by an enabled, desired, ToolHub-authoritative MCP deployment on that node. When a browser secret edit atomically swaps to new encrypted records, an old reference remains authorized only while a pending, delivered, or running `apply_mcp` task for that node explicitly names it; terminal tasks grant no historical access. An Agent cannot fetch AI keys, SSH keys, disabled/unreferenced MCP values, or another node's values.
-- Observed-only and arbitrary/mismatched MCP profiles are excluded from Agent secret authorization; a fixed profile must first enter the explicit deployment state for its matching runtime.
-- Mirrored `shared-file` MCP rows remain node-local observations. When a legacy manifest entry is imported as a central candidate, its values cross only the authenticated one-time capture route, are fingerprint-verified, and are encrypted immediately; ordinary inventory still contains key names only.
-- Audit metadata, persisted inventory, and AI inputs recursively redact credential-shaped fields. Secret-bearing browser responses are prevented at their specific store/handler boundaries; there is no universal response-redaction middleware.
+## Secret Storage
 
-## Remote Execution
+`TOOLHUB_MASTER_KEY` is a 32-byte key used by XChaCha20-Poly1305. Each encrypted
+secret uses its record UUID as AAD. MCP browser responses contain key names only.
+Plaintext is accepted only on write, decrypted only for an authorized active
+manifest, sent ephemerally to the Bridge/Salt bundle, cleared from worker maps,
+and never returned to the browser.
 
-Agent tasks have a closed type set and are HMAC-signed over canonical JSON. The Agent records results for 30 days and returns the previous result for a repeated task ID.
+Desired snapshot manifests may contain secret references only. Bridge BoltDB
+rejects values named `secretValues`, archives, editable content, plaintext, or
+raw output. Audit metadata is redacted before persistence. There is no universal
+response redaction middleware, so every new response must be reviewed at its
+call site.
 
-SSH fallback uses a pinned OpenSSH `known_hosts` line, BatchMode, IdentitiesOnly, SFTP upload, and one fixed command: `toolhub-agent run-task --file <validated-temp-path>`. ToolHub does not expose a remote shell API.
+## Bridge Boundary
 
-The Nodes page never reads SSH private keys back. Saving a replacement disables the previous active SSH connection and stores the new key as a separate encrypted secret for auditability.
+The Bridge listens only on `/run/toolhub-bridge/bridge.sock` at mode `0660` with
+a fixed shared GID. It runs as root; ToolHub runs unprivileged and mounts only
+the socket directory, never a managed home.
 
-## Skill Intake
+Every request uses a dedicated 32-byte HMAC key and signs:
 
-Archives reject absolute paths, traversal, backslashes, duplicate paths, symlinks, oversized files, and multiple package roots. Review reports expose scripts, executables, URLs, allowed tools, possible credentials, and license presence. Imported content is immutable and remains Library-only until an administrator approves it and assigns targets.
+```text
+UPPERCASE_METHOD\nREQUEST_URI\nUNIX_TIMESTAMP\nNONCE\nSHA256(BODY)
+```
 
-Discovered non-Hermes runtime Skills remain read-only until an administrator queues adoption. The Agent rejects `.system`, escaped, or symlinked paths; the backend rescans the uploaded canonical ZIP and verifies its discovery hash. The Agent writes the managed marker only after that import succeeds. Shared-source adoption is import-only and intentionally leaves the legacy source unmodified. Hermes uses a separate signed snapshot task and upload authorization; it accepts a managed source directory as input when safely bounded but never writes a marker or any other file into Hermes.
+The accepted clock skew is 30 seconds. Nonces are persisted before dispatch and
+replay is rejected. Mutations are idempotent by caller key and request hash. The
+Bridge persists the hash and operation ID before dispatch, then records only a
+safe terminal result. Restart replay returns that result without repeating the
+adapter mutation.
+The Bridge API exposes typed operations only: no arbitrary shell, executable,
+filesystem path, Salt function, or systemd unit can cross the boundary.
 
-## Deployment Safety
+Local MCP intake requires a separate revision-bound confirmation. Its preview
+returns sanitized transport fields and secret key names only. After confirmation,
+the Bridge reads the matching native user-scope entry once; the worker encrypts
+the captured values immediately. The capture response bypasses BoltDB and is
+forbidden from browser responses, operation metadata/results, audit events, and
+logs.
 
-Managed content is cached under `~/.toolhub/artifacts/<sha256>`. Activation stages a full directory, backs up the previous managed directory, and uses rename-based replacement. If the backup directory is on another filesystem, the Agent copies into a destination-side staging path, atomically activates the backup, and only then removes the source. Existing unmanaged directories and `.system` targets are conflicts, not overwrite candidates.
+BoltDB is mode `0600`. It stores nonce/idempotency records, safe operation and
+target steps, Salt JIDs, recovery fingerprints, fixed staging paths, and backup
+catalog entries. Terminal result persistence strips manifests and editable
+details; remote `managedHome` exists only in transient delivery DTOs. BoltDB
+does not store secret values, archives, editable config, or raw Salt output.
 
-For ToolHub-authoritative MCP, native non-relay discoveries are automatically baselined without rewriting the node. mcpm imports instead create fixed Codex/Claude profiles in `observed` state; an explicit deployment transition is required before the Agent writes anything.
+## Filesystem Safety
 
-The mcpm delivery boundary is narrow and reversible:
+Local and Salt adapters resolve the managed user through OS account lookup and
+reject missing users, `/` homes, symlink homes, traversal, escaped realpaths,
+symlinks, devices, oversized/binary unsafe input, and protected names. Writes use
+same-filesystem staging, validation, fsync, backup, and atomic rename/replace.
+Every managed parent is checked for symlinks before scan, stage, backup,
+restore, or atomic replacement. Salt independently resolves the managed user
+with `user.info` and repeats canonical-home and symlink-parent checks on the
+minion.
 
-- `apply_mcp` is accepted only for Codex/Claude with the exact fixed profile name. Hermes, Grok, and OpenClaw remain outside the writer.
-- `deploy_skill` and `adopt_skill` reject Hermes in Store, worker, Agent, and runtime boundaries. Database constraints prevent new Hermes Skill/MCP deployments or Profile activations; migrated historical rows are inert `legacy_read_only`/`archived` state.
-- Hermes source changes update observation/import metadata only. They do not create drift, desired state, automatic sync, rollback, or node writes.
-- Profile membership edits preserve an `observed` deployment instead of making it schedulable. Only the explicit fixed-profile deployment transition can move it to `pending`.
-- Secret values are fetched only through `AgentSecretValue` authorization for an enabled desired deployment. They are materialized only into the node-local mcpm registry, which is written at mode `0600`.
-- The structured patch preserves unknown servers and fields, refuses to replace an unowned conflicting definition, updates only the selected profile tag, and uses a same-directory fsynced temporary file plus atomic rename.
-- Existing mcpm and native anchor files receive timestamped mode-`0600` backups. If the native anchor edit fails, the mcpm write is restored before the task fails.
-- Claude/Codex anchor editors preserve unrelated JSON/TOML content and remove only recognized legacy relay sections. ToolHub archives the legacy Codex plugin only after validating its `plugin.json` ToolHub author marker.
-- The packaged Linux service keeps `ProtectSystem=strict`, but the enrolled home is writable because same-directory atomic replacement of `~/.claude.json` cannot work through `ProtectHome=read-only`. Runtime paths remain constrained by the closed signed task protocol and Agent-side path validation.
+Skills reject absolute/backslash/traversal paths, symlinks, unsafe types,
+oversized archives/files, and multiple package roots. Artifacts are rescanned and
+must match their pinned canonical SHA-256 before each write.
 
-Shared sources are a separate read-only import boundary. Paths and allowed Skill roots come only from local Agent configuration; browser requests and signed tasks never carry arbitrary filesystem paths. Legacy managed/auto-sync settings normalize to observed mode, and the shared writer, watcher, task kind, and CLI command do not exist.
+## Salt
 
-Before production use, rotate every example credential, enable secure cookies, configure Tailnet ACLs, back up PostgreSQL, and review high-risk Skill findings manually.
+Only accepted keys are discovered. Every target must report Salt 3008.x.
+Commands use fixed `exec.CommandContext` argv and allow-listed functions. Dynamic
+payloads are root-only staged and sent with `salt-cp --chunked`; they are removed
+after terminal handling. Missing/expired async JIDs are never assumed successful:
+the target is rescanned and must match the persisted pinned-member fingerprints.
+
+ToolHub writes only its namespace below `/srv/salt/states`; it never edits
+`/etc/salt/master` or Hermes-managed content.
+
+## MCP Scope
+
+Local MCP requires a compatible preinstalled `mcpm`. ToolHub manages one profile
+named `toolhub`, one fixed relay unit, and one `toolhub-relay` user-scope anchor in
+`~/.claude.json` and `~/.codex/config.toml`. It does not auto-find, install,
+upgrade, or fall back to native per-server local delivery.
+
+Remote Claude writes only top-level user `mcpServers` in `~/.claude.json`.
+Remote Codex writes only `mcp_servers` in `~/.codex/config.toml`. Claude
+project/local/managed/plugin scopes and protected entries are excluded.
+
+## Operational Requirements
+
+Keep the HTTP port loopback-only, terminate remote access with authenticated
+HTTPS and Tailnet ACLs, keep secure cookies enabled, rotate example credentials,
+restrict the Bridge group, back up the PostgreSQL volume/runtime homes/Salt tree,
+and review Skill scan reports before Apply.

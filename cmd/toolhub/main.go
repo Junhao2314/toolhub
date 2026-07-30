@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path"
@@ -15,16 +14,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/Junhao2314/toolhub/internal/agenthub"
 	"github.com/Junhao2314/toolhub/internal/ai"
+	"github.com/Junhao2314/toolhub/internal/bridgeclient"
 	"github.com/Junhao2314/toolhub/internal/config"
 	"github.com/Junhao2314/toolhub/internal/httpapi"
 	"github.com/Junhao2314/toolhub/internal/market"
-	"github.com/Junhao2314/toolhub/internal/remote"
 	"github.com/Junhao2314/toolhub/internal/security"
 	"github.com/Junhao2314/toolhub/internal/store"
 	"github.com/Junhao2314/toolhub/internal/worker"
-	"github.com/google/uuid"
 )
 
 //go:embed dist/*
@@ -57,46 +54,39 @@ func run(logger *slog.Logger) error {
 	if err := st.Migrate(ctx); err != nil {
 		return err
 	}
-	created, err := st.BootstrapAdmin(ctx, cfg.BootstrapAdminUsername, cfg.BootstrapAdminEmail, cfg.BootstrapAdminName, cfg.BootstrapAdminPassword)
+	created, err := st.BootstrapAccount(ctx, cfg.BootstrapUsername, cfg.BootstrapPassword)
 	if err != nil {
 		return err
 	}
 	if created {
-		logger.Info("bootstrap administrator created", "username", cfg.BootstrapAdminUsername, "email", cfg.BootstrapAdminEmail)
+		logger.Info("singleton account created", "username", cfg.BootstrapUsername)
 	}
-	localNodeID, localNodeCreated, err := st.BootstrapLocalNode(ctx, cfg.LocalNodeName)
+	if err := st.BootstrapEnvironment(ctx, cfg.LocalNodeName, cfg.ManagedUsername, cfg.Timezone.String(), cfg.RelayPort); err != nil {
+		return err
+	}
+	bridge, err := bridgeclient.New(cfg.BridgeSocket, cfg.BridgeKey)
 	if err != nil {
 		return err
 	}
-	if localNodeCreated {
-		logger.Info("project-host node created", "nodeId", localNodeID, "name", cfg.LocalNodeName)
-	}
-	publicHost := ""
-	if parsed, parseErr := url.Parse(cfg.PublicURL); parseErr == nil {
-		publicHost = parsed.Hostname()
-	}
-	instanceID := uuid.NewString()
-	hub := agenthub.New(st, logger, publicHost, instanceID)
-	sshFallback := remote.New(st, logger)
 	marketClient := market.NewMulti(
 		market.New("https://skillsmp.com/api/v1", cfg.SkillsMPAPIKey),
 		market.NewXiaping(cfg.XiapingBaseURL, cfg.XiapingAPIKey),
 	)
-	jobWorker := worker.New(st, hub, sshFallback, marketClient, logger, instanceID)
-	jobWorker.Run(ctx, 4)
-	scheduler := worker.NewScheduler(st, logger)
-	go scheduler.Run(ctx)
-	api, err := httpapi.New(cfg, st, hub, marketClient, ai.New(st), logger)
-	if err != nil {
+	operationWorker := worker.New(st, bridge, marketClient, logger)
+	if err := operationWorker.Recover(ctx); err != nil {
 		return err
 	}
+	operationWorker.Run(ctx, 4)
+	scheduler := worker.NewScheduler(st, logger)
+	go scheduler.Run(ctx)
+	api := httpapi.New(st, bridge, marketClient, ai.New(st), cfg, logger)
 	spa, err := newSPAHandler()
 	if err != nil {
 		return err
 	}
 	apiHandler := api.Router()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/agent/") {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/api/") {
 			apiHandler.ServeHTTP(w, r)
 			return
 		}
@@ -105,7 +95,7 @@ func run(logger *slog.Logger) error {
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 1 << 20}
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info("ToolHub listening", "address", cfg.ListenAddr, "publicUrl", cfg.PublicURL)
+		logger.Info("ToolHub listening", "address", cfg.ListenAddr)
 		serverErrors <- server.ListenAndServe()
 	}()
 	select {

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"net"
 
 	"github.com/google/uuid"
 
@@ -13,17 +14,19 @@ import (
 func (s *Store) Audit(ctx context.Context, event domain.AuditEvent) error {
 	metadata, err := json.Marshal(security.RedactMap(event.Metadata))
 	if err != nil {
-		metadata = []byte("{}")
-	}
-	var actor any
-	if event.ActorUserID != "" {
-		actor = event.ActorUserID
+		return err
 	}
 	var ip any
-	if event.IPAddress != "" {
-		ip = event.IPAddress
+	if parsed := net.ParseIP(event.IPAddress); parsed != nil {
+		ip = parsed.String()
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO audit_events(id,actor_user_id,action,resource_type,resource_id,outcome,ip_address,metadata)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)`, uuid.NewString(), actor, event.Action, event.ResourceType, event.ResourceID, event.Outcome, ip, string(metadata))
+	_, err = s.pool.Exec(ctx, `INSERT INTO audit_events(id,action,resource_type,resource_id,outcome,ip_address,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)`, uuid.NewString(), event.Action, event.ResourceType, event.ResourceID, event.Outcome, ip, jsonText(metadata))
 	return err
+}
+
+func (s *Store) ListAudit(ctx context.Context, limit int) (json.RawMessage, error) {
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	return s.JSONList(ctx, `SELECT id::text,action,resource_type AS "resourceType",resource_id AS "resourceId",outcome,host(ip_address) AS "ipAddress",metadata,created_at AS "createdAt" FROM audit_events ORDER BY created_at DESC LIMIT $1`, limit)
 }

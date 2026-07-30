@@ -1,24 +1,19 @@
 package store
 
 import (
-	"errors"
+	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/Junhao2314/toolhub/internal/security"
 )
 
-func TestMapUserWriteError(t *testing.T) {
-	tests := []struct {
-		constraint string
-		want       error
-	}{
-		{constraint: "users_username_lower_idx", want: ErrUsernameUnavailable},
-		{constraint: "users_email_lower_idx", want: ErrEmailUnavailable},
+func TestSingletonAccountUsesExistingPasswordBoundary(t *testing.T) {
+	hash, err := security.HashPassword(strings.Repeat("safe-", 3))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		err := mapUserWriteError(&pgconn.PgError{Code: "23505", ConstraintName: test.constraint})
-		if !errors.Is(err, test.want) {
-			t.Fatalf("constraint %q mapped to %v, want %v", test.constraint, err, test.want)
-		}
+	ok, err := security.VerifyPassword(hash, strings.Repeat("safe-", 3))
+	if err != nil || !ok {
+		t.Fatalf("Argon2id round trip failed: ok=%v err=%v", ok, err)
 	}
 }

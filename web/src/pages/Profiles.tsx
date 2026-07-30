@@ -1,307 +1,66 @@
-import { Eye, Layers, Pencil, Play, Plus, RefreshCw, Search, Trash2 } from 'lucide-react'
+import { Eye, Pencil, Play, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { api, APIError, type Dict } from '../api/client'
+import { api, type MCPServer, type Operation, type Profile, type Skill, type Target } from '../api/client'
 import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Status } from '../components/ui'
 import { useData } from '../hooks/useData'
 import { useI18n } from '../i18n'
 
-interface ProfileSummary {
-  id: string
-  name: string
-  description: string
-  mcpServerCount: number
-  skillCount: number
-  activationCount: number
-}
+interface DiffItem { kind: string; memberId?: string; name: string; reason?: string }
+interface PreflightItem { targetId: string; confirmationToken: string; expiresAt: string; result: { targetRevision: string; manifestHash: string; diff: { add: DiffItem[]; replace: DiffItem[]; delete: DiffItem[]; excluded: DiffItem[] } } }
 
-interface ProfileActivation {
-  id: string
-  nodeId: string
-  nodeName: string
-  runtime: string
-  state: string
-  lastError: string
-}
-
-interface ProfileDetail {
-  id: string
-  name: string
-  description: string
-  mcpServerIds: string[]
-  skillIds: string[]
-  activations: ProfileActivation[]
-}
-
-interface SkillOption {
-  id: string
-  name: string
-  slug: string
-  sourceKind?: string
-  reviewStatus: string
-}
-
-interface MCPOption {
-  id: string
-  name: string
-  source: string
-  origin?: { importSourceName?: string }
-  transport: string
-  enabled: boolean
-  authority: string
-  archivedAt?: string
-}
-
-interface TargetNode {
-  id: string
-  name: string
-  status: string
-  isLocal: boolean
-  runtimeKinds: string[]
-}
-
-interface ActivationIssue {
-  code?: string
-  scope?: string
-  reason?: string
-  detail?: string
-}
-
-interface ActivationPreflight {
-  ok: boolean
-  errors: ActivationIssue[]
-  skipped: ActivationIssue[]
-  remoteSecretKeys: string[]
-  nodeIsLocal: boolean
-  nodeName: string
-}
-
-interface MemberItem {
-  id: string
-  name: string
-  detail: string
-  provenance: string
-  disabled?: boolean
-}
-
-export default function Profiles({ canOperate }: { canOperate: boolean }) {
+export default function Profiles() {
   const { t } = useI18n()
   const state = useData(async () => {
-    const [profiles, skills, servers, nodes] = await Promise.all([
-      api.list<ProfileSummary>('/profiles'),
-      api.list<SkillOption>('/skills'),
-      api.list<MCPOption>('/mcp/servers'),
-      api.list<TargetNode>('/nodes'),
-    ])
-    return { profiles: profiles.items, skills: skills.items, servers: servers.items, nodes: nodes.items }
+    const [profiles, skills, servers, targets] = await Promise.all([api.list<Profile>('/profiles'), api.list<Skill>('/skills'), api.list<MCPServer>('/mcp/servers'), api.list<Target>('/targets')])
+    return { profiles: profiles.items, skills: skills.items, servers: servers.items, targets: targets.items }
   }, [])
-  const [editing, setEditing] = useState<ProfileDetail | 'new' | null>(null)
-  const [activating, setActivating] = useState<ProfileSummary | null>(null)
-  const [busy, setBusy] = useState('')
-  const [error, setError] = useState('')
+  const [editing, setEditing] = useState<Profile | 'new' | null>(null)
+  const [applying, setApplying] = useState<Profile | null>(null)
   const [notice, setNotice] = useState('')
-
-  const openProfile = async (profile: ProfileSummary) => {
-    setBusy(profile.id)
-    setError('')
-    try {
-      setEditing(await api.get<ProfileDetail>(`/profiles/${profile.id}`))
-    } catch (reason) {
-      setError((reason as Error).message)
-    } finally {
-      setBusy('')
-    }
+  if (state.loading) return <Loading />
+  if (state.error || !state.data) return <ErrorNotice message={state.error} retry={state.reload} />
+  const remove = (profile: Profile) => {
+    if (!confirm(`${t('Delete')} ${profile.name}?`)) return
+    api.delete(`/profiles/${profile.id}`).then(state.reload).catch((reason: Error) => setNotice(reason.message))
   }
-  const remove = async (profile: ProfileSummary) => {
-    if (!confirm(t('Delete Profile {name}?', { name: profile.name }))) return
-    setBusy(profile.id)
-    setError('')
-    try {
-      await api.delete(`/profiles/${profile.id}`)
-      setNotice(t('Profile deleted.'))
-      state.reload()
-    } catch (reason) {
-      setError((reason as Error).message)
-    } finally {
-      setBusy('')
-    }
-  }
-  const completed = (message: string) => {
-    setEditing(null)
-    setActivating(null)
-    setNotice(message)
-    state.reload()
-  }
-
   return <>
-    <PageHeader
-      title={t('Profiles')}
-      detail={t('Reusable Skill and MCP selections activated per runtime target.')}
-      actions={<><Button variant="secondary" onClick={state.reload}><RefreshCw size={16} />{t('Refresh')}</Button>{canOperate && <Button onClick={() => setEditing('new')}><Plus size={16} />{t('Add Profile')}</Button>}</>}
-    />
-    {error && <ErrorNotice message={error} />}
+    <PageHeader title={t('Profiles')} detail={t('Unified Skill and MCP membership')} actions={<Button onClick={() => setEditing('new')}><Plus size={16} />{t('New Profile')}</Button>} />
     {notice && <div className="inline-notice">{notice}</div>}
-    {state.loading ? <Loading label={t('Loading Profiles')} /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : state.data.profiles.length === 0 ? <Empty title={t('No Profiles')} detail={t('Create a named selection of Skills and MCP servers for repeatable activation.')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Profile')}</th><th>{t('MCP servers')}</th><th>{t('Skills')}</th><th>{t('Active targets')}</th><th aria-label={t('Actions')} /></tr></thead><tbody>{state.data.profiles.map((profile) => <tr key={profile.id}><td><strong>{profile.name}</strong><small>{profile.description || t('No description')}</small></td><td>{profile.mcpServerCount}</td><td>{profile.skillCount}</td><td>{profile.activationCount}</td><td className="row-actions"><IconButton label={canOperate ? t('Edit Profile') : t('View Profile')} disabled={busy === profile.id} onClick={() => openProfile(profile)}>{canOperate ? <Pencil size={16} /> : <Eye size={16} />}</IconButton>{canOperate && <><IconButton label={t('Activate Profile')} onClick={() => setActivating(profile)}><Play size={17} /></IconButton><IconButton label={profile.activationCount ? t('Deactivate all targets before deleting this Profile') : t('Delete Profile')} disabled={profile.activationCount > 0 || busy === profile.id} onClick={() => remove(profile)}><Trash2 size={16} /></IconButton></>}</td></tr>)}</tbody></table></div>}
-    {editing && state.data && <ProfileEditor profile={editing === 'new' ? null : editing} skills={state.data.skills} servers={state.data.servers} canOperate={canOperate} close={() => setEditing(null)} saved={() => completed(editing === 'new' ? t('Profile created.') : t('Profile updated.'))} />}
-    {activating && state.data && <ActivationModal profile={activating} nodes={state.data.nodes} close={() => setActivating(null)} activated={() => completed(t('Profile activation queued.'))} />}
+    {state.data.profiles.length === 0 ? <Empty title={t('No Profiles')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Profile')}</th><th>{t('Revision')}</th><th>{t('Skills')}</th><th>{t('MCP servers')}</th><th>{t('Updated')}</th><th aria-label={t('Actions')} /></tr></thead><tbody>{state.data.profiles.map((profile) => <tr key={profile.id}><td><strong>{profile.name}</strong><small>{profile.description || '—'}</small></td><td>{profile.revision}</td><td>{profile.skillIds.length}</td><td>{profile.mcpServerIds.length}</td><td>{new Date(profile.updatedAt).toLocaleString()}</td><td className="row-actions"><IconButton label={t('Edit')} onClick={() => setEditing(profile)}><Pencil size={16} /></IconButton><IconButton label={t('Preflight and Apply')} onClick={() => setApplying(profile)}><Play size={16} /></IconButton><IconButton label={t('Delete')} onClick={() => remove(profile)}><Trash2 size={16} /></IconButton></td></tr>)}</tbody></table></div>}
+    {editing && <ProfileEditor profile={editing === 'new' ? undefined : editing} skills={state.data.skills} servers={state.data.servers} close={() => setEditing(null)} saved={() => { setEditing(null); state.reload() }} />}
+    {applying && <ProfileApply profile={applying} targets={state.data.targets} close={() => setApplying(null)} queued={(operation) => { setApplying(null); setNotice(`${t('Apply queued')} · ${operation.id.slice(0, 8)}`) }} />}
   </>
 }
 
-function ProfileEditor({ profile, skills, servers, canOperate, close, saved }: { profile: ProfileDetail | null; skills: SkillOption[]; servers: MCPOption[]; canOperate: boolean; close: () => void; saved: () => void }) {
+function ProfileEditor({ profile, skills, servers, close, saved }: { profile?: Profile; skills: Skill[]; servers: MCPServer[]; close: () => void; saved: () => void }) {
   const { t } = useI18n()
   const [name, setName] = useState(profile?.name ?? '')
   const [description, setDescription] = useState(profile?.description ?? '')
-  const [mcpServerIds, setMCPServerIds] = useState(profile?.mcpServerIds ?? [])
-  const [skillIds, setSkillIds] = useState(profile?.skillIds ?? [])
-  const [saving, setSaving] = useState(false)
+  const [skillIds, setSkillIds] = useState(new Set(profile?.skillIds ?? []))
+  const [serverIds, setServerIds] = useState(new Set(profile?.mcpServerIds ?? []))
   const [error, setError] = useState('')
-  const membershipLocked = !canOperate || Boolean(profile?.activations.length)
-  const mcpItems: MemberItem[] = servers.map((server) => ({
-    id: server.id,
-    name: server.name,
-    detail: `${server.transport} · ${server.enabled ? t('enabled') : t('disabled')}${server.archivedAt ? ` · ${t('archived')}` : ''}`,
-    provenance: [server.source, server.origin?.importSourceName].filter(Boolean).join(' · '),
-    disabled: !server.enabled || server.authority !== 'toolhub' || Boolean(server.archivedAt),
-  }))
-  const skillItems: MemberItem[] = skills.map((skill) => ({
-    id: skill.id,
-    name: skill.name,
-    detail: `${skill.slug} · ${t(skill.reviewStatus)}`,
-    provenance: skill.sourceKind || 'upload',
-  }))
-  const submit = async () => {
-    setSaving(true)
-    setError('')
-    try {
-      let profileID = profile?.id
-      if (profileID) {
-        await api.patch(`/profiles/${profileID}`, { name, description })
-      } else {
-        const created = await api.post<{ id: string }>('/profiles', { name, description })
-        profileID = created.id
-      }
-      if (!membershipLocked) await api.put(`/profiles/${profileID}/members`, { mcpServerIds, skillIds })
-      saved()
-    } catch (reason) {
-      setError((reason as Error).message)
-    } finally {
-      setSaving(false)
-    }
+  const toggle = (source: Set<string>, id: string, setter: (value: Set<string>) => void) => { const next = new Set(source); next.has(id) ? next.delete(id) : next.add(id); setter(next) }
+  const submit = () => {
+    const payload = { name, description, revision: profile?.revision ?? 0, skillIds: [...skillIds], mcpServerIds: [...serverIds] }
+    const request = profile ? api.put(`/profiles/${profile.id}`, payload) : api.post('/profiles', payload)
+    request.then(saved).catch((reason: Error) => setError(reason.message))
   }
-  return <Modal title={profile ? `${canOperate ? t('Edit Profile') : t('View Profile')} · ${profile.name}` : t('Add Profile')} close={close}>
-    {error && <ErrorNotice message={error} />}
-    <Field label={t('Name')}><input disabled={!canOperate} maxLength={100} value={name} onChange={(event) => setName(event.target.value)} /></Field>
-    <Field label={t('Description')}><textarea disabled={!canOperate} maxLength={1000} rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></Field>
-    {profile?.activations.length ? <div className="inline-notice"><Layers size={17} /><span>{t('Members are locked while this Profile is active on {n} target(s).', { n: profile.activations.length })}</span></div> : null}
-    <div className="profile-member-grid">
-      <MemberGroup title={t('MCP servers')} items={mcpItems} selected={mcpServerIds} setSelected={setMCPServerIds} locked={membershipLocked} />
-      <MemberGroup title={t('Skills')} items={skillItems} selected={skillIds} setSelected={setSkillIds} locked={membershipLocked} />
-    </div>
-    <div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Close')}</Button>{canOperate && <Button disabled={saving || !name.trim()} onClick={submit}>{saving ? t('Saving...') : t('Save Profile')}</Button>}</div>
-  </Modal>
+  return <Modal title={profile ? `${t('Edit')} · ${profile.name}` : t('New Profile')} close={close}>{error && <ErrorNotice message={error} />}<Field label={t('Name')}><input value={name} onChange={(event) => setName(event.target.value)} /></Field><Field label={t('Description')}><input value={description} onChange={(event) => setDescription(event.target.value)} /></Field><div className="membership-grid"><Membership title={t('Skills')} items={skills.map((skill) => ({ id: skill.id, name: skill.name, detail: skill.slug }))} selected={skillIds} toggle={(id) => toggle(skillIds, id, setSkillIds)} /><Membership title={t('MCP servers')} items={servers.map((server) => ({ id: server.id, name: server.name, detail: server.transport }))} selected={serverIds} toggle={(id) => toggle(serverIds, id, setServerIds)} /></div><div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button><Button disabled={!name} onClick={submit}>{t('Save')}</Button></div></Modal>
 }
 
-function MemberGroup({ title, items, selected, setSelected, locked }: { title: string; items: MemberItem[]; selected: string[]; setSelected: (ids: string[]) => void; locked: boolean }) {
-  const { t } = useI18n()
-  const [query, setQuery] = useState('')
-  const [provenance, setProvenance] = useState('all')
-  const sources = [...new Set(items.map((item) => item.provenance))].sort()
-  const visible = items.filter((item) => `${item.name} ${item.detail}`.toLowerCase().includes(query.toLowerCase()) && (provenance === 'all' || item.provenance === provenance))
-  const toggle = (id: string) => setSelected(selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id])
-  return <section className="profile-member-group">
-    <header><span><strong>{title}</strong><small>{t('{selected} selected of {total}', { selected: selected.length, total: items.length })}</small></span><label className="member-search"><Search size={14} /><input aria-label={t('Search {group}', { group: title })} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search')} /></label><select aria-label={t('{group} provenance', { group: title })} value={provenance} onChange={(event) => setProvenance(event.target.value)}><option value="all">{t('All sources')}</option>{sources.map((source) => <option key={source} value={source}>{source}</option>)}</select></header>
-    <div className="check-list">{visible.length ? visible.map((item) => <label key={item.id}><input type="checkbox" checked={selected.includes(item.id)} disabled={locked || Boolean(item.disabled && !selected.includes(item.id))} onChange={() => toggle(item.id)} /><span><strong>{item.name}</strong><small>{item.detail}</small><small>{item.provenance}</small></span></label>) : <div className="member-empty">{t('No matching members')}</div>}</div>
-  </section>
+function Membership({ title, items, selected, toggle }: { title: string; items: Array<{ id: string; name: string; detail: string }>; selected: Set<string>; toggle: (id: string) => void }) {
+  return <section className="membership"><header><h3>{title}</h3><span>{selected.size}</span></header>{items.length === 0 ? <Empty title="None" /> : <div>{items.map((item) => <label key={item.id}><input type="checkbox" checked={selected.has(item.id)} onChange={() => toggle(item.id)} /><span><strong>{item.name}</strong><small>{item.detail}</small></span></label>)}</div>}</section>
 }
 
-function ActivationModal({ profile, nodes, close, activated }: { profile: ProfileSummary; nodes: TargetNode[]; close: () => void; activated: () => void }) {
+function ProfileApply({ profile, targets, close, queued }: { profile: Profile; targets: Target[]; close: () => void; queued: (operation: Operation) => void }) {
   const { t } = useI18n()
-  const initialNode = nodes.find((node) => node.isLocal) ?? nodes[0]
-  const [nodeID, setNodeID] = useState(initialNode?.id ?? '')
-  const [runtime, setRuntime] = useState(initialNode?.runtimeKinds.filter(isProfileTargetRuntime)[0] ?? '')
-  const [result, setResult] = useState<ActivationPreflight | null>(null)
+  const available = targets.filter((target) => target.writable)
+  const [selected, setSelected] = useState(new Set<string>())
+  const [items, setItems] = useState<PreflightItem[] | null>(null)
+  const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [confirmingSecrets, setConfirmingSecrets] = useState(false)
-  const selectedNode = nodes.find((node) => node.id === nodeID)
-  const runtimes = selectedNode?.runtimeKinds.filter(isProfileTargetRuntime) ?? []
-
-  const changeNode = (id: string) => {
-    const node = nodes.find((item) => item.id === id)
-    setNodeID(id)
-    setRuntime(node?.runtimeKinds.filter(isProfileTargetRuntime)[0] ?? '')
-    setResult(null)
-    setError('')
-  }
-  const preflight = async () => {
-    setBusy(true)
-    setError('')
-    setResult(null)
-    try {
-      setResult(await api.preflightProfile<ActivationPreflight>(profile.id, nodeID, runtime))
-    } catch (reason) {
-      if (reason instanceof APIError && reason.status === 409) {
-        setResult(preflightFromError(reason))
-      } else {
-        setError((reason as Error).message)
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-  const activate = async (confirmSecrets: boolean) => {
-    setBusy(true)
-    setError('')
-    try {
-      await api.activateProfile(profile.id, nodeID, runtime, confirmSecrets)
-      activated()
-    } catch (reason) {
-      if (reason instanceof APIError && reason.status === 409) {
-        setConfirmingSecrets(false)
-        setResult(preflightFromError(reason))
-      } else {
-        setError((reason as Error).message)
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-  const confirmable = Boolean(result?.remoteSecretKeys.length) && (result?.errors ?? []).every((issue) => issue.code === 'remote_secret_confirmation_required')
-
-  if (confirmingSecrets && result) return <Modal title={t('Confirm remote secret delivery')} close={() => setConfirmingSecrets(false)}>
-    {error && <ErrorNotice message={error} />}
-    <div className="secret-confirmation"><strong>{t('Profile {profile} will deliver secret references to {node}.', { profile: profile.name, node: result.nodeName })}</strong><span>{t('Only these key names are shown; secret values remain encrypted.')}</span><ul>{result.remoteSecretKeys.map((key) => <li key={key}><code>{key}</code></li>)}</ul></div>
-    <div className="modal-actions"><Button variant="secondary" onClick={() => setConfirmingSecrets(false)}>{t('Back')}</Button><Button disabled={busy} onClick={() => activate(true)}>{busy ? t('Queuing...') : t('Confirm and activate')}</Button></div>
-  </Modal>
-
-  return <Modal title={`${t('Activate Profile')} · ${profile.name}`} close={close}>
-    {error && <ErrorNotice message={error} />}
-    {!nodes.length ? <Empty title={t('No nodes enrolled')} detail={t('Enroll and scan a node before activating a Profile.')} /> : <div className="activation-target-fields"><Field label={t('Node')}><select value={nodeID} onChange={(event) => changeNode(event.target.value)}>{nodes.map((node) => <option key={node.id} value={node.id}>{node.name}{node.isLocal ? ` · ${t('Project host')}` : ''}</option>)}</select></Field><Field label={t('Runtime')}><select value={runtime} onChange={(event) => { setRuntime(event.target.value); setResult(null) }}>{runtimes.map((item) => <option key={item} value={item}>{item}</option>)}</select></Field></div>}
-    {selectedNode && <div className="target-summary"><span><strong>{selectedNode.name}</strong><small>{runtime || t('No runtime available')}</small></span><Status value={selectedNode.status} /></div>}
-    {result && <PreflightResult result={result} />}
-    <div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button>{!result && <Button disabled={busy || !nodeID || !runtime} onClick={preflight}>{busy ? t('Checking...') : t('Run preflight')}</Button>}{result?.ok && <Button disabled={busy} onClick={() => activate(false)}>{busy ? t('Queuing...') : t('Activate')}</Button>}{!result?.ok && confirmable && <Button disabled={busy} onClick={() => setConfirmingSecrets(true)}>{t('Review secret keys')}</Button>}{result && !result.ok && !confirmable && <Button variant="secondary" disabled={busy} onClick={preflight}>{t('Run preflight again')}</Button>}</div>
-  </Modal>
-}
-
-function PreflightResult({ result }: { result: ActivationPreflight }) {
-  const { t } = useI18n()
-  return <div className={`preflight-result ${result.ok ? 'passed' : 'blocked'}`}><header><strong>{result.ok ? t('Preflight passed') : t('Preflight blocked')}</strong><Status value={result.ok ? 'ready' : 'blocked'} /></header>{result.errors.length > 0 && <IssueList title={t('Blocking issues')} issues={result.errors} />}{result.skipped.length > 0 && <IssueList title={t('Skipped during activation')} issues={result.skipped} />}{result.remoteSecretKeys.length > 0 && <IssueList title={t('Remote secret key names')} issues={result.remoteSecretKeys.map((detail) => ({ detail }))} />}</div>
-}
-
-function IssueList({ title, issues }: { title: string; issues: ActivationIssue[] }) {
-  return <section><strong>{title}</strong><ul>{issues.map((issue, index) => <li key={`${issue.code ?? issue.reason ?? 'issue'}-${index}`}><span>{issue.code || issue.reason || issue.scope}</span>{issue.detail && <small>{issue.detail}</small>}</li>)}</ul></section>
-}
-
-function preflightFromError(error: APIError): ActivationPreflight {
-  const issues = Array.isArray(error.details.issues) ? error.details.issues as ActivationIssue[] : [{ code: error.code, detail: error.message }]
-  const skipped = Array.isArray(error.details.skipped) ? error.details.skipped as ActivationIssue[] : []
-  const secretKeys = Array.isArray(error.details.secretKeys) ? error.details.secretKeys.map(String) : []
-  return { ok: false, errors: issues, skipped, remoteSecretKeys: secretKeys, nodeIsLocal: false, nodeName: stringDetail(error.details, 'nodeName') }
-}
-
-function stringDetail(details: Dict, key: string): string {
-  return typeof details[key] === 'string' ? details[key] as string : ''
-}
-
-function isProfileTargetRuntime(runtime: string): boolean {
-  return runtime !== 'shared' && runtime !== 'hermes'
+  const toggle = (id: string) => { const next = new Set(selected); next.has(id) ? next.delete(id) : next.add(id); setSelected(next) }
+  const preflight = () => { setBusy(true); setError(''); api.post<{ items: PreflightItem[] }>(`/profiles/${profile.id}/preflight`, { targetIds: [...selected] }).then((value) => setItems(value.items)).catch((reason: Error) => setError(reason.message)).finally(() => setBusy(false)) }
+  const apply = () => { if (!items) return; setBusy(true); api.post<Operation>(`/profiles/${profile.id}/apply`, { confirmationTokens: items.map((item) => item.confirmationToken) }).then(queued).catch((reason: Error) => setError(reason.message)).finally(() => setBusy(false)) }
+  return <Modal title={`${t('Apply Profile')} · ${profile.name}`} close={close}>{error && <ErrorNotice message={error} />}{items ? <div className="preflight-list">{items.map((item) => { const target = targets.find((candidate) => candidate.id === item.targetId); const diff = item.result.diff; return <section key={item.targetId}><header><span><strong>{target?.targetKey}</strong><small>{t('Expires')} {new Date(item.expiresAt).toLocaleTimeString()}</small></span><Status value="ready" /></header><div className="diff-summary"><span className="add">+{diff.add.length}</span><span className="replace">~{diff.replace.length}</span><span className="delete">-{diff.delete.length}</span><span>{diff.excluded.length} {t('excluded')}</span></div>{[...diff.add, ...diff.replace, ...diff.delete, ...diff.excluded].length > 0 && <ul>{diff.add.map((entry) => <li key={`a:${entry.kind}:${entry.name}`}><b>+</b>{entry.kind} / {entry.name}</li>)}{diff.replace.map((entry) => <li key={`r:${entry.kind}:${entry.name}`}><b>~</b>{entry.kind} / {entry.name}</li>)}{diff.delete.map((entry) => <li key={`d:${entry.kind}:${entry.name}`}><b>-</b>{entry.kind} / {entry.name}</li>)}{diff.excluded.map((entry) => <li key={`e:${entry.kind}:${entry.name}`}><b>×</b>{entry.kind} / {entry.name} ({entry.reason})</li>)}</ul>}</section> })}</div> : <div className="target-checklist">{available.map((target) => <label key={target.id}><input type="checkbox" checked={selected.has(target.id)} onChange={() => toggle(target.id)} /><span><strong>{target.targetKey}</strong><small>{target.nodeName} / {target.runtime}</small></span><Status value={target.health} /></label>)}</div>}<div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button>{items ? <Button disabled={busy} onClick={apply}><Play size={16} />{t('Confirm Apply')}</Button> : <Button disabled={busy || selected.size === 0} onClick={preflight}><Eye size={16} />{t('Run preflight')}</Button>}</div></Modal>
 }

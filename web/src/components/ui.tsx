@@ -21,8 +21,8 @@ export function Loading({ label }: { label?: string }) {
   return <div className="loading"><LoaderCircle size={18} className="spin" />{label ?? t('Loading')}</div>
 }
 
-export function Empty({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
-  return <div className="empty"><div className="empty-mark" /><strong>{title}</strong><span>{detail}</span>{action}</div>
+export function Empty({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
+	return <div className="empty"><div className="empty-mark" /><strong>{title}</strong>{detail && <span>{detail}</span>}{action}</div>
 }
 
 export function ErrorNotice({ message, retry }: { message: string; retry?: () => void }) {
@@ -44,8 +44,8 @@ export function Field({ label, children, hint }: { label: string; children: Reac
   return <label className="field"><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>
 }
 
-export function PageHeader({ title, detail, actions }: { title: string; detail: string; actions?: ReactNode }) {
-  return <header className="page-header"><div><h1>{title}</h1><p>{detail}</p></div>{actions && <div className="page-actions">{actions}</div>}</header>
+export function PageHeader({ title, detail, actions }: { title: string; detail?: string; actions?: ReactNode }) {
+	return <header className="page-header"><div><h1>{title}</h1>{detail && <p>{detail}</p>}</div>{actions && <div className="page-actions">{actions}</div>}</header>
 }
 
 export function Segments({ options, value, onChange }: { options: string[]; value: string; onChange: (value: string) => void }) {

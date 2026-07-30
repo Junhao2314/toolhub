@@ -1,33 +1,29 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Boxes, Bot, BriefcaseBusiness, ChevronDown, CircleUserRound, KeyRound, Layers, LogOut, Menu, MonitorCog, Network, Settings, ShieldCheck, Store, Workflow, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Boxes, Bot, BriefcaseBusiness, CircleUserRound, ClipboardList, KeyRound, Layers, LogOut, Menu, MonitorCog, Settings, Store, X } from 'lucide-react'
 import { api, APIError, type Session } from './api/client'
 import { IconButton, Loading } from './components/ui'
 import { LanguageToggle, useI18n } from './i18n'
-import Login from './pages/Login'
-import Overview from './pages/Overview'
-import Skills from './pages/Skills'
-import Marketplace from './pages/Marketplace'
-import Nodes from './pages/Nodes'
-import Jobs from './pages/Jobs'
-import MCP from './pages/MCP'
-import Access from './pages/Access'
-import SettingsPage from './pages/Settings'
 import Account from './pages/Account'
+import Login from './pages/Login'
+import Marketplace from './pages/Marketplace'
+import MCP from './pages/MCP'
+import Operations from './pages/Operations'
+import Overview from './pages/Overview'
 import Profiles from './pages/Profiles'
+import SettingsPage from './pages/Settings'
+import Skills from './pages/Skills'
 import Targets from './pages/Targets'
 
 const navigation = [
   { path: '/overview', label: 'Overview', icon: BriefcaseBusiness },
   { path: '/skills', label: 'Skills', icon: Boxes },
   { path: '/marketplace', label: 'Marketplace', icon: Store },
-  { path: '/nodes', label: 'Nodes', icon: Network },
-  { path: '/jobs', label: 'Jobs', icon: Workflow },
   { path: '/mcp', label: 'MCP', icon: Bot },
   { path: '/profiles', label: 'Profiles', icon: Layers },
-  { path: '/targets', label: 'Runtime View', icon: MonitorCog },
+  { path: '/targets', label: 'Targets', icon: MonitorCog },
+  { path: '/operations', label: 'Operations', icon: ClipboardList },
+  { path: '/settings', label: 'Settings', icon: Settings },
   { path: '/account', label: 'Account', icon: CircleUserRound },
-  { path: '/access', label: 'Users & Audit', icon: ShieldCheck, admin: true },
-  { path: '/settings', label: 'Settings', icon: Settings, admin: true },
 ]
 
 export default function App() {
@@ -48,9 +44,6 @@ export default function App() {
     return () => removeEventListener('popstate', onPopState)
   }, [])
 
-  const isAdmin = session?.user.roles.includes('admin') ?? false
-  const canOperate = isAdmin || (session?.user.roles.includes('operator') ?? false)
-  const visibleNav = useMemo(() => navigation.filter((item) => !item.admin || isAdmin), [isAdmin])
   const navigate = (next: string) => {
     history.pushState({}, '', next)
     setPath(next)
@@ -66,31 +59,29 @@ export default function App() {
   if (checking) return <div className="boot"><div className="brand-mark"><Boxes /></div><Loading label={t('Opening ToolHub')} /></div>
   if (!session) return <Login onLogin={setSession} />
 
-  const page = path.startsWith('/skills') ? <Skills canAdopt={isAdmin} />
+  const page = path.startsWith('/skills') ? <Skills />
     : path.startsWith('/marketplace') ? <Marketplace />
-    : path.startsWith('/nodes') ? <Nodes />
-    : path.startsWith('/jobs') ? <Jobs />
-    : path.startsWith('/mcp') ? <MCP canOperate={canOperate} canImport={isAdmin} />
-    : path.startsWith('/profiles') ? <Profiles canOperate={canOperate} />
-    : path.startsWith('/targets') ? <Targets canOperate={canOperate} />
+    : path.startsWith('/mcp') ? <MCP />
+    : path.startsWith('/profiles') ? <Profiles />
+    : path.startsWith('/targets') ? <Targets />
+    : path.startsWith('/operations') ? <Operations />
+    : path.startsWith('/settings') ? <SettingsPage />
     : path.startsWith('/account') ? <Account user={session.user} signedOut={signedOut} />
-    : path.startsWith('/access') && isAdmin ? <Access currentUserID={session.user.id} sessionInvalidated={signedOut} />
-    : path.startsWith('/settings') && isAdmin ? <SettingsPage />
     : <Overview navigate={navigate} />
 
   return <div className="app-shell">
     <aside className={mobileNav ? 'sidebar open' : 'sidebar'}>
       <div className="sidebar-brand"><div className="brand-mark small"><Boxes /></div><span>ToolHub</span><IconButton label={t('Close navigation')} onClick={() => setMobileNav(false)}><X size={18} /></IconButton></div>
-      <nav>{visibleNav.map(({ path: itemPath, label, icon: Icon }) => <button key={itemPath} className={path.startsWith(itemPath) ? 'active' : ''} onClick={() => navigate(itemPath)}><Icon size={18} /><span>{t(label)}</span></button>)}</nav>
-      <div className="sidebar-foot"><span className="tailnet-dot" />{t('Tailnet control plane')}</div>
+      <nav>{navigation.map(({ path: itemPath, label, icon: Icon }) => <button key={itemPath} className={path.startsWith(itemPath) ? 'active' : ''} onClick={() => navigate(itemPath)}><Icon size={18} /><span>{t(label)}</span></button>)}</nav>
+      <div className="sidebar-foot"><span className="bridge-dot" />Bridge control plane</div>
     </aside>
     {mobileNav && <button className="nav-scrim" aria-label={t('Close navigation')} onClick={() => setMobileNav(false)} />}
     <div className="workspace">
       <header className="topbar">
         <IconButton label={t('Open navigation')} onClick={() => setMobileNav(true)}><Menu size={20} /></IconButton>
-        <div className="topbar-context"><span>{t('Operations')}</span><ChevronDown size={14} /></div>
+        <div className="topbar-product">ToolHub <span>/</span> {t(navigation.find((item) => path.startsWith(item.path))?.label ?? 'Overview')}</div>
         <LanguageToggle />
-        <div className="account"><CircleUserRound size={18} /><span><strong>{session.user.displayName}</strong><small>@{session.user.username} · {session.user.roles.join(', ')}</small></span><IconButton label={t('Sign out')} onClick={() => api.logout().finally(signedOut)}><LogOut size={17} /></IconButton></div>
+        <div className="account"><CircleUserRound size={18} /><strong>{session.user.username}</strong><IconButton label={t('Sign out')} onClick={() => api.logout().finally(signedOut)}><LogOut size={17} /></IconButton></div>
       </header>
       {session.user.passwordChangeRecommended && <button className="credential-reminder" onClick={() => navigate('/account')}><KeyRound size={17} /><span>{t('This account is using a temporary password. Change it from Account.')}</span></button>}
       <main>{page}</main>

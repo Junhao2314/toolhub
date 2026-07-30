@@ -1,673 +1,182 @@
 package store
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/domain"
-	"github.com/Junhao2314/toolhub/internal/protocol"
-	"github.com/Junhao2314/toolhub/internal/security"
 )
 
-const DefaultTaskLease = 120 * time.Second
-
-type NodeTaskOptions struct {
-	TargetKind       string
-	TargetID         string
-	TargetGeneration int64
-	SemanticKey      string
-}
-
-type TaskCompletionOutcome string
-
-const (
-	TaskCompletionRecorded       TaskCompletionOutcome = "recorded"
-	TaskCompletionProjected      TaskCompletionOutcome = "projected"
-	TaskCompletionStaleIgnored   TaskCompletionOutcome = "stale_projection_ignored"
-	TaskCompletionDuplicate      TaskCompletionOutcome = "duplicate_terminal"
-	TaskCompletionCancelled      TaskCompletionOutcome = "cancelled"
-	TaskCompletionHeartbeat      TaskCompletionOutcome = "heartbeat"
-	TaskCompletionAttemptIgnored TaskCompletionOutcome = "stale_attempt_ignored"
-)
-
-func (s *Store) CreateEnrollmentToken(ctx context.Context, nodeName string, labels map[string]string, createdBy string) (string, time.Time, error) {
-	nodeName = strings.TrimSpace(nodeName)
-	if nodeName == "" || len(nodeName) > 100 {
-		return "", time.Time{}, errors.New("node name must contain 1-100 characters")
+func (s *Store) BootstrapEnvironment(ctx context.Context, localName, managedUsername, timezone string, relayPort int) error {
+	managedUsername = strings.TrimSpace(managedUsername)
+	if err := bridgeprotocol.ValidateManagedUsername(managedUsername); err != nil {
+		return err
 	}
-	token, err := security.RandomToken(32)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	expires := time.Now().UTC().Add(30 * time.Minute)
-	if labels == nil {
-		labels = map[string]string{}
-	}
-	encodedLabels, _ := json.Marshal(labels)
-	_, err = s.pool.Exec(ctx, `INSERT INTO enrollment_tokens(id,token_hash,node_name,labels,expires_at,created_by)
-		VALUES($1,$2,$3,$4,$5,$6)`, uuid.NewString(), security.TokenHash(token), nodeName, string(encodedLabels), expires, createdBy)
-	return token, expires, err
-}
-
-func (s *Store) BootstrapLocalNode(ctx context.Context, nodeName string) (string, bool, error) {
-	nodeName = strings.TrimSpace(nodeName)
-	if nodeName == "" || len(nodeName) > 100 {
-		return "", false, errors.New("local node name must contain 1-100 characters")
+	if relayPort < 1 || relayPort > 65535 {
+		return errors.New("relay port is invalid")
 	}
 	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", false, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", int64(1848001)); err != nil {
-		return "", false, fmt.Errorf("lock project-host bootstrap: %w", err)
-	}
-	var id string
-	err = tx.QueryRow(ctx, `SELECT id::text FROM nodes WHERE labels->>'scope'='local'
-		ORDER BY (archived_at IS NULL) DESC,created_at LIMIT 1 FOR UPDATE`).Scan(&id)
-	if err == nil {
-		if _, err := tx.Exec(ctx, `UPDATE nodes SET name=$2,archived_at=NULL,
-			status=CASE WHEN archived_at IS NOT NULL THEN 'pending' ELSE status END,
-			labels=labels || '{"scope":"local","group":"canary"}'::jsonb,updated_at=now() WHERE id=$1`, id, nodeName); err != nil {
-			return "", false, err
-		}
-		return id, false, tx.Commit(ctx)
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return "", false, err
-	}
-	id = uuid.NewString()
-	if _, err := tx.Exec(ctx, `INSERT INTO nodes(id,name,status,labels,connection_preference)
-		VALUES($1,$2,'pending','{"scope":"local","group":"canary"}'::jsonb,'agent')`, id, nodeName); err != nil {
-		return "", false, fmt.Errorf("create project-host node: %w", err)
-	}
-	return id, true, tx.Commit(ctx)
-}
-
-func (s *Store) EnrollAgent(ctx context.Context, token, hostname, platform, architecture, tailscaleIP string, publicKey []byte) (domain.EnrollmentResult, error) {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var enrollmentID, nodeName string
-	var labels []byte
-	var expires time.Time
-	err = tx.QueryRow(ctx, `SELECT id::text,node_name,labels,expires_at FROM enrollment_tokens
-		WHERE token_hash=$1 AND used_at IS NULL FOR UPDATE`, security.TokenHash(token)).Scan(&enrollmentID, &nodeName, &labels, &expires)
-	if errors.Is(err, pgx.ErrNoRows) || time.Now().After(expires) {
-		return domain.EnrollmentResult{}, errors.New("invalid or expired enrollment token")
-	}
-	if err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	agentToken, err := security.RandomToken(32)
-	if err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	taskKeyRaw, err := security.RandomToken(32)
-	if err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	taskKey, err := base64.RawURLEncoding.DecodeString(taskKeyRaw)
-	if err != nil || len(taskKey) != 32 {
-		return domain.EnrollmentResult{}, errors.New("generate task key")
-	}
-	secretID := uuid.NewString()
-	ciphertext, err := s.cipher.Encrypt(taskKey, secretID)
-	if err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO encrypted_secrets(id,name,kind,ciphertext,metadata)
-		VALUES($1,$2,'agent-task-key',$3,'{}')`, secretID, "agent-task-key:"+nodeName, ciphertext); err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	nodeID := ""
-	var ipValue any
-	if strings.TrimSpace(tailscaleIP) != "" {
-		ipValue = strings.TrimSpace(tailscaleIP)
-	}
-	err = tx.QueryRow(ctx, "SELECT id::text FROM nodes WHERE name=$1 AND status='pending' AND archived_at IS NULL FOR UPDATE", nodeName).Scan(&nodeID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		nodeID = uuid.NewString()
-		_, err = tx.Exec(ctx, `INSERT INTO nodes(id,name,hostname,platform,architecture,tailscale_ip,status,labels,agent_public_key,agent_token_hash,task_key_secret_id,last_seen_at)
-			VALUES($1,$2,$3,$4,$5,$6,'online',$7,$8,$9,$10,now())`, nodeID, nodeName, hostname, platform, architecture, ipValue, string(labels), publicKey, security.TokenHash(agentToken), secretID)
-	} else if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE nodes SET hostname=$2,platform=$3,architecture=$4,tailscale_ip=$5,status='online',
-			labels=labels || $6::jsonb,agent_public_key=$7,agent_token_hash=$8,task_key_secret_id=$9,last_seen_at=now(),updated_at=now()
-			WHERE id=$1`, nodeID, hostname, platform, architecture, ipValue, string(labels), publicKey, security.TokenHash(agentToken), secretID)
-	}
-	if err != nil {
-		return domain.EnrollmentResult{}, fmt.Errorf("claim node: %w", err)
-	}
-	if _, err := tx.Exec(ctx, "UPDATE enrollment_tokens SET used_at=now() WHERE id=$1", enrollmentID); err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.EnrollmentResult{}, err
-	}
-	return domain.EnrollmentResult{NodeID: nodeID, AgentToken: agentToken, TaskKey: base64.StdEncoding.EncodeToString(taskKey), ConnectPath: "/agent/v1/connect"}, nil
-}
-
-func (s *Store) VerifyAgent(ctx context.Context, nodeID, token string) error {
-	var valid bool
-	err := s.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=$1 AND agent_token_hash=$2 AND archived_at IS NULL)", nodeID, security.TokenHash(token)).Scan(&valid)
 	if err != nil {
 		return err
 	}
-	if !valid {
-		return ErrNotFound
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `INSERT INTO settings(singleton,managed_username,timezone,relay_port) VALUES(true,$1,$2,$3) ON CONFLICT(singleton) DO NOTHING`, managedUsername, timezone, relayPort); err != nil {
+		return err
 	}
-	return nil
-}
-
-func (s *Store) AgentTaskKey(ctx context.Context, nodeID string) ([]byte, error) {
-	var secretID string
-	var ciphertext []byte
-	err := s.pool.QueryRow(ctx, `SELECT es.id::text,es.ciphertext FROM nodes n
-		JOIN encrypted_secrets es ON es.id=n.task_key_secret_id WHERE n.id=$1`, nodeID).Scan(&secretID, &ciphertext)
+	if err := tx.QueryRow(ctx, `SELECT managed_username FROM settings WHERE singleton`).Scan(&managedUsername); err != nil {
+		return err
+	}
+	var nodeID string
+	err = tx.QueryRow(ctx, `SELECT id::text FROM nodes WHERE kind='local'`).Scan(&nodeID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return s.cipher.Decrypt(ciphertext, secretID)
-}
-
-func (s *Store) SetNodeStatus(ctx context.Context, nodeID, status string) error {
-	_, err := s.pool.Exec(ctx, "UPDATE nodes SET status=$2,last_seen_at=CASE WHEN $2='online' THEN now() ELSE last_seen_at END,updated_at=now() WHERE id=$1", nodeID, status)
-	return err
-}
-
-func (s *Store) UpdateHeartbeat(ctx context.Context, nodeID, hostname, platform, architecture string) error {
-	_, err := s.pool.Exec(ctx, `UPDATE nodes SET hostname=$2,platform=$3,architecture=$4,status='online',last_seen_at=now(),updated_at=now() WHERE id=$1`, nodeID, hostname, platform, architecture)
-	return err
-}
-
-func (s *Store) ReplaceInventory(ctx context.Context, nodeID string, inventory domain.AgentInventory) error {
-	_, err := s.ProcessAgentInventory(ctx, nodeID, inventory, false)
-	return err
-}
-
-func (s *Store) CreateNodeTask(ctx context.Context, nodeID, jobID, kind string, payload any) (domain.AgentTask, error) {
-	return s.CreateNodeTaskWithOptions(ctx, nodeID, jobID, kind, payload, NodeTaskOptions{})
-}
-
-func (s *Store) CreateNodeTaskWithOptions(ctx context.Context, nodeID, jobID, kind string, payload any, options NodeTaskOptions) (domain.AgentTask, error) {
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return domain.AgentTask{}, err
-	}
-	if err := validateAgentTaskWriteBoundary(kind, encoded); err != nil {
-		return domain.AgentTask{}, err
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return domain.AgentTask{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if options.SemanticKey != "" {
-		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", "node-task:"+options.SemanticKey); err != nil {
-			return domain.AgentTask{}, err
+		nodeID = uuid.NewString()
+		if _, err := tx.Exec(ctx, `INSERT INTO nodes(id,name,kind,status,last_seen_at) VALUES($1,$2,'local','online',now())`, nodeID, strings.TrimSpace(localName)); err != nil {
+			return err
 		}
-		existing, err := nodeTaskBySemanticKeyTx(ctx, tx, options.SemanticKey)
-		if err == nil {
-			return existing, tx.Commit(ctx)
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return domain.AgentTask{}, err
-		}
-	}
-	task := domain.AgentTask{ID: uuid.NewString(), Kind: kind, Payload: encoded, Attempt: 0, CreatedAt: time.Now().UTC(), TargetKind: options.TargetKind, TargetID: options.TargetID, TargetGeneration: options.TargetGeneration, SemanticKey: options.SemanticKey}
-	signingBytes, err := protocol.TaskSigningBytes(task.ID, task.Kind, task.Payload)
-	if err != nil {
-		return domain.AgentTask{}, err
-	}
-	key, err := agentTaskKeyTx(ctx, tx, nodeID, s.cipher)
-	if err != nil {
-		return domain.AgentTask{}, err
-	}
-	task.Signature = security.SignPayload(key, signingBytes)
-	var job any
-	if jobID != "" {
-		job = jobID
-	}
-	var targetID any
-	if options.TargetID != "" {
-		targetID = options.TargetID
-	}
-	var targetGeneration any
-	if options.TargetGeneration > 0 {
-		targetGeneration = options.TargetGeneration
-	}
-	var semanticKey any
-	if options.SemanticKey != "" {
-		semanticKey = options.SemanticKey
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO node_tasks(id,node_id,job_id,kind,payload,signature,target_kind,target_id,target_generation,semantic_key)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, task.ID, nodeID, job, kind, string(encoded), task.Signature, nullString(options.TargetKind), targetID, targetGeneration, semanticKey)
-	if err != nil {
-		return domain.AgentTask{}, err
-	}
-	return task, tx.Commit(ctx)
-}
-
-func (s *Store) PendingNodeTasks(ctx context.Context, nodeID string) ([]domain.AgentTask, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id::text,kind,payload,signature,attempt,coalesce(transport,''),coalesce(lease_owner,''),lease_expires_at,
-		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at
-		FROM node_tasks
-		WHERE node_id=$1 AND status IN ('pending','delivered','running') AND cancel_requested_at IS NULL
-		  AND (status='pending' OR lease_expires_at IS NULL OR lease_expires_at <= now())
-		ORDER BY created_at LIMIT 100`, nodeID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var tasks []domain.AgentTask
-	for rows.Next() {
-		var task domain.AgentTask
-		if err := rows.Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,
-			&task.StartedAt, &task.FinishedAt, &task.CancelRequestedAt, &task.TargetKind, &task.TargetID, &task.TargetGeneration, &task.SemanticKey, &task.CreatedAt); err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, task)
-	}
-	return tasks, rows.Err()
-}
-
-func (s *Store) ReserveNodeTask(ctx context.Context, nodeID, id, transport, owner string, lease time.Duration) (domain.AgentTask, error) {
-	if transport != "agent_wss" && transport != "ssh" {
-		return domain.AgentTask{}, errors.New("invalid task transport")
-	}
-	if owner == "" {
-		return domain.AgentTask{}, errors.New("task lease owner is required")
-	}
-	if lease <= 0 {
-		return domain.AgentTask{}, errors.New("task lease duration must be positive")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return domain.AgentTask{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	now := time.Now().UTC()
-	var task domain.AgentTask
-	var status string
-	err = tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,coalesce(transport,''),coalesce(lease_owner,''),lease_expires_at,
-		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at,status
-		FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE`, id, nodeID).
-		Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,
-			&task.StartedAt, &task.FinishedAt, &task.CancelRequestedAt, &task.TargetKind, &task.TargetID, &task.TargetGeneration, &task.SemanticKey, &task.CreatedAt, &status)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.AgentTask{}, ErrNotFound
-	}
-	if err != nil {
-		return domain.AgentTask{}, err
-	}
-	if task.CancelRequestedAt != nil || status == "cancelled" || status == "succeeded" || status == "failed" {
-		return domain.AgentTask{}, ErrStateConflict
-	}
-	if status != "pending" && task.LeaseExpiresAt != nil && task.LeaseExpiresAt.After(now) {
-		return domain.AgentTask{}, ErrLeaseLost
-	}
-	task.Attempt++
-	expires := now.Add(lease)
-	task.Transport = transport
-	task.LeaseOwner = owner
-	task.LeaseExpiresAt = &expires
-	if _, err := tx.Exec(ctx, `UPDATE node_tasks SET status='delivered',transport=$3,lease_owner=$4,
-		lease_expires_at=$5,attempt=$6,updated_at=$7
-		WHERE id=$1 AND node_id=$2`, id, nodeID, transport, owner, expires, task.Attempt, now); err != nil {
-		return domain.AgentTask{}, err
-	}
-	return task, tx.Commit(ctx)
-}
-
-func (s *Store) CompleteTask(ctx context.Context, nodeID, id, status string, result json.RawMessage) error {
-	_, err := s.CompleteTaskAttempt(ctx, nodeID, id, 0, status, result)
-	return err
-}
-
-func (s *Store) CompleteTaskAttempt(ctx context.Context, nodeID, id string, attempt int, status string, result json.RawMessage) (TaskCompletionOutcome, error) {
-	if status != "succeeded" && status != "failed" && status != "running" {
-		return "", errors.New("invalid task status")
-	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var kind, currentStatus, jobID string
-	var payload, currentResult []byte
-	var currentAttempt int
-	var cancelRequestedAt *time.Time
-	if err := tx.QueryRow(ctx, "SELECT kind,payload,status,attempt,result,cancel_requested_at,coalesce(job_id::text,'') FROM node_tasks WHERE id=$1 AND node_id=$2 FOR UPDATE", id, nodeID).
-		Scan(&kind, &payload, &currentStatus, &currentAttempt, &currentResult, &cancelRequestedAt, &jobID); err != nil {
-		return "", err
-	}
-	if attempt > 0 && attempt != currentAttempt {
-		return TaskCompletionAttemptIgnored, ErrLeaseLost
-	}
-	if attempt == 0 && currentAttempt > 1 {
-		return TaskCompletionAttemptIgnored, ErrLeaseLost
-	}
-	if currentStatus == "succeeded" || currentStatus == "failed" || currentStatus == "cancelled" {
-		if currentStatus == status && compactJSONEqual(currentResult, result) {
-			return TaskCompletionDuplicate, tx.Commit(ctx)
-		}
-		if currentStatus == "cancelled" {
-			return TaskCompletionCancelled, tx.Commit(ctx)
-		}
-		return TaskCompletionDuplicate, ErrStateConflict
-	}
-	if cancelRequestedAt != nil {
-		if err := cancelTaskTx(ctx, tx, id, nodeID, result); err != nil {
-			return "", err
-		}
-		return TaskCompletionCancelled, tx.Commit(ctx)
-	}
-	if status == "running" {
-		if err := markTaskRunningTx(ctx, tx, id, nodeID, result); err != nil {
-			return "", err
-		}
-		return TaskCompletionHeartbeat, tx.Commit(ctx)
-	}
-	finalStatus := status
-	finalResult := result
-	var projection TaskCompletionOutcome = TaskCompletionRecorded
-	var completedInventory *domain.AgentInventory
-	switch kind {
-	case "scan_inventory":
-		if status != "succeeded" {
-			break
-		}
-		var inventory domain.AgentInventory
-		if err := json.Unmarshal(result, &inventory); err != nil {
-			finalStatus = "failed"
-			finalResult = marshalTaskError("inventory task returned an invalid result", "invalid_result")
-		} else {
-			completedInventory = &inventory
-		}
-	case "deploy_skill":
-		outcome, projectedStatus, projectedResult, err := completeDeploySkillTx(ctx, tx, payload, finalStatus, finalResult)
-		if err != nil {
-			return "", err
-		}
-		projection, finalStatus, finalResult = outcome, projectedStatus, projectedResult
-	case "apply_mcp":
-		outcome, projectedStatus, projectedResult, err := completeApplyMCPTx(ctx, tx, payload, finalStatus, finalResult)
-		if err != nil {
-			return "", err
-		}
-		projection, finalStatus, finalResult = outcome, projectedStatus, projectedResult
-	case "adopt_skill":
-		var task struct {
-			DiscoveryID string `json:"discoveryId"`
-		}
-		if finalStatus == "succeeded" && json.Unmarshal(payload, &task) == nil {
-			_, _ = tx.Exec(ctx, `UPDATE skill_discoveries SET managed=runtime_kind<>'shared',missing=false,drift=false,
-				adoption_status=CASE WHEN runtime_kind='shared' THEN 'imported' ELSE 'adopted' END,
-				adoption_error='',updated_at=now() WHERE id=$1`, task.DiscoveryID)
-		} else if finalStatus == "failed" && json.Unmarshal(payload, &task) == nil && task.DiscoveryID != "" {
-			message := truncateSharedError(taskResultMessage(finalResult))
-			_, _ = tx.Exec(ctx, "UPDATE skill_discoveries SET adoption_status='failed',adoption_error=$2,updated_at=now() WHERE id=$1 AND NOT managed", task.DiscoveryID, message)
-		}
-	case "import_skill_snapshot":
-		projectedStatus, projectedResult, err := completeHermesSkillSnapshotTx(ctx, tx, payload, finalStatus, finalResult)
-		if err != nil {
-			return "", err
-		}
-		finalStatus, finalResult = projectedStatus, projectedResult
-	}
-	if kind == "scan_inventory" && finalStatus == "failed" && jobID != "" {
-		if err := failHermesMCPScanTx(ctx, tx, jobID, finalResult); err != nil {
-			return "", err
-		}
-	}
-	if err := terminalizeTaskTx(ctx, tx, id, nodeID, finalStatus, finalResult); err != nil {
-		return "", err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", err
-	}
-	if completedInventory != nil {
-		if err := s.ReplaceInventory(ctx, nodeID, *completedInventory); err != nil {
-			return "", err
-		}
-	}
-	return projection, nil
-}
-
-func validateAgentTaskWriteBoundary(kind string, payload json.RawMessage) error {
-	switch kind {
-	case "deploy_skill":
-		var task protocol.DeploySkillPayload
-		if json.Unmarshal(payload, &task) == nil && task.Runtime == domain.RuntimeHermes {
-			return ErrHermesReadOnly
-		}
-	case "apply_mcp":
-		var task protocol.ApplyMCPPayload
-		if json.Unmarshal(payload, &task) == nil && task.Runtime == domain.RuntimeHermes {
-			return ErrHermesReadOnly
-		}
-	case "adopt_skill":
-		var task struct {
-			Runtime string `json:"runtime"`
-		}
-		if json.Unmarshal(payload, &task) == nil && task.Runtime == domain.RuntimeHermes {
-			return ErrHermesReadOnly
-		}
-	case "import_skill_snapshot":
-		var task protocol.ImportSkillSnapshotPayload
-		if json.Unmarshal(payload, &task) != nil || task.Runtime != domain.RuntimeHermes || task.DiscoveryID == "" || task.Path == "" || task.SHA256 == "" {
-			return errors.New("invalid Hermes Skill snapshot task")
-		}
-	}
-	return nil
-}
-
-func completeHermesSkillSnapshotTx(ctx context.Context, tx pgx.Tx, payload []byte, status string, result json.RawMessage) (string, json.RawMessage, error) {
-	var task protocol.ImportSkillSnapshotPayload
-	if json.Unmarshal(payload, &task) != nil || task.DiscoveryID == "" || task.Runtime != domain.RuntimeHermes || task.SHA256 == "" {
-		return "failed", marshalTaskError("import_skill_snapshot task payload is invalid", "invalid_payload"), nil
-	}
-	if status == "succeeded" {
-		var actual protocol.ImportSkillSnapshotResult
-		if json.Unmarshal(result, &actual) != nil || actual.DiscoveryID != task.DiscoveryID || actual.SHA256 != task.SHA256 ||
-			actual.SkillID == "" || actual.VersionID == "" || actual.MarkerWritten {
-			status = "failed"
-			result = marshalTaskError("import_skill_snapshot task returned an invalid result", "invalid_result")
-		} else {
-			var recorded bool
-			if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM skill_discoveries
-				WHERE id=$1 AND runtime_kind='hermes' AND control_mode='read_only_source' AND import_status='imported'
-				AND imported_skill_id=$2 AND imported_version_id=$3 AND last_imported_sha256=$4)`,
-				task.DiscoveryID, actual.SkillID, actual.VersionID, actual.SHA256).Scan(&recorded); err != nil {
-				return "", nil, err
-			}
-			if !recorded {
-				status = "failed"
-				result = marshalTaskError("Hermes Skill snapshot upload was not recorded", "snapshot_not_recorded")
-			}
-		}
-	}
-	if status == "failed" {
-		message := truncateSharedError(taskResultMessage(result))
-		if _, err := tx.Exec(ctx, `UPDATE skill_discoveries SET import_status='failed',import_error=$2,updated_at=now()
-			WHERE id=$1 AND control_mode='read_only_source'`, task.DiscoveryID, message); err != nil {
-			return "", nil, err
-		}
-	}
-	return status, result, nil
-}
-
-func failHermesMCPScanTx(ctx context.Context, tx pgx.Tx, jobID string, result json.RawMessage) error {
-	var payload []byte
-	if err := tx.QueryRow(ctx, "SELECT payload FROM jobs WHERE id=$1 AND kind='inventory_scan'", jobID).Scan(&payload); errors.Is(err, pgx.ErrNoRows) {
-		return nil
 	} else if err != nil {
 		return err
 	}
-	var input struct {
-		HermesMCPImport *struct {
-			DiscoveryID string `json:"discoveryId"`
-		} `json:"hermesMcpImport"`
-	}
-	if json.Unmarshal(payload, &input) != nil || input.HermesMCPImport == nil || input.HermesMCPImport.DiscoveryID == "" {
-		return nil
-	}
-	message := truncateSharedError(taskResultMessage(result))
-	_, err := tx.Exec(ctx, `UPDATE mcp_runtime_bindings SET import_status='failed',import_error=$2,pinned_generation=NULL,updated_at=now()
-		WHERE id=$1 AND control_mode='read_only_source' AND import_status IN ('queued','importing')`, input.HermesMCPImport.DiscoveryID, message)
-	return err
-}
-
-func nodeTaskBySemanticKeyTx(ctx context.Context, tx pgx.Tx, semanticKey string) (domain.AgentTask, error) {
-	var task domain.AgentTask
-	err := tx.QueryRow(ctx, `SELECT id::text,kind,payload,signature,attempt,coalesce(transport,''),coalesce(lease_owner,''),lease_expires_at,
-		started_at,finished_at,cancel_requested_at,coalesce(target_kind,''),coalesce(target_id::text,''),coalesce(target_generation,0),coalesce(semantic_key,''),created_at
-		FROM node_tasks WHERE semantic_key=$1 AND status IN ('pending','delivered','running') ORDER BY created_at LIMIT 1`, semanticKey).
-		Scan(&task.ID, &task.Kind, &task.Payload, &task.Signature, &task.Attempt, &task.Transport, &task.LeaseOwner, &task.LeaseExpiresAt,
-			&task.StartedAt, &task.FinishedAt, &task.CancelRequestedAt, &task.TargetKind, &task.TargetID, &task.TargetGeneration, &task.SemanticKey, &task.CreatedAt)
-	return task, err
-}
-
-func markTaskRunningTx(ctx context.Context, tx pgx.Tx, id, nodeID string, result json.RawMessage) error {
-	now := time.Now().UTC()
-	_, err := tx.Exec(ctx, `UPDATE node_tasks SET status='running',result=$3,started_at=COALESCE(started_at,$4),
-		lease_expires_at=$5,updated_at=$4 WHERE id=$1 AND node_id=$2`, id, nodeID, string(result), now, now.Add(DefaultTaskLease))
-	return err
-}
-
-func terminalizeTaskTx(ctx context.Context, tx pgx.Tx, id, nodeID, status string, result json.RawMessage) error {
-	now := time.Now().UTC()
-	_, err := tx.Exec(ctx, `UPDATE node_tasks SET status=$3,result=$4,finished_at=$5,lease_owner=NULL,
-		lease_expires_at=NULL,updated_at=$5 WHERE id=$1 AND node_id=$2`, id, nodeID, status, string(result), now)
-	return err
-}
-
-func cancelTaskTx(ctx context.Context, tx pgx.Tx, id, nodeID string, result json.RawMessage) error {
-	now := time.Now().UTC()
-	late := marshalTaskError("task result ignored after cancellation", "task_cancelled")
-	if len(result) > 0 {
-		late, _ = json.Marshal(map[string]any{"error": "task result ignored after cancellation", "code": "task_cancelled", "lateResult": json.RawMessage(result)})
-	}
-	_, err := tx.Exec(ctx, `UPDATE node_tasks SET status='cancelled',result=$3,finished_at=$4,lease_owner=NULL,
-		lease_expires_at=NULL,updated_at=$4 WHERE id=$1 AND node_id=$2`, id, nodeID, string(late), now)
-	return err
-}
-
-func completeDeploySkillTx(ctx context.Context, tx pgx.Tx, payload []byte, status string, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
-	var task protocol.DeploySkillPayload
-	if err := json.Unmarshal(payload, &task); err != nil || task.DeploymentID == "" || task.VersionID == "" || task.DesiredGeneration <= 0 {
-		return TaskCompletionRecorded, "failed", marshalTaskError("deploy_skill task payload is invalid", "invalid_payload"), nil
-	}
-	if status == "succeeded" {
-		var actual protocol.DeploySkillResult
-		if err := json.Unmarshal(result, &actual); err != nil || actual.ActualHash != task.SHA256 || actual.ActualEnabled != task.Enabled {
-			return projectSkillFailureTx(ctx, tx, task, marshalTaskError("deploy_skill task returned an invalid result", "invalid_result"))
+	for _, runtime := range []string{domain.RuntimeClaude, domain.RuntimeCodex, domain.RuntimeHermes, domain.RuntimeSharedRelay} {
+		targetKey := "local/" + runtime
+		if _, err := tx.Exec(ctx, `INSERT INTO targets(id,target_key,node_id,runtime,managed_username,writable) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(node_id,runtime) DO UPDATE SET managed_username=EXCLUDED.managed_username,updated_at=now()`, uuid.NewString(), targetKey, nodeID, runtime, managedUsername, domain.IsWritableRuntime(runtime)); err != nil {
+			return err
 		}
-		command, err := tx.Exec(ctx, `UPDATE deployments SET actual_version_id=$2,actual_enabled=$3,actual_generation=$4,
-			state='in_sync',last_error='',reconciled_at=now(),updated_at=now()
-			WHERE id=$1 AND desired_generation=$4 AND desired_version_id=$2 AND desired_enabled=$3`,
-			task.DeploymentID, task.VersionID, task.Enabled, task.DesiredGeneration)
-		if err != nil {
-			return "", "", nil, err
-		}
-		if command.RowsAffected() == 0 {
-			return TaskCompletionStaleIgnored, status, result, nil
-		}
-		return TaskCompletionProjected, status, result, nil
 	}
-	return projectSkillFailureTx(ctx, tx, task, result)
+	return tx.Commit(ctx)
 }
 
-func projectSkillFailureTx(ctx context.Context, tx pgx.Tx, task protocol.DeploySkillPayload, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
-	message := truncateSharedError(taskResultMessage(result))
-	command, err := tx.Exec(ctx, `UPDATE deployments SET state='failed',last_error=$5,updated_at=now()
-		WHERE id=$1 AND desired_generation=$4 AND desired_version_id=$2 AND desired_enabled=$3`,
-		task.DeploymentID, task.VersionID, task.Enabled, task.DesiredGeneration, message)
+func (s *Store) UpsertDiscoveredNodes(ctx context.Context, nodes []bridgeprotocol.NodeInfo) error {
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return "", "", nil, err
+		return err
 	}
-	if command.RowsAffected() == 0 {
-		return TaskCompletionStaleIgnored, "failed", result, nil
+	defer func() { _ = tx.Rollback(ctx) }()
+	var globalUsername string
+	if err := tx.QueryRow(ctx, `SELECT managed_username FROM settings WHERE singleton`).Scan(&globalUsername); err != nil {
+		return err
 	}
-	return TaskCompletionProjected, "failed", result, nil
+	seen := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Kind != bridgeprotocol.NodeKindSalt || strings.TrimSpace(node.SaltMinionID) == "" {
+			continue
+		}
+		id := node.NodeID
+		if uuid.Validate(id) != nil {
+			id = uuid.NewString()
+		}
+		status := "unavailable"
+		if node.Status == "online" {
+			status = "online"
+		}
+		if err := tx.QueryRow(ctx, `INSERT INTO nodes(id,name,kind,salt_minion_id,status,salt_version,last_seen_at) VALUES($1,$2,'salt',$3,$4,$5,CASE WHEN $4='online' THEN now() ELSE NULL END) ON CONFLICT(salt_minion_id) WHERE salt_minion_id IS NOT NULL DO UPDATE SET name=EXCLUDED.name,status=EXCLUDED.status,salt_version=EXCLUDED.salt_version,last_seen_at=CASE WHEN EXCLUDED.status='online' THEN now() ELSE nodes.last_seen_at END,updated_at=now() RETURNING id::text`, id, node.Name, node.SaltMinionID, status, node.Version).Scan(&id); err != nil {
+			return err
+		}
+		seen = append(seen, id)
+		for _, runtime := range []string{domain.RuntimeClaude, domain.RuntimeCodex, domain.RuntimeHermes} {
+			targetKey := fmt.Sprintf("salt:%s/%s", node.SaltMinionID, runtime)
+			if _, err := tx.Exec(ctx, `INSERT INTO targets(id,target_key,node_id,runtime,managed_username,writable) VALUES($1,$2,$3,$4,coalesce((SELECT managed_username_override FROM nodes WHERE id=$3),$5),$6) ON CONFLICT(node_id,runtime) DO UPDATE SET managed_username=coalesce((SELECT managed_username_override FROM nodes WHERE id=$3),$5),updated_at=now()`, uuid.NewString(), targetKey, id, runtime, globalUsername, domain.IsWritableRuntime(runtime)); err != nil {
+				return err
+			}
+		}
+	}
+	if len(seen) == 0 {
+		if _, err := tx.Exec(ctx, `UPDATE nodes SET status='unavailable',updated_at=now() WHERE kind='salt' AND archived_at IS NULL`); err != nil {
+			return err
+		}
+	} else if _, err := tx.Exec(ctx, `UPDATE nodes SET status='unavailable',updated_at=now() WHERE kind='salt' AND archived_at IS NULL AND NOT (id=ANY($1::uuid[]))`, seen); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
-func completeApplyMCPTx(ctx context.Context, tx pgx.Tx, payload []byte, status string, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
-	var task protocol.ApplyMCPPayload
-	if err := json.Unmarshal(payload, &task); err != nil || task.DeploymentID == "" || task.DesiredGeneration <= 0 || task.DesiredHash == "" {
-		return TaskCompletionRecorded, "failed", marshalTaskError("apply_mcp task payload is invalid", "invalid_payload"), nil
-	}
-	if status == "succeeded" {
-		var actual protocol.ApplyMCPResult
-		if err := json.Unmarshal(result, &actual); err != nil || actual.ActualHash != task.DesiredHash || actual.ActualEnabled != task.Enabled {
-			return projectMCPFailureTx(ctx, tx, task, marshalTaskError("apply_mcp task returned an invalid result", "invalid_result"))
-		}
-		command, err := tx.Exec(ctx, `UPDATE mcp_deployments SET actual_hash=$2,actual_enabled=$3,actual_generation=$4,
-			state='in_sync',last_error='',updated_at=now()
-			WHERE id=$1 AND desired_hash=$2 AND desired_enabled=$3 AND desired_generation=$4`,
-			task.DeploymentID, task.DesiredHash, task.Enabled, task.DesiredGeneration)
-		if err != nil {
-			return "", "", nil, err
-		}
-		if command.RowsAffected() == 0 {
-			return TaskCompletionStaleIgnored, status, result, nil
-		}
-		return TaskCompletionProjected, status, result, nil
-	}
-	return projectMCPFailureTx(ctx, tx, task, result)
+func (s *Store) ListNodes(ctx context.Context) (json.RawMessage, error) {
+	return s.JSONList(ctx, `SELECT id::text,name,kind,salt_minion_id AS "saltMinionId",managed_username_override AS "managedUsernameOverride",status,salt_version AS "saltVersion",last_seen_at AS "lastSeenAt",archived_at AS "archivedAt",created_at AS "createdAt",updated_at AS "updatedAt" FROM nodes WHERE archived_at IS NULL ORDER BY kind,name,id`)
 }
 
-func projectMCPFailureTx(ctx context.Context, tx pgx.Tx, task protocol.ApplyMCPPayload, result json.RawMessage) (TaskCompletionOutcome, string, json.RawMessage, error) {
-	message := truncateSharedError(taskResultMessage(result))
-	command, err := tx.Exec(ctx, `UPDATE mcp_deployments SET state='failed',last_error=$5,updated_at=now()
-		WHERE id=$1 AND desired_hash=$2 AND desired_enabled=$3 AND desired_generation=$4`,
-		task.DeploymentID, task.DesiredHash, task.Enabled, task.DesiredGeneration, message)
+func (s *Store) ListTargets(ctx context.Context) (json.RawMessage, error) {
+	return s.JSONList(ctx, targetSelect+` WHERE n.archived_at IS NULL ORDER BY n.kind,n.name,t.runtime`)
+}
+
+const targetSelect = `SELECT t.id::text,t.target_key AS "targetKey",t.node_id::text AS "nodeId",n.name AS "nodeName",n.kind AS "nodeKind",coalesce(n.salt_minion_id,'') AS "saltMinionId",t.runtime,t.managed_username AS "managedUsername",t.writable,CASE WHEN EXISTS(SELECT 1 FROM operation_targets active_ot JOIN operations active_o ON active_o.id=active_ot.operation_id WHERE active_ot.target_id=t.id AND active_ot.status='running' AND active_o.kind='reconcile') THEN 'repairing' ELSE coalesce(ds.health,'drifted') END AS health,coalesce(ds.desired_revision,0) AS "desiredRevision",coalesce(rs.revision,'') AS "targetRevision",coalesce(ds.drift_summary,'{}'::jsonb) AS "driftSummary",rs.scanned_at AS "lastScannedAt",ds.last_reconciled_at AS "lastReconciledAt",coalesce(ds.error_code,'') AS "errorCode",coalesce(ds.error_reason,'') AS "errorReason" FROM targets t JOIN nodes n ON n.id=t.node_id LEFT JOIN runtime_snapshots rs ON rs.target_id=t.id LEFT JOIN target_desired_snapshots ds ON ds.target_id=t.id`
+
+func (s *Store) Target(ctx context.Context, id string) (domain.Target, error) {
+	var target domain.Target
+	err := s.pool.QueryRow(ctx, targetSelect+` WHERE t.id=$1`, id).Scan(&target.ID, &target.TargetKey, &target.NodeID, &target.NodeName, &target.NodeKind, &target.SaltMinionID, &target.Runtime, &target.ManagedUsername, &target.Writable, &target.Health, &target.DesiredRevision, &target.TargetRevision, &target.DriftSummary, &target.LastScannedAt, &target.LastReconciledAt, &target.ErrorCode, &target.ErrorReason)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Target{}, ErrNotFound
+	}
+	return target, err
+}
+
+func (s *Store) ReplaceRuntimeSnapshot(ctx context.Context, targetID, revision string, inventory any) error {
+	body, err := json.Marshal(inventory)
 	if err != nil {
-		return "", "", nil, err
+		return err
 	}
-	if command.RowsAffected() == 0 {
-		return TaskCompletionStaleIgnored, "failed", result, nil
+	if !bridgeprotocol.IsSHA256(revision) {
+		return errors.New("target revision must be a SHA-256 hash")
 	}
-	return TaskCompletionProjected, "failed", result, nil
+	_, err = s.pool.Exec(ctx, `INSERT INTO runtime_snapshots(target_id,revision,inventory) VALUES($1,$2,$3) ON CONFLICT(target_id) DO UPDATE SET revision=EXCLUDED.revision,inventory=EXCLUDED.inventory,scanned_at=now()`, targetID, revision, jsonText(body))
+	return err
 }
 
-func marshalTaskError(message, code string) json.RawMessage {
-	body, _ := json.Marshal(map[string]any{"error": message, "code": code})
-	return body
+func (s *Store) RuntimeSnapshot(ctx context.Context, targetID string) (json.RawMessage, string, error) {
+	var body []byte
+	var revision string
+	err := s.pool.QueryRow(ctx, `SELECT inventory,revision FROM runtime_snapshots WHERE target_id=$1`, targetID).Scan(&body, &revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "", ErrNotFound
+	}
+	return json.RawMessage(body), revision, err
 }
 
-func taskResultMessage(result json.RawMessage) string {
-	var value struct {
-		Error string `json:"error"`
-		Code  string `json:"code"`
+func (s *Store) UpdateNodeManagedUsername(ctx context.Context, nodeID, username string) error {
+	username = strings.TrimSpace(username)
+	if uuid.Validate(nodeID) != nil {
+		return ErrNotFound
 	}
-	if json.Unmarshal(result, &value) == nil && value.Error != "" {
-		if value.Code != "" {
-			return value.Code + ": " + value.Error
+	if username != "" {
+		if err := bridgeprotocol.ValidateManagedUsername(username); err != nil {
+			return err
 		}
-		return value.Error
 	}
-	return string(result)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var global string
+	if err := tx.QueryRow(ctx, `SELECT managed_username FROM settings WHERE singleton FOR UPDATE`).Scan(&global); err != nil {
+		return err
+	}
+	var value any
+	if username != "" {
+		value = username
+	}
+	command, err := tx.Exec(ctx, `UPDATE nodes SET managed_username_override=$2,updated_at=now() WHERE id=$1 AND kind='salt'`, nodeID, value)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	managed := username
+	if managed == "" {
+		managed = global
+	}
+	if _, err := tx.Exec(ctx, `UPDATE targets SET managed_username=$2,updated_at=now() WHERE node_id=$1`, nodeID, managed); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
-func compactJSONEqual(first, second []byte) bool {
-	var compactFirst, compactSecond bytes.Buffer
-	if json.Compact(&compactFirst, first) != nil || json.Compact(&compactSecond, second) != nil {
-		return bytes.Equal(bytes.TrimSpace(first), bytes.TrimSpace(second))
-	}
-	return bytes.Equal(compactFirst.Bytes(), compactSecond.Bytes())
+func bridgeTarget(target domain.Target) bridgeprotocol.Target {
+	return bridgeprotocol.Target{ID: target.ID, NodeID: target.NodeID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, ManagedUsername: target.ManagedUsername}
 }

@@ -1,602 +1,1009 @@
 openapi: 3.1.0
 info:
-  title: ToolHub API
-  version: 0.1.0
-  description: Tailnet-only control plane with PostgreSQL desired state, materialized Skills, and mcpm-backed MCP delivery for Codex and Claude. Hermes and node-local shared sources are read-only import inputs, never deployment targets.
+  title: ToolHub Browser API
+  version: 2.0.0
+  description: |
+    Generation-2 single-user control-plane API. Unsafe authenticated requests
+    require the session CSRF token. Operations that declare Idempotency-Key
+    reject key reuse with a different request.
 servers:
   - url: /api/v1
 security:
   - sessionCookie: []
+tags:
+  - name: Auth
+  - name: Library
+  - name: Profiles
+  - name: Targets
+  - name: Operations
+  - name: Settings
 paths:
   /auth/login:
     post:
+      tags: [Auth]
       security: []
       operationId: login
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '401': {$ref: '#/components/responses/Error'}}
-  /auth/logout:
-    post: {operationId: logout, responses: {'204': {description: Logged out}}}
-  /auth/me:
-    get: {operationId: getCurrentUser, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Session'}
+        '401': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
   /auth/session:
-    get: {security: [], operationId: probeSession, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    get:
+      tags: [Auth]
+      security: []
+      operationId: sessionProbe
+      responses:
+        '200': {$ref: '#/components/responses/SessionProbe'}
   /auth/csrf:
-    get: {operationId: rotateCSRF, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    get:
+      tags: [Auth]
+      operationId: rotateCSRF
+      responses:
+        '200':
+          description: Rotated CSRF token
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [csrfToken]
+                properties: {csrfToken: {type: string}}
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '403': {$ref: '#/components/responses/Error'}
+  /account:
+    get:
+      tags: [Auth]
+      operationId: getAccount
+      responses:
+        '200':
+          description: Singleton account
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
   /account/username:
     patch:
-      operationId: updateOwnUsername
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateUsernameRequest'}}}}
-      responses: {'204': {description: Username updated and all sessions revoked}, '403': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /account/password:
-    patch:
-      operationId: updateOwnPassword
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdatePasswordRequest'}}}}
-      responses: {'204': {description: Password updated and all sessions revoked}, '403': {$ref: '#/components/responses/Error'}}
-  /overview:
-    get: {operationId: getOverview, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-  /users:
-    get: {operationId: listUsers, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post:
-      operationId: createUser
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateUserRequest'}}}}
-      responses: {'201': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}
-  /users/{id}/password:
-    post:
-      operationId: resetUserPassword
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TemporaryPasswordRequest'}}}}
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
-  /nodes:
-    get: {operationId: listNodes, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post: {operationId: createEnrollment, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
-  /nodes/{id}:
-    get: {operationId: getNode, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    patch: {operationId: updateNode, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    delete: {operationId: archiveNode, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Archived}}}
-  /nodes/{id}/scan:
-    post: {operationId: scanNode, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
-  /nodes/{id}/connections:
-    post: {operationId: createNodeConnection, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
-  /skills:
-    get: {operationId: listSkills, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post:
-      operationId: importSkill
-      description: Queues a reviewed skill import. `git`/`skillsmp`/`openai` fetch a fixed commit from a public repository; `xiaping` downloads the marketplace ZIP via the authenticated Xiaping API (`externalId` required, `XIAPING_API_KEY` must be configured). Identical active Xiaping requests return the same one-attempt job so a potentially charged download is never automatically repeated.
+      tags: [Auth]
+      operationId: updateUsername
+      description: Changes the singleton username and revokes every session.
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [kind]
+              additionalProperties: false
+              required: [username, currentPassword]
               properties:
-                kind: {type: string, enum: [git, skillsmp, openai, xiaping]}
-                name: {type: string}
-                url: {type: string}
-                githubUrl: {type: string}
-                subdirectory: {type: string}
-                commit: {type: string}
-                externalId: {type: string, description: Xiaping skill id, required for kind=xiaping.}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '412': {$ref: '#/components/responses/Error'}}
-  /skills/upload:
-    post:
-      operationId: uploadSkill
-      requestBody: {required: true, content: {multipart/form-data: {schema: {type: object, properties: {file: {type: string, format: binary}}, required: [file]}}}}
-      responses: {'201': {$ref: '#/components/responses/JSON'}}
-  /skills/{id}:
-    get: {operationId: getSkill, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    delete: {operationId: archiveSkill, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Archived for 30 days}}}
-  /skills/{id}/review:
-    post: {operationId: reviewSkill, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-  /skills/{id}/deployments:
-    post: {operationId: setSkillTargets, parameters: [{$ref: '#/components/parameters/ID'}], requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}}
-  /sources:
-    get: {operationId: listSources, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-  /deployments:
-    get: {operationId: listDeployments, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-  /deployments/{id}/rollback:
-    post:
-      operationId: rollbackDeployment
-      description: Queues a desired-state rollback. A deployment with a previous version swaps versions; a first successful deployment rolls back to disabled while retaining its version for safe Agent removal.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
-  /updates:
-    get: {operationId: listUpdates, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post: {operationId: checkUpdates, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
-  /updates/{id}/approve:
-    post: {operationId: approveUpdate, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
-  /sync:
-    post: {operationId: sync, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'202': {$ref: '#/components/responses/JSON'}}}
-  /reconcile:
-    post:
-      operationId: reconcileRuntimeState
-      description: Queues scoped Skill and ToolHub-authoritative MCP reconciliation jobs. Job success means orchestration completed, not that every Agent task has completed.
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileRequest'}}}}
-      responses: {'202': {$ref: '#/components/responses/JSON'}}
-  /discoveries:
-    get:
-      operationId: listRuntimeDiscoveries
-      description: Lists Skill discoveries and MCP runtime bindings. Hermes rows include read-only import state, observed generation, and secret key names. Secret IDs, fingerprints, and values are omitted.
+                username: {$ref: '#/components/schemas/Username'}
+                currentPassword: {type: string, format: password, writeOnly: true}
       responses:
-        '200': {description: Redacted runtime discoveries, content: {application/json: {schema: {$ref: '#/components/schemas/DiscoveryList'}}}}
-  /discoveries/{id}/adopt-skill:
-    post:
-      operationId: adoptDiscoveredSkill
-      description: Administrator-only request for non-Hermes discoveries that queues a signed Agent adoption task. The imported snapshot remains pending review.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {$ref: '#/components/requestBodies/JSON'}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /discoveries/{id}/import-skill:
-    post:
-      operationId: importHermesSkillSnapshot
-      description: Administrator-only explicit import of the currently observed Hermes Skill snapshot. The Agent packages and uploads the snapshot without writing a management marker. Re-import creates review state or an update candidate and never changes desired state.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/HermesSkillImportRequest'}}}}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '412': {$ref: '#/components/responses/Error'}}
-  /discoveries/{id}/import-mcp:
-    post:
-      operationId: importHermesMCPSnapshot
-      description: Administrator-only explicit import pinned to the observed Hermes MCP generation. Secret-bearing candidates require key-name confirmation before a one-time Agent capture. Every re-import creates a new enabled central server without Profile membership.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/HermesMCPImportRequest'}}}}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '403': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '412': {$ref: '#/components/responses/Error'}}
-  /shared-sources:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/Error'}
+  /account/password:
+    patch:
+      tags: [Auth]
+      operationId: updatePassword
+      description: Changes the singleton password and revokes every session.
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: {type: string, format: password, writeOnly: true}
+                newPassword: {type: string, format: password, minLength: 12, maxLength: 1024, writeOnly: true}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/Error'}
+  /overview:
     get:
-      operationId: listSharedSources
-      description: Lists redacted node-local shared source state as a read-only discovery/import surface. Secret values are never returned and no shared-source writer endpoint exists.
-      responses: {'200': {$ref: '#/components/responses/JSON'}}
-  /shared-sources/{id}:
-    get:
-      operationId: getSharedSource
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
-  /jobs:
-    get: {operationId: listJobs, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-  /jobs/{id}/cancel:
-    post: {operationId: cancelJob, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'200': {$ref: '#/components/responses/JSON'}}}
-  /market/search:
-    get:
-      operationId: searchMarket
-      description: Queries the configured marketplace sources (SkillsMP and Xiaping) and returns normalized listings. A failing source never blocks the others; partial failures surface under the response `errors` map.
-      parameters:
-        - {name: q, in: query, required: true, schema: {type: string, minLength: 2, maxLength: 200}}
-        - {name: page, in: query, schema: {type: integer, minimum: 1}}
-        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
-        - {name: source, in: query, schema: {type: string, enum: [all, skillsmp, xiaping], default: all}}
+      operationId: getOverview
       responses:
         '200':
-          description: Normalized marketplace listings.
+          description: Aggregated generation-2 health counters
+          content: {application/json: {schema: {$ref: '#/components/schemas/Overview'}}}
+  /skills:
+    get:
+      tags: [Library]
+      operationId: listSkills
+      responses:
+        '200': {$ref: '#/components/responses/SkillList'}
+  /skills/upload:
+    post:
+      tags: [Library]
+      operationId: uploadSkill
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties: {file: {type: string, format: binary}}
+      responses:
+        '200': {$ref: '#/components/responses/Skill'}
+        '201': {$ref: '#/components/responses/Skill'}
+        '400': {$ref: '#/components/responses/Error'}
+  /skills/import:
+    post:
+      tags: [Library]
+      operationId: importSkill
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SkillSourceInput'}}}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+  /market/search:
+    get:
+      tags: [Library]
+      operationId: searchMarketplace
+      parameters:
+        - {name: q, in: query, required: true, schema: {type: string, minLength: 2, maxLength: 200}}
+        - {name: source, in: query, schema: {type: string, enum: [skillsmp, xiaping]}}
+        - {name: page, in: query, schema: {type: integer, minimum: 1}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
+      responses:
+        '200': {description: Normalized provider result, content: {application/json: {schema: {type: object}}}}
+        '429': {$ref: '#/components/responses/Error'}
+        '502': {$ref: '#/components/responses/Error'}
+  /recommendations:
+    post:
+      tags: [Library]
+      operationId: recommendSkills
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {$ref: '#/components/requestBodies/JSONObject'}
+      responses:
+        '200':
+          description: Recommendations; automaticInstall is always false.
           content:
             application/json:
               schema:
                 type: object
+                required: [candidates, automaticInstall]
                 properties:
-                  items: {type: array, items: {$ref: '#/components/schemas/MarketResult'}}
-                  page: {type: integer}
-                  limit: {type: integer}
-                  errors: {type: object, additionalProperties: {type: string}, description: Sanitized per-source failure status when at least one source succeeded.}
-        '400': {$ref: '#/components/responses/Error'}
-        '429': {$ref: '#/components/responses/Error'}
-        '502': {$ref: '#/components/responses/Error'}
-  /recommendations:
-    post: {operationId: recommendSkills, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+                  candidates: {type: array, items: {type: object}}
+                  automaticInstall: {const: false}
   /mcp/servers:
     get:
+      tags: [Library]
       operationId: listMCPServers
-      description: Lists central servers plus redacted import provenance and secret key names. Secret reference IDs, fingerprints, and values are omitted. Hermes imports are ordinary enabled central assets but have no automatic Profile membership.
       responses:
-        '200': {description: Redacted MCP servers, content: {application/json: {schema: {$ref: '#/components/schemas/MCPServerList'}}}}
+        '200': {$ref: '#/components/responses/MCPServerList'}
     post:
+      tags: [Library]
       operationId: createMCPServer
-      description: Creates a ToolHub-authoritative MCP server. Environment and HTTP header values are encrypted and ordinary responses contain references only.
-      requestBody: {$ref: '#/components/requestBodies/JSON'}
-      responses: {'201': {$ref: '#/components/responses/JSON'}}
-  /mcp/servers/{id}:
-    patch:
-      operationId: updateMCPServer
-      description: Updates central configuration and optional write-only secret deltas. Replacing or removing secrets used by desired Codex/Claude targets first returns `409 secret_confirmation_required` with target and key names; retry with `confirmTargets=true`. Active ToolHub Profile ownership returns `409 target_managed_by_profile` until deactivated.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MCPServerPatch'}}}}
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-    delete: {operationId: deleteMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'204': {description: Deleted}, '409': {$ref: '#/components/responses/Error'}}}
-  /mcp/servers/{id}/health:
-    post: {operationId: checkMCPServer, parameters: [{$ref: '#/components/parameters/ID'}], responses: {'202': {$ref: '#/components/responses/JSON'}}}
-  /mcp/servers/{id}/archive:
-    post:
-      operationId: archiveMCPServer
-      description: Hides an MCP server from the default library and excludes it from effective delivery. Servers used by an active ToolHub Profile return `409 target_managed_by_profile`.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      responses: {'204': {description: Archived}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /mcp/servers/{id}/unarchive:
-    post:
-      operationId: unarchiveMCPServer
-      description: Restores an archived MCP server. An active ToolHub Profile must be deactivated first, preserving remote-secret confirmation boundaries.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      responses: {'204': {description: Restored}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /mcp/profiles:
-    get:
-      operationId: listMCPProfiles
-      description: Lists profiles and membership. Initial mcpm discovery creates fixed toolhub-codex and toolhub-claude profiles with managedRuntime provenance; legacy all-mcp membership follows recognized native anchors when present.
-      responses: {'200': {$ref: '#/components/responses/JSON'}}
-    post: {operationId: createMCPProfile, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}}
-  /mcp/profiles/{id}/servers:
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/MCPServerInput'}}}
+      responses:
+        '201': {$ref: '#/components/responses/MCPServer'}
+        '400': {$ref: '#/components/responses/Error'}
+  /mcp/servers/{serverID}:
+    parameters: [{$ref: '#/components/parameters/ServerID'}]
     put:
-      operationId: setManagedMCPProfileServers
-      description: Replaces membership for a fixed toolhub-codex or toolhub-claude profile. An observed deployment remains observed until it is explicitly deployed.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MCPProfileServersRequest'}}}}
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /mcp/deployments:
-    get: {operationId: listMCPDeployments, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+      tags: [Library]
+      operationId: updateMCPServer
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/MCPServerInput'}}}
+      responses:
+        '200': {$ref: '#/components/responses/MCPServer'}
+        '400': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Library]
+      operationId: deleteMCPServer
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '409': {$ref: '#/components/responses/Error'}
+  /mcp/import:
     post:
-      operationId: deployMCPProfile
-      description: Explicitly transitions an observed fixed profile deployment to pending and queues mcp_sync. The profile managedRuntime must exactly match the Codex or Claude target runtime; arbitrary profiles are never dispatched to the fixed native anchor.
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MCPDeploymentRequest'}}}}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '409': {$ref: '#/components/responses/Error'}}
+      tags: [MCP]
+      operationId: importLocalMCPServer
+      description: Consumes one revision-bound confirmation and queues an ephemeral, one-time local MCP capture.
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmationToken]
+              properties: {confirmationToken: {type: string, minLength: 1, writeOnly: true}}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Error'}
   /profiles:
     get:
-      operationId: listToolHubProfiles
-      description: Lists user-defined selection sets. These are distinct from the fixed MCP delivery profiles under `/mcp/profiles`.
-      responses: {'200': {$ref: '#/components/responses/JSON'}}
-    post:
-      operationId: createToolHubProfile
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ToolHubProfileRequest'}}}}
-      responses: {'201': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /profiles/{id}:
-    get:
-      operationId: getToolHubProfile
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}}
-    patch:
-      operationId: updateToolHubProfile
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ToolHubProfileRequest'}}}}
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-    delete:
-      operationId: deleteToolHubProfile
-      description: Active Profiles cannot be deleted.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      responses: {'204': {description: Deleted}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /profiles/{id}/members:
-    put:
-      operationId: setToolHubProfileMembers
-      description: Replaces the MCP and Skill selection. Active Profiles must be deactivated before membership changes.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ToolHubProfileMembersRequest'}}}}
-      responses: {'200': {$ref: '#/components/responses/JSON'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
-  /profiles/{id}/preflight:
-    post:
-      operationId: preflightToolHubProfileActivation
-      description: Validates target availability, members, fixed delivery profiles, and remote secret key names without changing desired state. Blocking issues return a structured `409`.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProfileTargetRequest'}}}}
+      tags: [Profiles]
+      operationId: listProfiles
       responses:
-        '200': {description: Preflight passed, content: {application/json: {schema: {$ref: '#/components/schemas/ActivationPreflight'}}}}
-        '404': {$ref: '#/components/responses/Error'}
-        '409': {$ref: '#/components/responses/ActivationConflict'}
-  /profiles/{id}/activate:
+        '200': {$ref: '#/components/responses/ProfileList'}
     post:
-      operationId: activateToolHubProfile
-      description: Atomically claims one `(node, runtime)` target, writes Profile-owned desired state, and queues one-attempt `profile_activate` orchestration. Agent task kinds remain `deploy_skill` and `apply_mcp`.
-      parameters: [{$ref: '#/components/parameters/ID'}]
-      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProfileActivationRequest'}}}}
-      responses: {'202': {$ref: '#/components/responses/JSON'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/ActivationConflict'}}
-  /targets/{nodeId}/{runtime}:
+      tags: [Profiles]
+      operationId: createProfile
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ProfileInput'}}}
+      responses:
+        '201': {$ref: '#/components/responses/Profile'}
+  /profiles/{profileID}:
+    parameters: [{$ref: '#/components/parameters/ProfileID'}]
+    put:
+      tags: [Profiles]
+      operationId: updateProfile
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ProfileInput'}}}
+      responses:
+        '200': {$ref: '#/components/responses/Profile'}
+        '409': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Profiles]
+      operationId: deleteProfile
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '409': {$ref: '#/components/responses/Error'}
+  /profiles/{profileID}/preflight:
+    post:
+      tags: [Profiles]
+      operationId: preflightProfile
+      description: Resolves current Library revisions and returns five-minute, one-use confirmation tokens.
+      parameters:
+        - {$ref: '#/components/parameters/ProfileID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [targetIds]
+              properties:
+                targetIds: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+      responses:
+        '200': {$ref: '#/components/responses/PreflightList'}
+        '409': {$ref: '#/components/responses/Error'}
+  /profiles/{profileID}/apply:
+    post:
+      tags: [Profiles]
+      operationId: applyProfile
+      parameters:
+        - {$ref: '#/components/parameters/ProfileID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmationTokens]
+              properties:
+                confirmationTokens: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {type: string}}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Error'}
+  /nodes:
     get:
-      operationId: getRuntimeTarget
-      description: Aggregates Profile ownership, effective MCP membership, Skill desired/actual state, capabilities, and drift for one target. Grok reports Claude MCP as read-only inherited state.
-      parameters: [{$ref: '#/components/parameters/NodeID'}, {$ref: '#/components/parameters/Runtime'}]
-      responses: {'200': {description: Runtime target view, content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeTargetView'}}}}, '404': {$ref: '#/components/responses/Error'}}
-  /targets/{nodeId}/{runtime}/deactivate:
+      tags: [Targets]
+      operationId: listNodes
+      responses:
+        '200': {$ref: '#/components/responses/NodeList'}
+  /nodes/refresh:
     post:
-      operationId: deactivateToolHubProfileTarget
-      description: Releases Profile ownership without changing existing Skill or MCP desired-state rows. Manual target APIs become editable again.
-      parameters: [{$ref: '#/components/parameters/NodeID'}, {$ref: '#/components/parameters/Runtime'}]
-      responses: {'204': {description: Profile ownership released}, '404': {$ref: '#/components/responses/Error'}}
-  /settings:
-    get: {operationId: getSettings, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    patch: {operationId: updateSettings, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-  /settings/ai-providers:
-    get: {operationId: listAIProviders, responses: {'200': {$ref: '#/components/responses/JSON'}}}
-    post: {operationId: createAIProvider, requestBody: {$ref: '#/components/requestBodies/JSON'}, responses: {'201': {$ref: '#/components/responses/JSON'}}}
+      tags: [Targets]
+      operationId: refreshNodes
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+  /nodes/{nodeID}:
+    patch:
+      tags: [Targets]
+      operationId: updateNodeManagedUsername
+      description: Sets a Salt node managed-username override. An empty string clears the override and restores the global managed username.
+      parameters:
+        - {$ref: '#/components/parameters/NodeID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [managedUsername]
+              properties: {managedUsername: {type: string, maxLength: 32, pattern: '^(?:[a-z_][a-z0-9_-]{0,31})?$'}}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /targets:
+    get:
+      tags: [Targets]
+      operationId: listTargets
+      responses:
+        '200': {$ref: '#/components/responses/TargetList'}
+  /targets/{targetID}:
+    get:
+      tags: [Targets]
+      operationId: getTarget
+      parameters: [{$ref: '#/components/parameters/TargetID'}]
+      responses:
+        '200':
+          description: Target, latest inventory, and active immutable desired snapshot.
+          content: {application/json: {schema: {$ref: '#/components/schemas/TargetDetail'}}}
+        '404': {$ref: '#/components/responses/Error'}
+  /targets/{targetID}/scan:
+    post:
+      tags: [Targets]
+      operationId: scanTarget
+      parameters:
+        - {$ref: '#/components/parameters/TargetID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+  /targets/{targetID}/skill-import:
+    post:
+      tags: [Targets]
+      operationId: importLocalSkill
+      description: Queues an immutable Library import of one scanned, unmanaged local Skill.
+      parameters:
+        - {$ref: '#/components/parameters/TargetID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name, expectedRevision, contentHash]
+              properties:
+                name: {type: string, minLength: 1}
+                expectedRevision: {$ref: '#/components/schemas/SHA256'}
+                contentHash: {$ref: '#/components/schemas/SHA256'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+        '409': {$ref: '#/components/responses/Error'}
+  /targets/{targetID}/mcp-import/preflight:
+    post:
+      tags: [Targets]
+      operationId: preflightLocalMCPImport
+      description: Returns only sanitized local user-scope MCP fields and key names; secret values are never returned to the browser.
+      parameters:
+        - {$ref: '#/components/parameters/TargetID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false}}}
+      responses:
+        '200':
+          description: Five-minute, one-use confirmations bound to the current native configuration revision.
+          content: {application/json: {schema: {$ref: '#/components/schemas/LocalMCPImportPreflight'}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /targets/{targetID}/edit:
+    post:
+      tags: [Targets]
+      operationId: editTarget
+      parameters:
+        - {$ref: '#/components/parameters/TargetID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expectedRevision, skillIds, mcpServerIds]
+              properties:
+                expectedRevision: {$ref: '#/components/schemas/SHA256'}
+                skillIds: {type: array, maxItems: 500, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+                mcpServerIds: {type: array, maxItems: 500, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+  /targets/{targetID}/backups:
+    get:
+      tags: [Targets]
+      operationId: listBackups
+      parameters: [{$ref: '#/components/parameters/TargetID'}]
+      responses:
+        '200': {$ref: '#/components/responses/BackupList'}
+  /targets/{targetID}/restore:
+    post:
+      tags: [Targets]
+      operationId: restoreTarget
+      parameters:
+        - {$ref: '#/components/parameters/TargetID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [backupId, expectedRevision]
+              properties: {backupId: {$ref: '#/components/schemas/UUID'}, expectedRevision: {$ref: '#/components/schemas/SHA256'}}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+  /targets/{targetID}/relay/{action}:
+    post:
+      tags: [Targets]
+      operationId: relayAction
+      parameters:
+        - {$ref: '#/components/parameters/TargetID'}
+        - {name: action, in: path, required: true, schema: {type: string, enum: [start, stop, restart, health]}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
+  /operations:
+    get:
+      tags: [Operations]
+      operationId: listOperations
+      responses:
+        '200': {$ref: '#/components/responses/OperationList'}
+  /operations/{operationID}:
+    get:
+      tags: [Operations]
+      operationId: getOperation
+      parameters: [{$ref: '#/components/parameters/OperationID'}]
+      responses:
+        '200': {$ref: '#/components/responses/Operation'}
+        '404': {$ref: '#/components/responses/Error'}
+  /operations/{operationID}/cancel:
+    post:
+      tags: [Operations]
+      operationId: cancelOperation
+      parameters:
+        - {$ref: '#/components/parameters/OperationID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '409': {$ref: '#/components/responses/Error'}
+  /operations/{operationID}/retry-failed:
+    post:
+      tags: [Operations]
+      operationId: retryFailedTargets
+      parameters:
+        - {$ref: '#/components/parameters/OperationID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
   /audit:
-    get: {operationId: listAudit, responses: {'200': {$ref: '#/components/responses/JSON'}}}
+    get:
+      tags: [Operations]
+      operationId: listAudit
+      responses:
+        '200': {$ref: '#/components/responses/AuditList'}
+  /settings:
+    get:
+      tags: [Settings]
+      operationId: getSettings
+      responses:
+        '200': {$ref: '#/components/responses/Settings'}
+    put:
+      tags: [Settings]
+      operationId: updateSettings
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SettingsInput'}}}
+      responses:
+        '200': {$ref: '#/components/responses/Settings'}
+        '400': {$ref: '#/components/responses/Error'}
+  /updates/check:
+    post:
+      tags: [Settings]
+      operationId: checkUpdates
+      parameters:
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {$ref: '#/components/responses/Operation'}
 components:
   securitySchemes:
     sessionCookie: {type: apiKey, in: cookie, name: toolhub_session}
   parameters:
-    ID: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-    NodeID: {name: nodeId, in: path, required: true, schema: {type: string, format: uuid}}
-    Runtime: {name: runtime, in: path, required: true, schema: {type: string, enum: [codex, claude, hermes, grok, openclaw]}}
+    CSRFToken: {name: X-CSRF-Token, in: header, required: true, schema: {type: string}}
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 200}}
+    NodeID: {name: nodeID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    TargetID: {name: targetID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    ProfileID: {name: profileID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    ServerID: {name: serverID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    OperationID: {name: operationID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
   requestBodies:
-    JSON: {required: true, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+    JSONObject:
+      required: true
+      content: {application/json: {schema: {type: object}}}
   responses:
-    JSON: {description: JSON response, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
-    Error: {description: Error response, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
-    ActivationConflict: {description: Profile activation preflight failed, content: {application/json: {schema: {$ref: '#/components/schemas/ActivationConflict'}}}}
-  schemas:
-    LoginRequest:
-      type: object
-      additionalProperties: false
-      required: [identifier, password]
-      properties: {identifier: {type: string, minLength: 1}, password: {type: string, minLength: 12}}
-    Username:
-      type: string
-      minLength: 3
-      maxLength: 32
-      pattern: '^[a-z0-9._-]+$'
-    UpdateUsernameRequest:
-      type: object
-      additionalProperties: false
-      required: [username, currentPassword]
-      properties: {username: {$ref: '#/components/schemas/Username'}, currentPassword: {type: string}}
-    UpdatePasswordRequest:
-      type: object
-      additionalProperties: false
-      required: [currentPassword, newPassword]
-      properties: {currentPassword: {type: string}, newPassword: {type: string, minLength: 12, maxLength: 1024}}
-    TemporaryPasswordRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        mode: {type: string, enum: [random, manual]}
-        password: {type: string, minLength: 12, maxLength: 1024, description: Required only in manual mode and never echoed in the response.}
-    CreateUserRequest:
-      type: object
-      additionalProperties: false
-      required: [username, email, displayName, role]
-      properties:
-        username: {$ref: '#/components/schemas/Username'}
-        email: {type: string, format: email}
-        displayName: {type: string, minLength: 1}
-        role: {type: string, enum: [admin, operator, viewer]}
-        passwordMode: {type: string, enum: [random, manual]}
-        password: {type: string, minLength: 12, maxLength: 1024, description: Required only in manual mode.}
-    ReconcileRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        nodeIds: {type: array, items: {type: string, format: uuid}}
-        skillIds: {type: array, items: {type: string, format: uuid}}
-        profileIds: {type: array, items: {type: string, format: uuid}}
-        mcpDeploymentIds: {type: array, items: {type: string, format: uuid}}
-        dryRun: {type: boolean, default: false}
-    DiscoveryList:
-      type: object
-      additionalProperties: false
-      required: [items]
-      properties:
-        items: {type: array, items: {$ref: '#/components/schemas/RuntimeDiscovery'}}
-    RuntimeDiscovery:
-      type: object
-      additionalProperties: false
-      required: [id, kind, nodeId, nodeName, runtime, name, missing, status, controlMode, sourceChanged, importStatus, observedGeneration, envKeys, headerKeys]
-      properties:
-        id: {type: string, format: uuid}
-        kind: {type: string, enum: [skill, mcp]}
-        nodeId: {type: string, format: uuid}
-        nodeName: {type: string}
-        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw, shared]}
-        name: {type: string}
-        path: {type: string}
-        sha256: {type: string, description: Canonical Skill snapshot hash; empty for MCP rows.}
-        managed: {type: boolean}
-        protected: {type: boolean}
-        disabled: {type: boolean}
-        missing: {type: boolean}
-        drift: {type: boolean, description: Always false for Hermes read-only observations.}
-        status: {type: string}
-        lastError: {type: string}
-        adoptedSkillId: {type: string}
-        lastSeenAt: {type: [string, 'null'], format: date-time}
-        source: {type: string}
-        serverId: {type: string}
-        profileId: {type: string}
-        deploymentId: {type: string}
-        controlMode: {type: string, enum: [managed_target, read_only_source]}
-        sourceChanged: {type: boolean}
-        importStatus: {type: string, enum: [not_applicable, available, queued, importing, imported, failed]}
-        observedGeneration: {type: integer, format: int64, minimum: 0}
-        envKeys: {type: array, items: {type: string}, description: Key names only.}
-        headerKeys: {type: array, items: {type: string}, description: Header names only.}
-        linkCoverage: {type: object, additionalProperties: {type: string}}
-    HermesSkillImportRequest:
-      type: object
-      additionalProperties: false
-      required: [expectedSha256]
-      properties:
-        expectedSha256: {type: string, minLength: 1, description: Exact canonical hash returned by the latest discovery.}
-    HermesMCPImportRequest:
-      type: object
-      additionalProperties: false
-      required: [observedGeneration, confirmSecrets]
-      properties:
-        observedGeneration: {type: integer, format: int64, minimum: 1}
-        confirmSecrets: {type: boolean, description: Explicit confirmation of the envKeys/headerKeys named by the discovery or conflict response.}
-    MCPServerList:
-      type: object
-      additionalProperties: false
-      required: [items]
-      properties:
-        items: {type: array, items: {$ref: '#/components/schemas/MCPServerSummary'}}
-    MCPServerSummary:
-      type: object
-      additionalProperties: true
-      required: [id, name, runtimeName, transport, args, envKeys, headerKeys, enabled, source, authority]
-      properties:
-        id: {type: string, format: uuid}
-        name: {type: string}
-        runtimeName: {type: string}
-        transport: {type: string, enum: [stdio, sse, streamable-http]}
-        command: {type: string}
-        args: {type: array, items: {type: string}}
-        url: {type: string}
-        envKeys: {type: array, items: {type: string}, description: Key names only; encrypted secret reference IDs are omitted.}
-        headerKeys: {type: array, items: {type: string}, description: Header names only; encrypted secret reference IDs are omitted.}
-        enabled: {type: boolean}
-        source: {type: string}
-        origin: {type: object, additionalProperties: true}
-        authority: {type: string}
-        credentialMode: {type: string}
-        healthStatus: {type: string}
-        bindingCount: {type: integer}
-        hasDrift: {type: boolean}
-        archivedAt: {type: [string, 'null'], format: date-time}
-    MCPServerPatch:
-      type: object
-      additionalProperties: false
-      properties:
-        name: {type: string, maxLength: 100}
-        enabled: {type: boolean}
-        transport: {type: string, enum: [stdio, sse, streamable-http]}
-        command: {type: string}
-        args: {type: array, items: {type: string}}
-        url: {type: string}
-        secretChanges: {$ref: '#/components/schemas/MCPSecretChanges'}
-        confirmTargets: {type: boolean, default: false}
-    MCPSecretChanges:
-      type: object
-      additionalProperties: false
-      properties:
-        env: {$ref: '#/components/schemas/MCPSecretDelta'}
-        headers: {$ref: '#/components/schemas/MCPSecretDelta'}
-    MCPSecretDelta:
-      type: object
-      additionalProperties: false
-      properties:
-        set: {type: object, additionalProperties: {type: string, minLength: 1}, description: Write-only new or replacement values.}
-        remove: {type: array, uniqueItems: true, items: {type: string}}
-    MCPAffectedTarget:
-      type: object
-      additionalProperties: false
-      required: [nodeId, nodeName, runtime]
-      properties:
-        nodeId: {type: string, format: uuid}
-        nodeName: {type: string}
-        runtime: {type: string, enum: [codex, claude]}
-    MCPProfileServersRequest:
-      type: object
-      additionalProperties: false
-      required: [serverIds]
-      properties:
-        serverIds: {type: array, uniqueItems: true, items: {type: string, format: uuid}}
-    MCPDeploymentRequest:
-      type: object
-      additionalProperties: false
-      required: [profileId, targets]
-      properties:
-        profileId: {type: string, format: uuid}
-        targets:
-          type: array
-          items:
-            type: object
-            additionalProperties: false
-            required: [nodeId, runtime, enabled]
-            properties:
-              nodeId: {type: string, format: uuid}
-              runtime: {type: string, enum: [codex, claude]}
-              enabled: {type: boolean}
-        dryRun: {type: boolean, default: false}
-    ToolHubProfileRequest:
-      type: object
-      additionalProperties: false
-      required: [name, description]
-      properties:
-        name: {type: string, minLength: 1, maxLength: 100}
-        description: {type: string, maxLength: 1000}
-    ToolHubProfileMembersRequest:
-      type: object
-      additionalProperties: false
-      required: [mcpServerIds, skillIds]
-      properties:
-        mcpServerIds: {type: array, maxItems: 1000, uniqueItems: true, items: {type: string, format: uuid}}
-        skillIds: {type: array, maxItems: 1000, uniqueItems: true, items: {type: string, format: uuid}}
-    ProfileTargetRequest:
-      type: object
-      additionalProperties: false
-      required: [nodeId, runtime]
-      properties:
-        nodeId: {type: string, format: uuid}
-        runtime: {type: string, enum: [codex, claude, grok, openclaw], description: Hermes is observation/import-only and cannot be Profile-owned.}
-    ProfileActivationRequest:
-      type: object
-      additionalProperties: false
-      required: [nodeId, runtime]
-      properties:
-        nodeId: {type: string, format: uuid}
-        runtime: {type: string, enum: [codex, claude, grok, openclaw], description: Hermes is observation/import-only and cannot be activated.}
-        confirmSecrets: {type: boolean, default: false}
-    ActivationIssue:
-      type: object
-      properties:
-        code: {type: string, description: Blocking issue code.}
-        scope: {type: string, enum: [node, runtime, skills, mcp]}
-        reason: {type: string, description: Non-blocking skip reason.}
-        detail: {type: string}
-    ActivationPreflight:
-      type: object
-      required: [ok, errors, skipped, remoteSecretKeys, nodeIsLocal, nodeName]
-      properties:
-        ok: {type: boolean}
-        errors: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
-        skipped: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
-        remoteSecretKeys: {type: array, items: {type: string}, description: Secret key names only; values are never returned.}
-        nodeIsLocal: {type: boolean}
-        nodeName: {type: string}
-    ActivationConflict:
-      allOf:
-        - {$ref: '#/components/schemas/Error'}
-      description: The error object additionally contains `issues`, `skipped`, `nodeName`, and `secretKeys`; secretKeys contains names only.
-    RuntimeTargetView:
-      type: object
-      required: [node, runtime, capabilities, activation, mcp, skills, drift]
-      properties:
-        node: {type: object, additionalProperties: true}
-        runtime: {type: string, enum: [codex, claude, hermes, grok, openclaw]}
-        capabilities: {type: object, properties: {skills: {type: boolean}, mcp: {type: boolean}, mcpNote: {type: string}}}
-        activation: {oneOf: [{type: 'null'}, {type: object, additionalProperties: true}]}
-        mcp: {type: object, additionalProperties: true}
-        skills: {type: array, items: {type: object, additionalProperties: true}}
-        drift: {type: object, properties: {mcp: {type: integer}, skills: {type: integer}}}
+    NoContent: {description: No content}
     Error:
+      description: Error envelope
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    Session: {description: Session state, content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+    SessionProbe: {description: Authenticated or anonymous session probe, content: {application/json: {schema: {$ref: '#/components/schemas/SessionProbe'}}}}
+    Skill: {description: Immutable Skill library record, content: {application/json: {schema: {$ref: '#/components/schemas/Skill'}}}}
+    SkillList: {description: Skills, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Skill'}}}}}}}
+    MCPServer: {description: MCP server without secret values, content: {application/json: {schema: {$ref: '#/components/schemas/MCPServer'}}}}
+    MCPServerList: {description: MCP servers, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/MCPServer'}}}}}}}
+    Profile: {description: Unified Profile, content: {application/json: {schema: {$ref: '#/components/schemas/Profile'}}}}
+    ProfileList: {description: Profiles, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Profile'}}}}}}}
+    NodeList: {description: Nodes, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Node'}}}}}}}
+    TargetList: {description: Targets, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Target'}}}}}}}
+    Operation: {description: Durable operation, content: {application/json: {schema: {$ref: '#/components/schemas/Operation'}}}}
+    OperationList: {description: Operations, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Operation'}}}}}}}
+    BackupList: {description: Backups, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Backup'}}}}}}}
+    AuditList: {description: Actorless audit events, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}}}}}}
+    Settings: {description: Singleton settings, content: {application/json: {schema: {$ref: '#/components/schemas/Settings'}}}}
+    PreflightList: {description: Per-target preflight confirmations, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/PreflightItem'}}}}}}}
+  schemas:
+    UUID: {type: string, format: uuid}
+    Username: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{2,31}$'}
+    ErrorEnvelope:
       type: object
+      additionalProperties: false
       required: [error]
       properties:
         error:
           type: object
-          required: [code, message]
+          required: [code, message, requestId]
           properties:
             code: {type: string}
             message: {type: string}
             requestId: {type: string}
-            issues: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
-            skipped: {type: array, items: {$ref: '#/components/schemas/ActivationIssue'}}
-            nodeName: {type: string}
-            secretKeys: {type: array, items: {type: string}, description: Secret key names only.}
-            envKeys: {type: array, items: {type: string}, description: Environment key names only.}
-            headerKeys: {type: array, items: {type: string}, description: HTTP header names only.}
-            targets: {type: array, items: {$ref: '#/components/schemas/MCPAffectedTarget'}}
-            status: {type: string, description: Current import state for import_in_progress.}
-            expectedSha256: {type: string}
-            observedSha256: {type: string}
-            expectedGeneration: {type: integer, format: int64}
-            observedGeneration: {type: integer, format: int64}
-    MarketResult:
+            details: {type: object}
+    LoginRequest:
       type: object
-      description: Normalized marketplace listing independent of the provider payload shape.
+      additionalProperties: false
+      required: [username, password]
       properties:
-        source: {type: string, enum: [skillsmp, xiaping]}
-        id: {type: string}
+        username: {$ref: '#/components/schemas/Username'}
+        password: {type: string, format: password, writeOnly: true}
+    Account:
+      type: object
+      additionalProperties: false
+      required: [username, passwordChangeRecommended, createdAt, updatedAt]
+      properties:
+        username: {$ref: '#/components/schemas/Username'}
+        passwordChangeRecommended: {type: boolean}
+        passwordChangedAt: {type: [string, 'null'], format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    Session:
+      type: object
+      additionalProperties: false
+      required: [authenticated, user, csrfToken, expiresAt]
+      properties:
+        authenticated: {const: true}
+        user: {$ref: '#/components/schemas/Account'}
+        csrfToken: {type: string, writeOnly: true}
+        expiresAt: {type: string, format: date-time}
+    SessionProbe:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [authenticated]
+          properties:
+            authenticated: {const: false}
+        - type: object
+          additionalProperties: false
+          required: [authenticated, user, csrfToken, expiresAt]
+          properties:
+            authenticated: {const: true}
+            user:
+              type: object
+              additionalProperties: false
+              required: [username, passwordChangeRecommended]
+              properties:
+                username: {$ref: '#/components/schemas/Username'}
+                passwordChangeRecommended: {type: boolean}
+            csrfToken: {type: string, writeOnly: true}
+            expiresAt: {type: string, format: date-time}
+    Overview:
+      type: object
+      required: [targets, unhealthyTargets, skills, mcpServers, activeOperations, openAlerts, auditEvents24h]
+      properties:
+        targets: {type: integer}
+        unhealthyTargets: {type: integer}
+        skills: {type: integer}
+        mcpServers: {type: integer}
+        activeOperations: {type: integer}
+        openAlerts: {type: integer}
+        auditEvents24h: {type: integer}
+    SkillSourceInput:
+      type: object
+      additionalProperties: false
+      required: [kind, name]
+      properties:
+        kind: {type: string, enum: [git, skillsmp, xiaping]}
+        name: {type: string}
+        url: {type: string, format: uri}
+        subdirectory: {type: string}
+        commit: {type: string}
+        metadata: {type: object}
+    Skill:
+      type: object
+      required: [id, slug, name, sourceKind, currentVersionId, currentSha256, currentContentHash, manifest, scanReport, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        slug: {type: string}
         name: {type: string}
         description: {type: string}
-        author: {type: string}
-        stars: {type: integer}
-        downloads: {type: integer}
-        reviews: {type: integer}
-        version: {type: string}
-        status: {type: string, description: Xiaping listings report trial/official.}
-        githubUrl: {type: string}
+        sourceKind: {type: string, enum: [zip, git, skillsmp, xiaping, local]}
         sourceUrl: {type: string}
-        categories: {type: array, items: {type: string}}
-        tags: {type: array, items: {type: string}}
-        updatedAt: {type: string}
+        sourceCommit: {type: string}
+        currentVersionId: {$ref: '#/components/schemas/UUID'}
+        currentSha256: {$ref: '#/components/schemas/SHA256'}
+        currentContentHash: {$ref: '#/components/schemas/SHA256'}
+        manifest: {type: object}
+        scanReport: {type: object}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    MCPServerInput:
+      type: object
+      additionalProperties: false
+      required: [name, description, transport, command, args, url, env, headers]
+      properties:
+        name: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}
+        description: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        env: {$ref: '#/components/schemas/WriteOnlySecretMap'}
+        headers: {$ref: '#/components/schemas/WriteOnlySecretMap'}
+    WriteOnlySecretMap:
+      type: object
+      writeOnly: true
+      additionalProperties: {type: string, writeOnly: true}
+      description: Non-empty values create/replace secrets; an existing key with an empty value is retained; an omitted key is removed.
+    MCPServer:
+      type: object
+      required: [id, name, revision, transport, args, envKeys, headerKeys, contentHash, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        description: {type: string}
+        revision: {type: integer, minimum: 1}
+        transport: {type: string, enum: [stdio, http, sse]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        envKeys: {type: array, items: {type: string}}
+        headerKeys: {type: array, items: {type: string}}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    LocalMCPServerPreview:
+      type: object
+      additionalProperties: false
+      required: [name, transport, args, envKeys, headerKeys, contentHash, confirmationToken, expiresAt]
+      properties:
+        name: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        envKeys: {type: array, items: {type: string}}
+        headerKeys: {type: array, items: {type: string}}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+        confirmationToken: {type: string, writeOnly: true}
+        expiresAt: {type: string, format: date-time}
+    LocalMCPImportPreflight:
+      type: object
+      additionalProperties: false
+      required: [targetRevision, items]
+      properties:
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+        items: {type: array, items: {$ref: '#/components/schemas/LocalMCPServerPreview'}}
+    ProfileInput:
+      type: object
+      additionalProperties: false
+      required: [name, description, revision, skillIds, mcpServerIds]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string}
+        revision: {type: integer, minimum: 0}
+        skillIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+        mcpServerIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+    Profile:
+      allOf:
+        - {$ref: '#/components/schemas/ProfileInput'}
+        - type: object
+          required: [id, createdAt, updatedAt]
+          properties:
+            id: {$ref: '#/components/schemas/UUID'}
+            createdAt: {type: string, format: date-time}
+            updatedAt: {type: string, format: date-time}
+    Node:
+      type: object
+      additionalProperties: false
+      required: [id, name, kind, status, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        kind: {type: string, enum: [local, salt]}
+        saltMinionId: {type: string}
+        managedUsernameOverride: {type: [string, 'null'], pattern: '^[a-z_][a-z0-9_-]{0,31}$'}
+        status: {type: string, enum: [online, unavailable]}
+        saltVersion: {type: string}
+        lastSeenAt: {type: [string, 'null'], format: date-time}
+        archivedAt: {type: [string, 'null'], format: date-time}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    Target:
+      type: object
+      required: [id, targetKey, nodeId, nodeName, nodeKind, runtime, managedUsername, writable, health, desiredRevision]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        targetKey: {type: string}
+        nodeId: {$ref: '#/components/schemas/UUID'}
+        nodeName: {type: string}
+        nodeKind: {type: string, enum: [local, salt]}
+        saltMinionId: {type: string}
+        runtime: {type: string, enum: [claude, codex, hermes, shared-relay]}
+        managedUsername: {type: string}
+        writable: {type: boolean}
+        health: {$ref: '#/components/schemas/Health'}
+        desiredRevision: {type: integer, minimum: 0}
+        targetRevision: {type: string}
+        driftSummary: {type: object}
+        lastScannedAt: {type: [string, 'null'], format: date-time}
+        lastReconciledAt: {type: [string, 'null'], format: date-time}
+        errorCode: {type: string}
+        errorReason: {type: string}
+    TargetDetail:
+      type: object
+      required: [target, inventory, targetRevision]
+      properties:
+        target: {$ref: '#/components/schemas/Target'}
+        inventory:
+          type: object
+          properties:
+            members: {type: array, items: {$ref: '#/components/schemas/InventoryMember'}}
+            relay: {$ref: '#/components/schemas/RelayStatus'}
+        targetRevision: {type: string}
+        desired:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [snapshot, manifest]
+              properties:
+                snapshot: {$ref: '#/components/schemas/DesiredSnapshot'}
+                manifest: {$ref: '#/components/schemas/DesiredManifest'}
+    InventoryMember:
+      type: object
+      required: [id, kind, name, protected]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [skill, mcp, anchor, entry]}
+        name: {type: string}
+        contentHash: {type: string}
+        protected: {type: boolean}
+        scope: {type: string}
+        revision: {type: integer, minimum: 1}
+        secretKeys: {type: array, items: {type: string}}
+    DesiredManifest:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, target, skills, mcpServers, managedMemberIds]
+      properties:
+        schemaVersion: {const: 1}
+        target: {$ref: '#/components/schemas/ManifestTarget'}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevision: {type: integer, minimum: 1}
+        skills: {type: array, items: {$ref: '#/components/schemas/SkillMember'}}
+        mcpServers: {type: array, items: {$ref: '#/components/schemas/MCPMember'}}
+        managedMemberIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+        relayPort: {type: integer, minimum: 1, maximum: 65535}
+    ManifestTarget:
+      type: object
+      additionalProperties: false
+      required: [id, nodeId, nodeKind, runtime, managedUsername]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        nodeId: {$ref: '#/components/schemas/UUID'}
+        nodeKind: {type: string, enum: [local, salt]}
+        saltMinionId: {type: string}
+        runtime: {type: string, enum: [claude, codex, hermes, shared-relay]}
+        managedUsername: {type: string}
+    SkillMember:
+      type: object
+      additionalProperties: false
+      required: [memberId, skillId, versionId, slug, sha256, contentHash]
+      properties:
+        memberId: {$ref: '#/components/schemas/UUID'}
+        skillId: {$ref: '#/components/schemas/UUID'}
+        versionId: {$ref: '#/components/schemas/UUID'}
+        slug: {type: string}
+        sha256: {$ref: '#/components/schemas/SHA256'}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+    MCPMember:
+      type: object
+      additionalProperties: false
+      required: [memberId, serverId, revision, name, transport, contentHash]
+      properties:
+        memberId: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, minimum: 1}
+        name: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        envRefs: {$ref: '#/components/schemas/SecretReferenceMap'}
+        headerRefs: {$ref: '#/components/schemas/SecretReferenceMap'}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+    SecretReferenceMap:
+      type: object
+      additionalProperties: {$ref: '#/components/schemas/UUID'}
+      description: Secret identifiers only; plaintext values are forbidden.
+    DesiredSnapshot:
+      type: object
+      required: [id, revision, sourceKind, manifestHash, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, minimum: 1}
+        sourceKind: {type: string, enum: [profile_apply, target_edit, restore]}
+        sourceId: {$ref: '#/components/schemas/UUID'}
+        profileRevision: {type: integer}
+        manifestHash: {$ref: '#/components/schemas/SHA256'}
+        createdAt: {type: string, format: date-time}
+    Diff:
+      type: object
+      required: [add, replace, delete, excluded]
+      properties:
+        add: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        replace: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        delete: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        excluded: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+    DiffItem:
+      type: object
+      required: [kind, name]
+      properties:
+        kind: {type: string}
+        memberId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        reason: {type: string}
+    PreflightItem:
+      type: object
+      required: [targetId, confirmationToken, expiresAt, result]
+      properties:
+        targetId: {$ref: '#/components/schemas/UUID'}
+        confirmationToken: {type: string, writeOnly: true}
+        expiresAt: {type: string, format: date-time}
+        result:
+          type: object
+          required: [targetRevision, manifestHash, diff]
+          properties:
+            targetRevision: {type: string}
+            manifestHash: {$ref: '#/components/schemas/SHA256'}
+            diff: {$ref: '#/components/schemas/Diff'}
+    Operation:
+      type: object
+      required: [id, kind, status, metadata, cancelRequested, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        kind: {type: string, enum: [skill_import, mcp_import, update_check, apply, edit, restore, scan, refresh, reconcile, relay_start, relay_stop, relay_restart, relay_health, backup_gc]}
+        status: {$ref: '#/components/schemas/OperationStatus'}
+        sourceId: {$ref: '#/components/schemas/UUID'}
+        metadata: {type: object}
+        errorCode: {type: string}
+        errorReason: {type: string}
+        cancelRequested: {type: boolean}
+        targets: {type: array, items: {$ref: '#/components/schemas/OperationTarget'}}
+        createdAt: {type: string, format: date-time}
+        startedAt: {type: [string, 'null'], format: date-time}
+        finishedAt: {type: [string, 'null'], format: date-time}
+        updatedAt: {type: string, format: date-time}
+    OperationTarget:
+      type: object
+      required: [id, targetId, targetKey, status, attempt, pendingRerun]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        targetId: {$ref: '#/components/schemas/UUID'}
+        targetKey: {type: string}
+        status: {type: string, enum: [queued, running, succeeded, failed, cancelled]}
+        attempt: {type: integer, minimum: 1}
+        pendingRerun: {type: boolean}
+        bridgeOperationId: {$ref: '#/components/schemas/UUID'}
+        saltJid: {type: string, pattern: '^[0-9]{8,32}$'}
+        result: {type: object, description: Redacted safe terminal result returned by the typed Bridge operation.}
+        errorCode: {type: string}
+        errorReason: {type: string}
+        createdAt: {type: string, format: date-time}
+        startedAt: {type: [string, 'null'], format: date-time}
+        finishedAt: {type: [string, 'null'], format: date-time}
+        updatedAt: {type: string, format: date-time}
+    Backup:
+      type: object
+      required: [id, bridgeBackupId, targetId, targetRevision, createdAt, expiresAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        bridgeBackupId: {$ref: '#/components/schemas/UUID'}
+        targetId: {$ref: '#/components/schemas/UUID'}
+        sourceOperationId: {$ref: '#/components/schemas/UUID'}
+        targetRevision: {type: string}
+        manifestHash: {$ref: '#/components/schemas/SHA256'}
+        createdAt: {type: string, format: date-time}
+        expiresAt: {type: string, format: date-time}
+    AuditEvent:
+      type: object
+      required: [id, action, resourceType, outcome, metadata, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        action: {type: string}
+        resourceType: {type: string}
+        resourceId: {type: string}
+        outcome: {type: string}
+        ipAddress: {type: string}
+        metadata: {type: object}
+        createdAt: {type: string, format: date-time}
+    SettingsInput:
+      type: object
+      additionalProperties: false
+      required: [managedUsername, updateCron, timezone, relayPort, relayIntentionalPaused]
+      properties:
+        managedUsername: {type: string, pattern: '^[a-z_][a-z0-9_-]{0,31}$'}
+        updateCron: {type: string}
+        timezone: {type: string}
+        relayPort: {type: integer, minimum: 1, maximum: 65535}
+        relayIntentionalPaused: {type: boolean}
+        updatedAt: {type: string, format: date-time, readOnly: true}
+    Settings:
+      allOf:
+        - {$ref: '#/components/schemas/SettingsInput'}
+        - type: object
+          required: [updatedAt]
+    RelayStatus:
+      type: object
+      required: [state, healthy, intentionalPaused, endpoint]
+      properties:
+        state: {type: string}
+        healthy: {type: boolean}
+        intentionalPaused: {type: boolean}
+        endpoint: {type: string, format: uri}
+        version: {type: string}
+        errorCode: {type: string}
+    SHA256: {type: string, pattern: '^[a-f0-9]{64}$'}
+    Health: {type: string, enum: [healthy, drifted, repairing, blocked, unavailable]}
+    OperationStatus: {type: string, enum: [queued, running, succeeded, partial, failed, cancelled]}

@@ -1,9 +1,6 @@
 package httpapi
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -11,206 +8,96 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/Junhao2314/toolhub/internal/agenthub"
 	"github.com/Junhao2314/toolhub/internal/ai"
+	"github.com/Junhao2314/toolhub/internal/bridgeclient"
 	"github.com/Junhao2314/toolhub/internal/config"
 	"github.com/Junhao2314/toolhub/internal/market"
-	"github.com/Junhao2314/toolhub/internal/security"
 	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 type API struct {
-	config      config.Config
 	store       *store.Store
-	hub         *agenthub.Hub
+	bridge      *bridgeclient.Client
 	market      *market.Multi
 	recommender *ai.Recommender
+	config      config.Config
 	logger      *slog.Logger
-	dummyHash   string
-	loginLimit  *ipLimiter
+	limiter     *loginLimiter
 }
 
-func New(cfg config.Config, st *store.Store, hub *agenthub.Hub, marketClient *market.Multi, recommender *ai.Recommender, logger *slog.Logger) (*API, error) {
-	dummyHash, err := security.HashPassword("toolhub timing equalizer password")
-	if err != nil {
-		return nil, err
-	}
-	return &API{config: cfg, store: st, hub: hub, market: marketClient, recommender: recommender, logger: logger, dummyHash: dummyHash, loginLimit: newIPLimiter(10, 10*time.Minute)}, nil
+func New(st *store.Store, bridge *bridgeclient.Client, marketClient *market.Multi, recommender *ai.Recommender, cfg config.Config, logger *slog.Logger) *API {
+	return &API{store: st, bridge: bridge, market: marketClient, recommender: recommender, config: cfg, logger: logger, limiter: newLoginLimiter()}
 }
 
 func (a *API) Router() http.Handler {
 	router := chi.NewRouter()
-	router.Use(middleware.RequestID)
-	router.Use(middleware.RealIP)
-	router.Use(middleware.Recoverer)
-	router.Use(a.securityHeaders)
-	router.Use(a.accessLog)
+	router.Use(middleware.RequestID, middleware.RealIP, middleware.Recoverer)
+	router.Use(middleware.Timeout(16 * time.Minute))
 	router.Get("/healthz", a.health)
-	router.Post("/agent/v1/enroll", a.enrollAgent)
-	router.Get("/agent/v1/connect", a.hub.ServeConnect)
-	router.Get("/agent/v1/artifacts/{versionID}", a.agentArtifact)
-	router.Get("/agent/v1/secrets/{secretID}", a.agentSecret)
-	router.Post("/agent/v1/discoveries/descriptors", a.agentDiscoveryDescriptors)
-	router.Post("/agent/v1/discoveries/capture", a.agentDiscoveryCapture)
-	router.Post("/agent/v1/discoveries/{id}/skill", a.agentSkillAdoptionUpload)
-	router.Post("/agent/v1/discoveries/{id}/skill-snapshot", a.agentSkillSnapshotUpload)
-	router.Post("/api/v1/auth/login", a.login)
-	router.Get("/api/v1/auth/session", a.session)
-
 	router.Route("/api/v1", func(api chi.Router) {
-		api.Use(a.authenticate)
-		api.Use(a.verifyCSRF)
-		api.Post("/auth/logout", a.logout)
-		api.Get("/auth/me", a.me)
-		api.Get("/auth/csrf", a.csrf)
-		api.Patch("/account/username", a.updateOwnUsername)
-		api.Patch("/account/password", a.updateOwnPassword)
-		api.Get("/overview", a.overview)
-
-		api.Group(func(read chi.Router) {
-			read.Use(a.requireRoles("admin", "operator", "viewer"))
-			read.Get("/nodes", a.listNodes)
-			read.Get("/nodes/{id}", a.getNode)
-			read.Get("/skills", a.listSkills)
-			read.Get("/skills/{id}", a.getSkill)
-			read.Get("/sources", a.listSources)
-			read.Get("/deployments", a.listDeployments)
-			read.Get("/updates", a.listUpdates)
-			read.Get("/jobs", a.listJobs)
-			read.Get("/market/search", a.searchMarket)
-			read.Get("/mcp/servers", a.listMCPServers)
-			read.Get("/mcp/profiles", a.listMCPProfiles)
-			read.Get("/mcp/deployments", a.listMCPDeployments)
-			read.Get("/profiles", a.listProfiles)
-			read.Get("/profiles/{id}", a.getProfile)
-			read.Get("/targets/{nodeId}/{runtime}", a.getTargetView)
-			read.Get("/discoveries", a.listDiscoveries)
-			read.Get("/shared-sources", a.listSharedSources)
-			read.Get("/shared-sources/{id}", a.getSharedSource)
-		})
-
-		api.Group(func(ops chi.Router) {
-			ops.Use(a.requireRoles("admin", "operator"))
-			ops.Post("/nodes", a.createEnrollment)
-			ops.Patch("/nodes/{id}", a.updateNode)
-			ops.Delete("/nodes/{id}", a.archiveNode)
-			ops.Post("/nodes/{id}/scan", a.scanNode)
-			ops.Post("/nodes/{id}/connections", a.createNodeConnection)
-			ops.Post("/skills", a.importSkill)
-			ops.Post("/skills/upload", a.uploadSkill)
-			ops.Delete("/skills/{id}", a.archiveSkill)
-			ops.Post("/skills/{id}/deployments", a.setSkillTargets)
-			ops.Post("/deployments/{id}/rollback", a.rollbackDeployment)
-			ops.Post("/updates", a.checkUpdates)
-			ops.Post("/sync", a.syncNow)
-			ops.Post("/reconcile", a.reconcileNow)
-			ops.Post("/jobs/{id}/cancel", a.cancelJob)
-			ops.Post("/recommendations", a.recommend)
-			ops.Post("/mcp/servers", a.createMCPServer)
-			ops.Patch("/mcp/servers/{id}", a.updateMCPServer)
-			ops.Delete("/mcp/servers/{id}", a.deleteMCPServer)
-			ops.Post("/mcp/servers/{id}/health", a.checkMCPHealth)
-			ops.Post("/mcp/servers/{id}/archive", a.archiveMCPServer)
-			ops.Post("/mcp/servers/{id}/unarchive", a.unarchiveMCPServer)
-			ops.Post("/mcp/profiles", a.createMCPProfile)
-			ops.Put("/mcp/profiles/{id}/servers", a.setMCPProfileServers)
-			ops.Post("/mcp/deployments", a.deployMCPProfile)
-			ops.Post("/profiles", a.createProfile)
-			ops.Patch("/profiles/{id}", a.updateProfile)
-			ops.Put("/profiles/{id}/members", a.setProfileMembers)
-			ops.Delete("/profiles/{id}", a.deleteProfile)
-			ops.Post("/profiles/{id}/preflight", a.preflightProfile)
-			ops.Post("/profiles/{id}/activate", a.activateProfile)
-			ops.Post("/targets/{nodeId}/{runtime}/deactivate", a.deactivateTarget)
-		})
-
-		api.Group(func(admin chi.Router) {
-			admin.Use(a.requireRoles("admin"))
-			admin.Get("/users", a.listUsers)
-			admin.Post("/users", a.createUser)
-			admin.Post("/users/{id}/password", a.resetUserPassword)
-			admin.Get("/audit", a.listAudit)
-			admin.Post("/skills/{id}/review", a.reviewSkill)
-			admin.Post("/discoveries/{id}/adopt-skill", a.adoptDiscoveredSkill)
-			admin.Post("/discoveries/{id}/import-skill", a.importHermesSkill)
-			admin.Post("/discoveries/{id}/import-mcp", a.importHermesMCP)
-			admin.Post("/updates/{id}/approve", a.approveUpdate)
-			admin.Get("/settings", a.getSettings)
-			admin.Patch("/settings", a.updateSettings)
-			admin.Get("/settings/ai-providers", a.listAIProviders)
-			admin.Post("/settings/ai-providers", a.createAIProvider)
+		api.Post("/auth/login", a.login)
+		api.Get("/auth/session", a.sessionProbe)
+		api.Group(func(auth chi.Router) {
+			auth.Use(a.authenticate, a.verifyCSRF)
+			auth.Post("/auth/logout", a.logout)
+			auth.Get("/auth/csrf", a.csrf)
+			auth.Get("/account", a.getAccount)
+			auth.Patch("/account/username", a.updateUsername)
+			auth.Patch("/account/password", a.updatePassword)
+			auth.Get("/overview", a.overview)
+			auth.Get("/skills", a.listSkills)
+			auth.Post("/skills/upload", a.uploadSkill)
+			auth.Post("/skills/import", a.importSkill)
+			auth.Get("/market/search", a.searchMarket)
+			auth.Post("/recommendations", a.recommend)
+			auth.Get("/mcp/servers", a.listMCPServers)
+			auth.Post("/mcp/servers", a.createMCPServer)
+			auth.Post("/mcp/import", a.importLocalMCP)
+			auth.Put("/mcp/servers/{serverID}", a.updateMCPServer)
+			auth.Delete("/mcp/servers/{serverID}", a.deleteMCPServer)
+			auth.Get("/profiles", a.listProfiles)
+			auth.Post("/profiles", a.createProfile)
+			auth.Put("/profiles/{profileID}", a.updateProfile)
+			auth.Delete("/profiles/{profileID}", a.deleteProfile)
+			auth.Post("/profiles/{profileID}/preflight", a.profilePreflight)
+			auth.Post("/profiles/{profileID}/apply", a.applyProfile)
+			auth.Get("/nodes", a.listNodes)
+			auth.Post("/nodes/refresh", a.refreshNodes)
+			auth.Patch("/nodes/{nodeID}", a.updateNode)
+			auth.Get("/targets", a.listTargets)
+			auth.Get("/targets/{targetID}", a.getTarget)
+			auth.Post("/targets/{targetID}/scan", a.scanTarget)
+			auth.Post("/targets/{targetID}/skill-import", a.importLocalSkill)
+			auth.Post("/targets/{targetID}/mcp-import/preflight", a.preflightLocalMCPImport)
+			auth.Post("/targets/{targetID}/edit", a.editTarget)
+			auth.Get("/targets/{targetID}/backups", a.listBackups)
+			auth.Post("/targets/{targetID}/restore", a.restoreTarget)
+			auth.Post("/targets/{targetID}/relay/{action}", a.relayAction)
+			auth.Get("/operations", a.listOperations)
+			auth.Get("/operations/{operationID}", a.getOperation)
+			auth.Post("/operations/{operationID}/cancel", a.cancelOperation)
+			auth.Post("/operations/{operationID}/retry-failed", a.retryFailedTargets)
+			auth.Get("/audit", a.listAudit)
+			auth.Get("/settings", a.getSettings)
+			auth.Put("/settings", a.updateSettings)
+			auth.Post("/updates/check", a.checkUpdates)
 		})
 	})
 	return router
 }
 
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-	defer cancel()
-	if err := a.store.Pool().Ping(ctx); err != nil {
+	if err := a.store.Pool().Ping(r.Context()); err != nil {
 		writeError(w, r, http.StatusServiceUnavailable, "database_unavailable", "Database is unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "time": time.Now().UTC()})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
-}
-
-func writeItems(w http.ResponseWriter, raw json.RawMessage) {
-	writeJSON(w, http.StatusOK, struct {
-		Items json.RawMessage `json:"items"`
-	}{Items: raw})
-}
-
-func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message, "requestId": middleware.GetReqID(r.Context())}})
-}
-
-func writeErrorDetails(w http.ResponseWriter, r *http.Request, status int, code, message string, details map[string]any) {
-	payload := map[string]any{"code": code, "message": message, "requestId": middleware.GetReqID(r.Context())}
-	for key, value := range details {
-		payload[key] = value
-	}
-	writeJSON(w, status, map[string]any{"error": payload})
-}
-
-func (a *API) handleStoreError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, r, http.StatusNotFound, "not_found", "The requested resource was not found")
+	if err := a.store.RequireSchemaGeneration(r.Context()); err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "schema_generation_mismatch", err.Error())
 		return
 	}
-	if errors.Is(err, store.ErrSourceFileAuthoritative) {
-		writeError(w, r, http.StatusConflict, "source_file_authoritative", "This MCP server is managed by its node-local shared source file")
-		return
+	bridgeStatus := "ok"
+	if err := a.bridge.Health(r.Context()); err != nil {
+		bridgeStatus = "unavailable"
 	}
-	if errors.Is(err, store.ErrManagedMCPProfile) {
-		writeError(w, r, http.StatusConflict, "managed_mcp_profile_required", "Managed MCP delivery requires a fixed ToolHub runtime profile")
-		return
-	}
-	if errors.Is(err, store.ErrMCPProfileRuntime) {
-		writeError(w, r, http.StatusConflict, "mcp_profile_runtime_mismatch", "The MCP profile does not match the target runtime")
-		return
-	}
-	if errors.Is(err, store.ErrTargetManagedByProfile) {
-		writeError(w, r, http.StatusConflict, "target_managed_by_profile", "Deactivate the ToolHub Profile before changing this target")
-		return
-	}
-	if errors.Is(err, store.ErrToolHubProfileNameTaken) {
-		writeError(w, r, http.StatusConflict, "profile_name_unavailable", "A ToolHub Profile with this name already exists")
-		return
-	}
-	if errors.Is(err, store.ErrStateConflict) {
-		writeError(w, r, http.StatusConflict, "state_conflict", "The resource is already in a terminal or conflicting state")
-		return
-	}
-	// The client response stays generic on purpose; without this log an unexpected store
-	// failure is invisible apart from a bare 500 in the access log.
-	if a != nil && a.logger != nil {
-		a.logger.Log(r.Context(), slog.LevelError, "store error", "method", r.Method, "path", r.URL.Path, "requestId", middleware.GetReqID(r.Context()), "error", err.Error())
-	}
-	writeError(w, r, http.StatusInternalServerError, "internal_error", "The operation failed")
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "bridge": bridgeStatus})
 }

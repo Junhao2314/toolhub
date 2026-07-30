@@ -6,37 +6,76 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"strings"
 	"time"
 
-	"github.com/Junhao2314/toolhub/internal/agenthub"
+	"github.com/Junhao2314/toolhub/internal/bridgeclient"
+	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/market"
-	"github.com/Junhao2314/toolhub/internal/protocol"
-	"github.com/Junhao2314/toolhub/internal/remote"
 	"github.com/Junhao2314/toolhub/internal/skills"
 	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 type Worker struct {
-	store      *store.Store
-	hub        *agenthub.Hub
-	logger     *slog.Logger
-	ssh        *remote.Executor
-	market     *market.Multi
-	instanceID string
+	store  *store.Store
+	bridge *bridgeclient.Client
+	market *market.Multi
+	logger *slog.Logger
 }
 
-const (
-	jobLeaseDuration              = 60 * time.Second
-	jobLeaseRenewal               = 20 * time.Second
-	activationStatePersistTimeout = 5 * time.Second
-)
+func New(st *store.Store, bridge *bridgeclient.Client, marketClient *market.Multi, logger *slog.Logger) *Worker {
+	return &Worker{store: st, bridge: bridge, market: marketClient, logger: logger}
+}
 
-func New(st *store.Store, hub *agenthub.Hub, ssh *remote.Executor, marketClient *market.Multi, logger *slog.Logger, instanceID string) *Worker {
-	if instanceID == "" {
-		instanceID = fmt.Sprintf("pid-%d", time.Now().UnixNano())
+// Recover requeues interrupted control work and waits for each durable Bridge
+// target step to reach a terminal state before replaying its idempotent request.
+// Replay is what completes PostgreSQL snapshot/backup projection after a crash.
+func (w *Worker) Recover(ctx context.Context) error {
+	if _, err := w.store.RequeueRunningControlOperations(ctx); err != nil {
+		return fmt.Errorf("recover control operations: %w", err)
 	}
-	return &Worker{store: st, hub: hub, ssh: ssh, market: marketClient, logger: logger, instanceID: instanceID}
+	items, err := w.store.RunningOperationTargets(ctx)
+	if err != nil {
+		return fmt.Errorf("list running operation targets: %w", err)
+	}
+	for _, item := range items {
+		if item.BridgeOperationID == "" {
+			if err := w.store.RequeueRunningOperationTarget(ctx, item.ID); err != nil {
+				return err
+			}
+			continue
+		}
+		deadline := time.Now().Add(12 * time.Minute)
+		for {
+			operation, operationErr := w.bridge.Operation(ctx, item.BridgeOperationID)
+			if operationErr != nil {
+				var apiErr *bridgeprotocol.APIError
+				if errors.As(operationErr, &apiErr) && apiErr.Code == bridgeprotocol.ErrInvalidRequest {
+					break
+				}
+				return fmt.Errorf("recover Bridge operation %s: %w", item.BridgeOperationID, operationErr)
+			}
+			if bridgeprotocol.IsTerminalOperationStatus(operation.Status) {
+				break
+			}
+			if !time.Now().Before(deadline) {
+				return fmt.Errorf("Bridge operation %s remained non-terminal during startup recovery", item.BridgeOperationID)
+			}
+			timer := time.NewTimer(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		if err := w.store.RequeueRunningOperationTarget(ctx, item.ID); err != nil {
+			return fmt.Errorf("requeue recovered operation target %s: %w", item.ID, err)
+		}
+	}
+	return nil
 }
 
 func (w *Worker) Run(ctx context.Context, concurrency int) {
@@ -46,19 +85,166 @@ func (w *Worker) Run(ctx context.Context, concurrency int) {
 	for index := 0; index < concurrency; index++ {
 		go w.loop(ctx, index)
 	}
+	go w.controlLoop(ctx)
+}
+
+func (w *Worker) controlLoop(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		operation, err := w.store.ClaimControlOperation(ctx)
+		if errors.Is(err, store.ErrNotFound) {
+			if !waitForWork(ctx) {
+				return
+			}
+			continue
+		}
+		if err != nil {
+			w.logger.Error("claim control operation", "error", err)
+			if !waitForWork(ctx) {
+				return
+			}
+			continue
+		}
+		result, apiErr := w.executeControl(ctx, operation)
+		status := bridgeprotocol.OperationSucceeded
+		if apiErr != nil {
+			status = bridgeprotocol.OperationFailed
+		}
+		if err := w.store.FinishControlOperation(ctx, operation.ID, status, result, apiErr); err != nil {
+			w.logger.Error("finish control operation", "operationId", operation.ID, "error", err)
+		}
+	}
+}
+
+func waitForWork(ctx context.Context) bool {
+	timer := time.NewTimer(500 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (w *Worker) executeControl(ctx context.Context, operation domain.Operation) (map[string]any, *bridgeprotocol.APIError) {
+	switch operation.Kind {
+	case "skill_import":
+		var metadata struct {
+			Source store.SourceInput `json:"source"`
+		}
+		if err := json.Unmarshal(operation.Metadata, &metadata); err != nil {
+			return nil, publicError(err)
+		}
+		skill, created, err := w.importSource(ctx, metadata.Source)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		return map[string]any{"skillId": skill.ID, "versionId": skill.CurrentVersionID, "created": created}, nil
+	case "update_check":
+		sources, err := w.store.RefreshableSkillSources(ctx)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		updated, unchanged := 0, 0
+		failures := []map[string]string{}
+		for _, source := range sources {
+			before := source.Commit
+			refresh := source
+			refresh.Commit = ""
+			skill, _, importErr := w.importSource(ctx, refresh)
+			if importErr != nil {
+				failures = append(failures, map[string]string{"name": source.Name, "error": "update source unavailable"})
+				continue
+			}
+			if before != "" && before == skill.SourceCommit {
+				unchanged++
+			} else {
+				updated++
+			}
+		}
+		result := map[string]any{"checked": len(sources), "updated": updated, "unchanged": unchanged, "failures": failures}
+		if len(failures) > 0 && len(failures) == len(sources) && len(sources) > 0 {
+			return result, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrTargetUnavailable, Message: "All Library update sources were unavailable", Retryable: true}
+		}
+		return result, nil
+	case "refresh":
+		result, err := w.bridge.RefreshNodes(ctx, "node-refresh-"+operation.ID)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		if err := w.store.UpsertDiscoveredNodes(ctx, result.Nodes); err != nil {
+			return nil, publicError(err)
+		}
+		online := 0
+		for _, node := range result.Nodes {
+			if node.Status == "online" {
+				online++
+			}
+		}
+		return map[string]any{"discovered": len(result.Nodes), "online": online}, nil
+	case "backup_gc":
+		result, err := w.bridge.GCBackups(ctx, "backup-gc-"+operation.ID, bridgeprotocol.BackupGCRequest{MaxAgeDays: 30, MaxPerTarget: 10})
+		if err != nil {
+			return nil, publicError(err)
+		}
+		deleted, err := w.store.DeleteBackupsByBridgeIDs(ctx, result.RemovedBackupIDs)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		return map[string]any{"removed": result.Removed, "catalogRowsDeleted": deleted, "maxAgeDays": 30, "maxPerTarget": 10}, nil
+	default:
+		return nil, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrUnsupportedOperation, Message: "Control operation kind is not supported"}
+	}
+}
+
+func (w *Worker) importSource(ctx context.Context, source store.SourceInput) (domain.Skill, bool, error) {
+	source.Kind = strings.ToLower(strings.TrimSpace(source.Kind))
+	provenance := map[string]any{"sourceKind": source.Kind, "sourceUrl": source.URL}
+	switch source.Kind {
+	case "git", "skillsmp":
+		pkg, commit, err := skills.ImportGit(ctx, source.URL, source.Subdirectory, source.Commit, skills.DefaultLimits)
+		if err != nil {
+			return domain.Skill{}, false, err
+		}
+		source.Commit = commit
+		provenance["sourceCommit"] = commit
+		return w.store.ImportSkill(ctx, source, pkg, provenance)
+	case "xiaping":
+		client, ok := w.market.Xiaping()
+		if !ok {
+			return domain.Skill{}, false, errors.New("Xiaping marketplace is not configured")
+		}
+		skillID, _ := source.Metadata["skillId"].(string)
+		if strings.TrimSpace(skillID) == "" {
+			return domain.Skill{}, false, errors.New("Xiaping source requires metadata.skillId")
+		}
+		download, err := client.Download(ctx, skillID, skills.DefaultLimits.MaxArchiveBytes)
+		if err != nil {
+			return domain.Skill{}, false, err
+		}
+		pkg, err := skills.ScanZIP(download.Archive, skills.DefaultLimits)
+		if err != nil {
+			return domain.Skill{}, false, err
+		}
+		source.Commit = download.Version
+		provenance["sourceCommit"], provenance["skillPage"] = download.Version, download.SkillPage
+		return w.store.ImportSkill(ctx, source, pkg, provenance)
+	default:
+		return domain.Skill{}, false, errors.New("queued Skill import source is unsupported")
+	}
 }
 
 func (w *Worker) loop(ctx context.Context, index int) {
-	owner := fmt.Sprintf("%s/worker-%d", w.instanceID, index)
 	for {
-		select {
-		case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
 			return
-		default:
 		}
-		job, err := w.store.ClaimJob(ctx, owner, jobLeaseDuration)
+		item, err := w.store.ClaimOperationTarget(ctx)
 		if errors.Is(err, store.ErrNotFound) {
-			timer := time.NewTimer(750 * time.Millisecond)
+			timer := time.NewTimer(500 * time.Millisecond)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -68,539 +254,337 @@ func (w *Worker) loop(ctx context.Context, index int) {
 			continue
 		}
 		if err != nil {
-			w.logger.Error("claim job", "worker", index, "error", err)
-			time.Sleep(time.Second)
+			w.logger.Error("claim operation target", "worker", index, "error", err)
 			continue
 		}
-		result, err := w.executeWithLease(ctx, job, owner)
-		if err != nil {
-			w.logger.Warn("job failed", "jobId", job.ID, "kind", job.Kind, "attempt", job.Attempts, "error", err)
-			if storeErr := w.store.FailJob(ctx, job, owner, err.Error()); storeErr != nil && !errors.Is(storeErr, store.ErrJobCancelled) {
-				w.logger.Error("persist job failure", "jobId", job.ID, "error", storeErr)
+		if err := w.store.SetBridgeOperationMetadata(ctx, item.OperationTarget.ID, item.OperationTarget.ID, ""); err != nil {
+			apiErr := publicError(err)
+			if finishErr := w.store.FinishOperationTarget(ctx, item.OperationTarget.ID, bridgeprotocol.OperationFailed, bridgeprotocol.TargetResult{}, apiErr); finishErr != nil {
+				w.logger.Error("finish operation target after Bridge metadata failure", "operationTargetId", item.OperationTarget.ID, "error", finishErr)
+			}
+			if _, rerunErr := w.store.EnqueuePendingRerun(ctx, item.OperationTarget.ID); rerunErr != nil {
+				w.logger.Error("enqueue coalesced reconcile", "operationTargetId", item.OperationTarget.ID, "error", rerunErr)
 			}
 			continue
 		}
-		if err := w.store.FinishJob(ctx, job.ID, owner, job.Attempts, result); err != nil && !errors.Is(err, store.ErrJobCancelled) {
-			w.logger.Error("finish job", "jobId", job.ID, "error", err)
+		result, apiErr := w.execute(ctx, item)
+		status := bridgeprotocol.OperationSucceeded
+		if apiErr != nil {
+			status = bridgeprotocol.OperationFailed
+		}
+		if err := w.store.FinishOperationTarget(ctx, item.OperationTarget.ID, status, result, apiErr); err != nil {
+			w.logger.Error("finish operation target", "operationTargetId", item.OperationTarget.ID, "error", err)
+			continue
+		}
+		if _, err := w.store.EnqueuePendingRerun(ctx, item.OperationTarget.ID); err != nil {
+			w.logger.Error("enqueue coalesced reconcile", "operationTargetId", item.OperationTarget.ID, "error", err)
 		}
 	}
 }
 
-func (w *Worker) executeWithLease(ctx context.Context, job domain.Job, owner string) (any, error) {
-	jobCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(jobLeaseRenewal)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-jobCtx.Done():
-				return
-			case <-ticker.C:
-				if err := w.store.RenewJobLease(ctx, job.ID, owner, job.Attempts, jobLeaseDuration); err != nil {
-					w.logger.Warn("job lease renewal stopped", "jobId", job.ID, "kind", job.Kind, "attempt", job.Attempts, "leaseOwner", owner, "error", err)
-					cancel()
-					return
-				}
-			}
+func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	target := toBridgeTarget(item.Target)
+	switch item.Operation.Kind {
+	case "scan":
+		response, err := w.bridge.Scan(ctx, item.OperationTarget.ID, bridgeprotocol.ScanRequest{Target: target})
+		if err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
-	}()
-	result, err := w.execute(jobCtx, job)
-	cancel()
-	<-done
-	return result, err
-}
-
-func (w *Worker) execute(ctx context.Context, job domain.Job) (any, error) {
-	switch job.Kind {
-	case "inventory_scan":
-		return w.inventoryScan(ctx, job)
+		if err := w.store.ReplaceRuntimeSnapshot(ctx, item.Target.ID, response.TargetRevision, map[string]any{"members": response.Members, "relay": response.Relay}); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: item.Target.Health, TargetRevision: response.TargetRevision}, nil
 	case "skill_import":
-		return w.importSkill(ctx, job)
-	case "skill_adopt":
-		return w.adoptSkill(ctx, job)
-	case "skill_snapshot_import":
-		return w.importSkillSnapshot(ctx, job)
-	case "update_check":
-		return w.checkUpdates(ctx, job)
-	case "sync", "rollback":
-		return w.syncSkills(ctx, job)
-	case "mcp_sync":
-		return w.syncMCP(ctx, job)
-	case "profile_activate":
-		return w.activateProfile(ctx, job)
-	case "mcp_health":
-		return map[string]any{"status": "queued_on_next_reconcile"}, nil
-	case "archive_purge":
-		count, err := w.store.PurgeExpiredArchives(ctx)
-		return map[string]any{"purged": count}, err
+		return w.executeLocalSkillImport(ctx, item, target)
+	case "mcp_import":
+		return w.executeLocalMCPImport(ctx, item, target)
+	case "apply", "edit", "restore":
+		return w.executeCommit(ctx, item, target)
+	case "reconcile":
+		return w.executeReconcile(ctx, item, target)
+	case "relay_start", "relay_stop", "relay_restart", "relay_health":
+		action := map[string]string{"relay_start": "start", "relay_stop": "stop", "relay_restart": "restart", "relay_health": "health"}[item.Operation.Kind]
+		settings, err := w.store.Settings(ctx)
+		if err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+		status, err := w.bridge.Relay(ctx, action, item.OperationTarget.ID, bridgeprotocol.RelayActionRequest{Target: target, Port: settings.RelayPort, IntentionalPaused: settings.RelayIntentionalPaused})
+		if err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+		if action == "stop" {
+			if err := w.store.SetRelayIntentionalPaused(ctx, true); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
+			status.IntentionalPaused = true
+		} else if action == "start" || action == "restart" {
+			if err := w.store.SetRelayIntentionalPaused(ctx, false); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
+			status.IntentionalPaused = false
+		}
+		health := bridgeprotocol.HealthHealthy
+		if !status.Healthy && !status.IntentionalPaused {
+			health = bridgeprotocol.HealthBlocked
+		}
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health}, nil
 	default:
-		return nil, fmt.Errorf("unsupported job kind %q", job.Kind)
+		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrUnsupportedOperation, Message: "Operation kind is not executable on a target"}
 	}
 }
 
-func (w *Worker) adoptSkill(ctx context.Context, job domain.Job) (any, error) {
-	var input struct {
-		DiscoveryID string `json:"discoveryId"`
+func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	var metadata struct {
+		Manifest       bridgeprotocol.DesiredManifest `json:"manifest"`
+		TargetRevision string                         `json:"targetRevision"`
+		BackupID       string                         `json:"backupId"`
+		SourceKind     string                         `json:"sourceKind"`
+		SourceID       string                         `json:"sourceId"`
 	}
-	if err := json.Unmarshal(job.Payload, &input); err != nil || input.DiscoveryID == "" {
-		return nil, errors.New("skill adoption requires discoveryId")
+	requestBody := item.OperationTarget.Request
+	if len(requestBody) == 0 || string(requestBody) == "{}" {
+		requestBody = item.Operation.Metadata
 	}
-	target, err := w.store.SkillDiscoveryForAdoption(ctx, input.DiscoveryID)
+	if err := json.Unmarshal(requestBody, &metadata); err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	if metadata.Manifest.SchemaVersion == 0 && item.Operation.Kind != "restore" {
+		return bridgeprotocol.TargetResult{}, publicError(errors.New("operation manifest is missing"))
+	}
+	beforeManifest, err := w.store.DesiredManifestOrEmpty(ctx, target.ID)
 	if err != nil {
-		return nil, err
+		return bridgeprotocol.TargetResult{}, publicError(err)
 	}
-	payload := map[string]any{"discoveryId": target.DiscoveryID, "runtime": target.Runtime, "path": target.Path, "sha256": target.SHA256}
-	task, err := w.store.CreateNodeTask(ctx, target.NodeID, job.ID, "adopt_skill", payload)
-	if err != nil {
-		w.store.FailSkillAdoption(ctx, input.DiscoveryID, err)
-		return nil, err
-	}
-	delivered := w.deliver(ctx, target.NodeID, task)
-	return map[string]any{"taskId": task.ID, "delivered": delivered, "pendingOffline": !delivered}, nil
-}
-
-func (w *Worker) importSkillSnapshot(ctx context.Context, job domain.Job) (result any, resultErr error) {
-	var input struct {
-		DiscoveryID    string `json:"discoveryId"`
-		ExpectedSHA256 string `json:"expectedSha256"`
-	}
-	if err := json.Unmarshal(job.Payload, &input); err != nil || input.DiscoveryID == "" || input.ExpectedSHA256 == "" {
-		return nil, errors.New("Hermes Skill snapshot import requires discoveryId and expectedSha256")
-	}
-	defer func() {
-		if resultErr != nil {
-			w.store.FailHermesSkillImport(context.WithoutCancel(ctx), input.DiscoveryID, job.ID, resultErr)
+	var restoredManifest *bridgeprotocol.DesiredManifest
+	if item.Operation.Kind == "restore" {
+		backup, err := w.store.Backup(ctx, metadata.BackupID)
+		if err != nil || backup.TargetID != target.ID {
+			return bridgeprotocol.TargetResult{}, publicError(store.ErrNotFound)
 		}
-	}()
-	target, err := w.store.HermesSkillSnapshotForImport(ctx, input.DiscoveryID, input.ExpectedSHA256, job.ID)
-	if err != nil {
-		return nil, err
-	}
-	payload := protocol.ImportSkillSnapshotPayload{
-		DiscoveryID: target.DiscoveryID,
-		Runtime:     target.Runtime,
-		Path:        target.Path,
-		SHA256:      target.SHA256,
-	}
-	task, err := w.store.CreateNodeTaskWithOptions(ctx, target.NodeID, job.ID, "import_skill_snapshot", payload, store.NodeTaskOptions{
-		TargetKind:  "skill_discovery",
-		TargetID:    target.DiscoveryID,
-		SemanticKey: fmt.Sprintf("import_skill_snapshot:%s:%s", target.DiscoveryID, target.SHA256),
-	})
-	if err != nil {
-		return nil, err
-	}
-	delivered := w.deliver(ctx, target.NodeID, task)
-	return map[string]any{"taskId": task.ID, "delivered": delivered, "pendingOffline": !delivered}, nil
-}
-
-func (w *Worker) inventoryScan(ctx context.Context, job domain.Job) (any, error) {
-	var input struct {
-		NodeID          string `json:"nodeId"`
-		HermesMCPImport *struct {
-			DiscoveryID        string `json:"discoveryId"`
-			ObservedGeneration int64  `json:"observedGeneration"`
-		} `json:"hermesMcpImport"`
-	}
-	if err := json.Unmarshal(job.Payload, &input); err != nil || input.NodeID == "" {
-		return nil, errors.New("inventory scan requires nodeId")
-	}
-	options := store.NodeTaskOptions{}
-	if input.HermesMCPImport != nil {
-		candidate := input.HermesMCPImport
-		if candidate.DiscoveryID == "" || candidate.ObservedGeneration <= 0 {
-			return nil, errors.New("Hermes MCP snapshot import requires discoveryId and observedGeneration")
-		}
-		nodeID, err := w.store.HermesMCPImportForScan(ctx, candidate.DiscoveryID, candidate.ObservedGeneration, job.ID)
+		manifest, err := w.store.BackupDesiredManifest(ctx, backup)
 		if err != nil {
-			w.store.FailHermesMCPImport(context.WithoutCancel(ctx), candidate.DiscoveryID, job.ID, err)
-			return nil, err
+			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
-		if nodeID != input.NodeID {
-			err := errors.New("Hermes MCP import node does not match the queued scan")
-			w.store.FailHermesMCPImport(context.WithoutCancel(ctx), candidate.DiscoveryID, job.ID, err)
-			return nil, err
-		}
-		options = store.NodeTaskOptions{
-			TargetKind:       "mcp_discovery",
-			TargetID:         candidate.DiscoveryID,
-			TargetGeneration: candidate.ObservedGeneration,
-			SemanticKey:      fmt.Sprintf("hermes_mcp_snapshot:%s:%d", candidate.DiscoveryID, candidate.ObservedGeneration),
-		}
+		metadata.BackupID = backup.BridgeBackupID
+		metadata.Manifest = manifest
+		restoredManifest = &manifest
 	}
-	task, err := w.store.CreateNodeTaskWithOptions(ctx, input.NodeID, job.ID, "scan_inventory", map[string]any{"readOnly": true}, options)
-	if err != nil {
-		if input.HermesMCPImport != nil {
-			w.store.FailHermesMCPImport(context.WithoutCancel(ctx), input.HermesMCPImport.DiscoveryID, job.ID, err)
-		}
-		return nil, err
+	if err := w.validateTargetBinding(ctx, target, metadata.Manifest); err != nil {
+		apiErr := publicError(err)
+		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
+		return bridgeprotocol.TargetResult{}, apiErr
 	}
-	delivered := w.deliver(ctx, input.NodeID, task)
-	return map[string]any{"taskId": task.ID, "delivered": delivered, "pendingOffline": !delivered}, nil
-}
-
-func (w *Worker) importSkill(ctx context.Context, job domain.Job) (any, error) {
-	var input struct {
-		Kind, Name, URL, Subdirectory, Commit, ExternalID string
-	}
-	if err := json.Unmarshal(job.Payload, &input); err != nil {
-		return nil, err
-	}
-	importCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	if input.Kind == "xiaping" {
-		return w.importXiapingSkill(importCtx, ctx, job, input.Name, input.ExternalID)
-	}
-	pkg, commit, err := skills.ImportGit(importCtx, input.URL, input.Subdirectory, input.Commit, skills.DefaultLimits)
-	if err != nil {
-		return nil, err
-	}
-	name := input.Name
-	if name == "" {
-		name = pkg.Name
-	}
-	result, err := w.store.ImportSkill(ctx, store.SourceInput{Kind: input.Kind, Name: name, URL: input.URL, Subdirectory: input.Subdirectory, Commit: commit}, pkg, map[string]any{"importedByJob": job.ID}, job.CreatedBy)
-	return result, err
-}
-
-// importXiapingSkill downloads the marketplace ZIP through the authenticated Xiaping API,
-// scans it under the standard package limits, and queues it for review like any other import.
-// Official skills charge the configured account's platform coins at download time.
-func (w *Worker) importXiapingSkill(importCtx, ctx context.Context, job domain.Job, name, externalID string) (any, error) {
-	if externalID == "" {
-		return nil, errors.New("xiaping import requires externalId")
-	}
-	if w.market == nil {
-		return nil, errors.New("marketplace sources are not configured")
-	}
-	xiaping, ok := w.market.Xiaping()
-	if !ok {
-		return nil, errors.New("xiaping marketplace source is not configured")
-	}
-	download, err := xiaping.Download(importCtx, externalID, skills.DefaultLimits.MaxArchiveBytes)
-	if err != nil {
-		return nil, err
-	}
-	pkg, err := skills.ScanZIP(download.Archive, skills.DefaultLimits)
-	if err != nil {
-		return nil, err
-	}
-	if name == "" {
-		name = pkg.Name
-	}
-	result, err := w.store.ImportSkill(ctx, store.SourceInput{Kind: "xiaping", Name: name, URL: download.SkillPage, Commit: download.Version}, pkg, map[string]any{"importedByJob": job.ID, "xiapingSkillId": externalID, "xiapingVersion": download.Version, "xiapingCoinsSpent": download.CoinsSpent}, job.CreatedBy)
-	return result, err
-}
-
-func (w *Worker) checkUpdates(ctx context.Context, job domain.Job) (any, error) {
-	var input struct {
-		SkillIDs  []string `json:"skillIds"`
-		ScopeType string   `json:"scopeType"`
-		ScopeID   string   `json:"scopeId"`
-	}
-	_ = json.Unmarshal(job.Payload, &input)
-	if input.ScopeType == "skill" && input.ScopeID != "" {
-		input.SkillIDs = append(input.SkillIDs, input.ScopeID)
-	}
-	sources, err := w.store.UpdateSources(ctx, input.SkillIDs)
-	if err != nil {
-		return nil, err
-	}
-	var candidates []map[string]any
-	for _, source := range sources {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if input.ScopeType == "source" && input.ScopeID != source.SourceID {
-			continue
-		}
-		importCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		pkg, commit, importErr := skills.ImportGit(importCtx, source.URL, source.Subdirectory, "HEAD", skills.DefaultLimits)
-		cancel()
-		if importErr != nil {
-			candidates = append(candidates, map[string]any{"skillId": source.SkillID, "status": "failed", "error": importErr.Error()})
-			continue
-		}
-		if pkg.SHA256 == source.CurrentSHA256 {
-			candidates = append(candidates, map[string]any{"skillId": source.SkillID, "status": "current", "commit": commit})
-			continue
-		}
-		if job.DryRun {
-			candidates = append(candidates, map[string]any{"skillId": source.SkillID, "status": "would_create", "commit": commit, "sha256": pkg.SHA256, "risk": pkg.Report.RiskLevel})
-			continue
-		}
-		updateID, addErr := w.store.AddUpdateCandidate(ctx, source, commit, pkg, job.CreatedBy)
-		if addErr != nil {
-			candidates = append(candidates, map[string]any{"skillId": source.SkillID, "status": "failed", "error": addErr.Error()})
-			continue
-		}
-		candidates = append(candidates, map[string]any{"skillId": source.SkillID, "status": "available", "updateId": updateID, "commit": commit, "sha256": pkg.SHA256})
-	}
-	return map[string]any{"candidates": candidates, "dryRun": job.DryRun}, nil
-}
-
-func (w *Worker) syncSkills(ctx context.Context, job domain.Job) (any, error) {
-	var selectors skillDispatchSelectors
-	_ = json.Unmarshal(job.Payload, &selectors)
-	if selectors.ScopeType == "skill" && selectors.ScopeID != "" {
-		selectors.SkillIDs = append(selectors.SkillIDs, selectors.ScopeID)
-	}
-	summary, err := w.dispatchSkillDeployments(ctx, selectors, job.DryRun, job.ID)
-	return summary.asMap(job.DryRun), err
-}
-
-type skillDispatchSelectors struct {
-	NodeIDs       []string `json:"nodeIds"`
-	SkillIDs      []string `json:"skillIds"`
-	DeploymentIDs []string `json:"deploymentIds"`
-	Runtime       string   `json:"runtime"`
-	ScopeType     string   `json:"scopeType"`
-	ScopeID       string   `json:"scopeId"`
-}
-
-type mcpDispatchSelectors struct {
-	NodeIDs       []string `json:"nodeIds"`
-	ProfileIDs    []string `json:"profileIds"`
-	DeploymentIDs []string `json:"deploymentIds"`
-	ScopeType     string   `json:"scopeType"`
-	ScopeID       string   `json:"scopeId"`
-}
-
-type dispatchSummary struct {
-	Queued    int `json:"queued"`
-	Delivered int `json:"delivered"`
-	Skipped   int `json:"skipped"`
-}
-
-func (s dispatchSummary) pendingOffline() int { return s.Queued - s.Delivered }
-
-func (s dispatchSummary) asMap(dryRun bool) map[string]any {
-	return map[string]any{"queued": s.Queued, "delivered": s.Delivered, "pendingOffline": s.pendingOffline(), "skipped": s.Skipped, "dryRun": dryRun}
-}
-
-func (w *Worker) dispatchSkillDeployments(ctx context.Context, selectors skillDispatchSelectors, dryRun bool, jobID string) (dispatchSummary, error) {
-	nodes := makeSet(selectors.NodeIDs)
-	skillsSet := makeSet(selectors.SkillIDs)
-	deploymentIDs := makeSet(selectors.DeploymentIDs)
-	deployments, err := w.store.PendingSkillDeployments(ctx)
-	if err != nil {
-		return dispatchSummary{}, err
-	}
-	summary := dispatchSummary{}
-	for _, deployment := range deployments {
-		if err := ctx.Err(); err != nil {
-			return summary, err
-		}
-		if (len(nodes) > 0 && !nodes[deployment.NodeID]) || (len(skillsSet) > 0 && !skillsSet[deployment.SkillID]) ||
-			(len(deploymentIDs) > 0 && !deploymentIDs[deployment.DeploymentID]) || (selectors.Runtime != "" && selectors.Runtime != deployment.Runtime) {
-			summary.Skipped++
-			continue
-		}
-		if !domain.IsSkillTargetRuntime(deployment.Runtime) {
-			return summary, fmt.Errorf("runtime %q is not a writable Skill target", deployment.Runtime)
-		}
-		if selectors.ScopeType == "source" && selectors.ScopeID != deployment.SourceID {
-			summary.Skipped++
-			continue
-		}
-		if selectors.ScopeType == "node_group" && selectors.ScopeID != deployment.NodeGroup {
-			summary.Skipped++
-			continue
-		}
-		payload := protocol.DeploySkillPayload{
-			DeploymentID:      deployment.DeploymentID,
-			DesiredGeneration: deployment.DesiredGeneration,
-			Runtime:           deployment.Runtime,
-			SkillSlug:         deployment.SkillSlug,
-			VersionID:         deployment.VersionID,
-			SHA256:            deployment.SHA256,
-			Enabled:           deployment.Enabled,
-		}
-		if dryRun {
-			summary.Queued++
-			continue
-		}
-		task, err := w.store.CreateNodeTaskWithOptions(ctx, deployment.NodeID, jobID, "deploy_skill", payload, store.NodeTaskOptions{
-			TargetKind:       "skill_deployment",
-			TargetID:         deployment.DeploymentID,
-			TargetGeneration: deployment.DesiredGeneration,
-			SemanticKey:      fmt.Sprintf("deploy_skill:%s:%d:%s:%t", deployment.DeploymentID, deployment.DesiredGeneration, deployment.VersionID, deployment.Enabled),
-		})
+	artifacts := []bridgeprotocol.Artifact{}
+	if item.Operation.Kind != "restore" {
+		artifacts, err = w.artifacts(ctx, metadata.Manifest)
 		if err != nil {
-			return summary, err
-		}
-		summary.Queued++
-		if w.deliver(ctx, deployment.NodeID, task) {
-			summary.Delivered++
+			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
 	}
-	return summary, nil
-}
-
-func (w *Worker) syncMCP(ctx context.Context, job domain.Job) (any, error) {
-	var selectors mcpDispatchSelectors
-	_ = json.Unmarshal(job.Payload, &selectors)
-	summary, err := w.dispatchMCPDeployments(ctx, selectors, job.DryRun, job.ID)
-	return summary.asMap(job.DryRun), err
-}
-
-func (w *Worker) dispatchMCPDeployments(ctx context.Context, selectors mcpDispatchSelectors, dryRun bool, jobID string) (dispatchSummary, error) {
-	nodes := makeSet(selectors.NodeIDs)
-	profiles := makeSet(selectors.ProfileIDs)
-	deploymentIDs := makeSet(selectors.DeploymentIDs)
-	deployments, err := w.store.PendingMCPDeployments(ctx)
+	secrets, err := w.store.SecretValues(ctx, store.ManifestSecretIDs(metadata.Manifest))
 	if err != nil {
-		return dispatchSummary{}, err
+		return bridgeprotocol.TargetResult{}, publicError(err)
 	}
-	summary := dispatchSummary{}
-	for _, deployment := range deployments {
-		if err := ctx.Err(); err != nil {
-			return summary, err
+	request := bridgeprotocol.CommitRequest{OperationID: item.OperationTarget.ID, OperationKind: item.Operation.Kind, Target: target, ExpectedRevision: metadata.TargetRevision, Manifest: metadata.Manifest, Artifacts: artifacts, SecretValues: secrets, BackupID: metadata.BackupID}
+	if item.Operation.Kind == "restore" && target.Runtime == bridgeprotocol.RuntimeSharedRelay {
+		settings, settingsErr := w.store.Settings(ctx)
+		if settingsErr != nil {
+			clear(secrets)
+			return bridgeprotocol.TargetResult{}, publicError(settingsErr)
 		}
-		if !matchesMCPSelectors(deployment, nodes, profiles, deploymentIDs, selectors.ScopeType, selectors.ScopeID) {
-			summary.Skipped++
-			continue
-		}
-		nodeID, payload, err := w.store.MCPDeploymentPayload(ctx, deployment.DeploymentID)
-		if err != nil {
-			return summary, err
-		}
-		if dryRun {
-			summary.Queued++
-			continue
-		}
-		task, err := w.store.CreateNodeTaskWithOptions(ctx, nodeID, jobID, "apply_mcp", payload, store.NodeTaskOptions{
-			TargetKind:       "mcp_deployment",
-			TargetID:         payload.DeploymentID,
-			TargetGeneration: payload.DesiredGeneration,
-			SemanticKey:      fmt.Sprintf("apply_mcp:%s:%d:%s:%t", payload.DeploymentID, payload.DesiredGeneration, payload.DesiredHash, payload.Enabled),
-		})
-		if err != nil {
-			return summary, err
-		}
-		summary.Queued++
-		if w.deliver(ctx, nodeID, task) {
-			summary.Delivered++
-		}
+		request.IntentionalPaused = settings.RelayIntentionalPaused
 	}
-	return summary, nil
-}
-
-func (w *Worker) activateProfile(ctx context.Context, job domain.Job) (any, error) {
-	var input struct {
-		ActivationID       string   `json:"activationId"`
-		NodeIDs            []string `json:"nodeIds"`
-		Runtime            string   `json:"runtime"`
-		SkillIDs           []string `json:"skillIds"`
-		SkillDeploymentIDs []string `json:"skillDeploymentIds"`
-		ProfileIDs         []string `json:"profileIds"`
-		MCPDeploymentIDs   []string `json:"mcpDeploymentIds"`
-	}
-	if err := json.Unmarshal(job.Payload, &input); err != nil || input.ActivationID == "" || len(input.NodeIDs) != 1 || input.Runtime == "" {
-		return nil, errors.New("profile activation requires activationId, one nodeId, and runtime")
-	}
-	if input.Runtime == domain.RuntimeHermes {
-		return nil, store.ErrHermesReadOnly
-	}
-	result := map[string]any{"activationId": input.ActivationID}
-	skillsSummary, err := w.dispatchSkillDeployments(ctx, skillDispatchSelectors{
-		NodeIDs: input.NodeIDs, SkillIDs: input.SkillIDs, DeploymentIDs: input.SkillDeploymentIDs, Runtime: input.Runtime,
-	}, false, job.ID)
-	result["skills"] = skillsSummary.asMap(false)
+	result, err := w.bridge.Commit(ctx, item.Operation.Kind, item.OperationTarget.ID, request)
+	clear(secrets)
+	w.captureBridgeSaltJID(ctx, item.OperationTarget.ID)
 	if err != nil {
-		state := "failed"
-		if skillsSummary.Queued > 0 {
-			state = "partial"
-		}
-		result["state"] = state
-		if stateErr := w.persistProfileActivationState(ctx, input.ActivationID, state, err.Error()); stateErr != nil {
-			return result, errors.Join(err, fmt.Errorf("persist profile activation state: %w", stateErr))
-		}
-		return result, err
+		apiErr := publicError(err)
+		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
+		return bridgeprotocol.TargetResult{}, apiErr
 	}
-	if skillsSummary.pendingOffline() > 0 {
-		message := fmt.Sprintf("%d Skill task(s) pending while the node is offline", skillsSummary.pendingOffline())
-		if err := w.persistProfileActivationState(ctx, input.ActivationID, "partial", message); err != nil {
-			return result, err
-		}
-		result["state"] = "partial"
-		return result, nil
+	if result.BackupID != "" {
+		_, _ = w.store.RecordBackup(ctx, bridgeprotocol.Backup{ID: result.BackupID, TargetID: target.ID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, Revision: metadata.TargetRevision, CreatedAt: time.Now().UTC()}, item.Operation.ID, &beforeManifest)
 	}
-
-	mcpSummary := dispatchSummary{}
-	if len(input.ProfileIDs) > 0 || len(input.MCPDeploymentIDs) > 0 {
-		mcpSummary, err = w.dispatchMCPDeployments(ctx, mcpDispatchSelectors{
-			NodeIDs: input.NodeIDs, ProfileIDs: input.ProfileIDs, DeploymentIDs: input.MCPDeploymentIDs,
-		}, false, job.ID)
-		result["mcp"] = mcpSummary.asMap(false)
-		if err != nil {
-			result["state"] = "partial"
-			if stateErr := w.persistProfileActivationState(ctx, input.ActivationID, "partial", err.Error()); stateErr != nil {
-				return result, errors.Join(err, fmt.Errorf("persist profile activation state: %w", stateErr))
-			}
-			return result, err
+	if restoredManifest != nil {
+		result.Manifest = restoredManifest
+	} else if result.Manifest == nil && metadata.Manifest.SchemaVersion != 0 {
+		result.Manifest = &metadata.Manifest
+	}
+	if result.Manifest != nil {
+		sourceKind := metadata.SourceKind
+		if sourceKind == "" {
+			sourceKind = "profile_apply"
 		}
-		if mcpSummary.pendingOffline() > 0 {
-			message := fmt.Sprintf("%d MCP task(s) pending while the node is offline", mcpSummary.pendingOffline())
-			if err := w.persistProfileActivationState(ctx, input.ActivationID, "partial", message); err != nil {
-				return result, err
-			}
-			result["state"] = "partial"
-			return result, nil
+		if _, err := w.store.PinDesiredSnapshot(ctx, target.ID, sourceKind, metadata.SourceID, item.OperationTarget.ID, *result.Manifest); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
 	}
-	if err := w.persistProfileActivationState(ctx, input.ActivationID, "active", ""); err != nil {
-		return result, err
-	}
-	result["state"] = "active"
+	_, _ = w.store.UpdateTargetHealth(ctx, target.ID, bridgeprotocol.HealthHealthy, "", "", map[string]any{}, false)
 	return result, nil
 }
 
-func (w *Worker) persistProfileActivationState(ctx context.Context, activationID, state, lastError string) error {
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), activationStatePersistTimeout)
-	defer cancel()
-	return w.store.SetProfileActivationState(persistCtx, activationID, state, lastError)
+func (w *Worker) executeReconcile(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	_, manifest, err := w.store.ActiveDesiredManifest(ctx, target.ID)
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	if err := w.validateTargetBinding(ctx, target, manifest); err != nil {
+		apiErr := publicError(err)
+		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
+		return bridgeprotocol.TargetResult{}, apiErr
+	}
+	artifacts, err := w.artifacts(ctx, manifest)
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	secrets, err := w.store.SecretValues(ctx, store.ManifestSecretIDs(manifest))
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	settings, settingsErr := w.store.Settings(ctx)
+	if settingsErr != nil {
+		clear(secrets)
+		return bridgeprotocol.TargetResult{}, publicError(settingsErr)
+	}
+	result, err := w.bridge.Reconcile(ctx, item.OperationTarget.ID, bridgeprotocol.ReconcileRequest{OperationID: item.OperationTarget.ID, Target: target, Manifest: manifest, Artifacts: artifacts, SecretValues: secrets, IntentionalPaused: target.Runtime == bridgeprotocol.RuntimeSharedRelay && settings.RelayIntentionalPaused})
+	clear(secrets)
+	w.captureBridgeSaltJID(ctx, item.OperationTarget.ID)
+	if err != nil {
+		apiErr := publicError(err)
+		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
+		return bridgeprotocol.TargetResult{}, apiErr
+	}
+	if result.BackupID != "" {
+		_, _ = w.store.RecordBackup(ctx, bridgeprotocol.Backup{ID: result.BackupID, TargetID: target.ID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, Revision: result.TargetRevision, CreatedAt: time.Now().UTC()}, item.Operation.ID, &manifest)
+	}
+	_, _ = w.store.UpdateTargetHealth(ctx, target.ID, bridgeprotocol.HealthHealthy, "", "", map[string]any{}, result.Repaired)
+	return result, nil
 }
 
-func matchesMCPSelectors(deployment store.MCPDeploymentRef, nodes, profiles, deploymentIDs map[string]bool, scopeType, scopeID string) bool {
-	if len(nodes) > 0 && !nodes[deployment.NodeID] {
-		return false
+func (w *Worker) captureBridgeSaltJID(ctx context.Context, operationTargetID string) {
+	operation, err := w.bridge.Operation(ctx, operationTargetID)
+	if err != nil || len(operation.Targets) != 1 || operation.Targets[0].SaltJID == "" {
+		return
 	}
-	if len(profiles) > 0 && !profiles[deployment.ProfileID] {
-		return false
+	if err := w.store.SetBridgeOperationMetadata(ctx, operationTargetID, operationTargetID, operation.Targets[0].SaltJID); err != nil {
+		w.logger.Error("persist Salt JID", "operationTargetId", operationTargetID, "error", err)
 	}
-	if len(deploymentIDs) > 0 && !deploymentIDs[deployment.DeploymentID] {
-		return false
-	}
-	return scopeType != "node_group" || scopeID == "" || deployment.NodeGroup == scopeID
 }
 
-func (w *Worker) deliver(ctx context.Context, nodeID string, task domain.AgentTask) bool {
-	owner := w.instanceID + "/dispatch"
-	if w.hub.IsOnline(nodeID) {
-		if err := w.hub.SendTask(ctx, nodeID, task, owner); err != nil {
-			w.logger.Warn("WSS task delivery failed after online selection", "nodeId", nodeID, "taskId", task.ID, "kind", task.Kind, "error", err)
-			return false
+func (w *Worker) executeLocalSkillImport(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	var request struct {
+		TargetRevision string `json:"targetRevision"`
+		Name           string `json:"name"`
+		ContentHash    string `json:"contentHash"`
+	}
+	if err := json.Unmarshal(item.OperationTarget.Request, &request); err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	exported, err := w.bridge.ExportLocalSkill(ctx, bridgeprotocol.LocalSkillExportRequest{Target: target, ExpectedRevision: request.TargetRevision, Name: request.Name, ContentHash: request.ContentHash})
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	defer clear(exported.Archive)
+	pkg, err := skills.ScanZIP(exported.Archive, skills.DefaultLimits)
+	if err != nil || pkg.SHA256 != exported.SHA256 || pkg.ContentHash != request.ContentHash {
+		return bridgeprotocol.TargetResult{}, publicError(errors.New("exported local Skill package did not match its scanned identity"))
+	}
+	source := store.SourceInput{Kind: "local", Name: target.Runtime + "/" + request.Name, Commit: request.ContentHash, Metadata: map[string]any{"targetId": target.ID, "runtime": target.Runtime}}
+	skill, created, err := w.store.ImportSkill(ctx, source, pkg, map[string]any{"sourceKind": "local", "targetId": target.ID, "targetRevision": request.TargetRevision, "contentHash": request.ContentHash})
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	_ = w.store.Audit(ctx, domain.AuditEvent{Action: "skill_import", ResourceType: "skill", ResourceID: skill.ID, Outcome: "success", Metadata: map[string]any{"source": "local", "targetId": target.ID, "contentHash": request.ContentHash}})
+	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: item.Target.Health, Details: map[string]any{"skillId": skill.ID, "versionId": skill.CurrentVersionID, "created": created}}, nil
+}
+
+func (w *Worker) executeLocalMCPImport(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	if existing, err := w.store.MCPServer(ctx, item.OperationTarget.ID); err == nil {
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: item.Target.Health, Details: map[string]any{"serverId": existing.ID, "revision": existing.Revision, "recovered": true}}, nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	var request struct {
+		TargetRevision string                               `json:"targetRevision"`
+		ServerName     string                               `json:"serverName"`
+		ContentHash    string                               `json:"contentHash"`
+		Preview        bridgeprotocol.LocalMCPServerPreview `json:"preview"`
+	}
+	if err := json.Unmarshal(item.OperationTarget.Request, &request); err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	captured, err := w.bridge.CaptureLocalMCP(ctx, bridgeprotocol.LocalMCPCaptureRequest{Target: target, ExpectedRevision: request.TargetRevision, Name: request.ServerName, ContentHash: request.ContentHash})
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	if !reflect.DeepEqual(captured.Preview, request.Preview) {
+		clear(captured.Env)
+		clear(captured.Headers)
+		return bridgeprotocol.TargetResult{}, publicError(errors.New("captured local MCP server did not match its confirmed preview"))
+	}
+	input := store.MCPInput{Name: captured.Preview.Name, Description: "Imported from local " + target.Runtime, Transport: captured.Preview.Transport, Command: captured.Preview.Command, Args: captured.Preview.Args, URL: captured.Preview.URL, Env: captured.Env, Headers: captured.Headers}
+	server, err := w.store.SaveMCPServer(ctx, item.OperationTarget.ID, input)
+	clear(captured.Env)
+	clear(captured.Headers)
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, publicError(err)
+	}
+	_ = w.store.Audit(ctx, domain.AuditEvent{Action: "mcp_import", ResourceType: "mcp_server", ResourceID: server.ID, Outcome: "success", Metadata: map[string]any{"source": "local", "targetId": target.ID, "serverName": server.Name, "secretKeys": append(server.EnvKeys, server.HeaderKeys...)}})
+	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: item.Target.Health, Details: map[string]any{"serverId": server.ID, "revision": server.Revision}}, nil
+}
+
+func (w *Worker) artifacts(ctx context.Context, manifest bridgeprotocol.DesiredManifest) ([]bridgeprotocol.Artifact, error) {
+	result := make([]bridgeprotocol.Artifact, 0, len(manifest.Skills))
+	for _, skill := range manifest.Skills {
+		archive, sha, err := w.store.SkillArtifact(ctx, skill.VersionID)
+		if err != nil {
+			return nil, err
 		}
-		return true
-	}
-	if w.ssh != nil {
-		if err := w.ssh.Dispatch(ctx, nodeID, task, owner); err != nil {
-			w.logger.Warn("SSH task delivery failed", "nodeId", nodeID, "taskId", task.ID, "kind", task.Kind, "error", err)
-			return false
+		if sha != skill.SHA256 {
+			return nil, fmt.Errorf("snapshot Skill artifact hash changed")
 		}
-		return true
+		result = append(result, bridgeprotocol.Artifact{VersionID: skill.VersionID, SHA256: sha, Archive: archive})
 	}
-	return false
+	return result, nil
 }
 
-func makeSet(values []string) map[string]bool {
-	result := make(map[string]bool, len(values))
-	for _, value := range values {
-		result[value] = true
+func toBridgeTarget(target domain.Target) bridgeprotocol.Target {
+	return bridgeprotocol.Target{ID: target.ID, NodeID: target.NodeID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, ManagedUsername: target.ManagedUsername}
+}
+
+func (w *Worker) validateTargetBinding(ctx context.Context, target bridgeprotocol.Target, manifest bridgeprotocol.DesiredManifest) error {
+	relayPort := manifest.RelayPort
+	if target.Runtime == bridgeprotocol.RuntimeSharedRelay {
+		settings, err := w.store.Settings(ctx)
+		if err != nil {
+			return err
+		}
+		relayPort = settings.RelayPort
 	}
-	return result
+	return validateTargetBinding(target, manifest, relayPort)
+}
+
+func validateTargetBinding(target bridgeprotocol.Target, manifest bridgeprotocol.DesiredManifest, relayPort int) error {
+	if manifest.Target != target {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Desired snapshot target binding changed; run an explicit Apply or target edit"}
+	}
+	if target.Runtime == bridgeprotocol.RuntimeSharedRelay && manifest.RelayPort != relayPort {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Desired snapshot relay port changed; run an explicit Apply or target edit"}
+	}
+	return nil
+}
+
+func publicError(err error) *bridgeprotocol.APIError {
+	var apiErr *bridgeprotocol.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr
+	}
+	return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrInvalidRequest, Message: "Operation failed"}
+}
+
+func healthForError(err *bridgeprotocol.APIError) string {
+	if err.Code == bridgeprotocol.ErrTargetUnavailable {
+		return bridgeprotocol.HealthUnavailable
+	}
+	return bridgeprotocol.HealthBlocked
 }

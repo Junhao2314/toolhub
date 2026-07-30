@@ -36,12 +36,13 @@ services:
       TOOLHUB_LISTEN_ADDR: 0.0.0.0:18480
       TOOLHUB_DATABASE_URL: postgres://toolhub:${TOOLHUB_POSTGRES_PASSWORD:-toolhub-local-only}@postgres:5432/toolhub?sslmode=disable
       TOOLHUB_MASTER_KEY: ${TOOLHUB_MASTER_KEY:?TOOLHUB_MASTER_KEY is required}
-      TOOLHUB_BOOTSTRAP_ADMIN_EMAIL: ${TOOLHUB_BOOTSTRAP_ADMIN_EMAIL:?TOOLHUB_BOOTSTRAP_ADMIN_EMAIL is required}
-      TOOLHUB_BOOTSTRAP_ADMIN_USERNAME: ${TOOLHUB_BOOTSTRAP_ADMIN_USERNAME:-admin}
-      TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD: ${TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD:?TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD is required}
-      TOOLHUB_BOOTSTRAP_ADMIN_NAME: ${TOOLHUB_BOOTSTRAP_ADMIN_NAME:-ToolHub Admin}
+      TOOLHUB_BOOTSTRAP_USERNAME: ${TOOLHUB_BOOTSTRAP_USERNAME:-admin}
+      TOOLHUB_BOOTSTRAP_PASSWORD: ${TOOLHUB_BOOTSTRAP_PASSWORD:-}
       TOOLHUB_LOCAL_NODE_NAME: ${TOOLHUB_LOCAL_NODE_NAME:-project-host}
-      TOOLHUB_PUBLIC_URL: ${TOOLHUB_PUBLIC_URL:-}
+      TOOLHUB_MANAGED_USERNAME: ${TOOLHUB_MANAGED_USERNAME:?TOOLHUB_MANAGED_USERNAME is required}
+      TOOLHUB_BRIDGE_SOCKET: /run/toolhub-bridge/bridge.sock
+      TOOLHUB_BRIDGE_HMAC_KEY: ${TOOLHUB_BRIDGE_HMAC_KEY:?TOOLHUB_BRIDGE_HMAC_KEY is required}
+      TOOLHUB_RELAY_PORT: ${TOOLHUB_RELAY_PORT:-6276}
       TOOLHUB_TIMEZONE: ${TOOLHUB_TIMEZONE:-Asia/Shanghai}
       TOOLHUB_SECURE_COOKIES: ${TOOLHUB_SECURE_COOKIES:-true}
       SKILLSMP_API_KEY: ${SKILLSMP_API_KEY:-}
@@ -49,8 +50,13 @@ services:
       XIAPING_BASE_URL: ${XIAPING_BASE_URL:-https://xiaping.coze.com}
     ports:
       - "127.0.0.1:${TOOLHUB_PORT:-18480}:18480"
+    group_add:
+      - "${TOOLHUB_BRIDGE_GID:?TOOLHUB_BRIDGE_GID is required}"
     volumes:
-      - toolhub_data:/data
+      - type: bind
+        source: ${TOOLHUB_BRIDGE_RUN_DIR:-/run/toolhub-bridge}
+        target: /run/toolhub-bridge
+        read_only: true
     networks:
       - backend
       - egress
@@ -69,4 +75,3 @@ networks:
 
 volumes:
   postgres_data:
-  toolhub_data:

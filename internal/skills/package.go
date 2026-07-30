@@ -55,6 +55,7 @@ type Package struct {
 	Description  string         `json:"description"`
 	Manifest     map[string]any `json:"manifest"`
 	SHA256       string         `json:"sha256"`
+	ContentHash  string         `json:"contentHash"`
 	CanonicalZIP []byte         `json:"-"`
 	Report       ScanReport     `json:"scanReport"`
 }
@@ -203,7 +204,20 @@ func buildPackage(entries []entry) (Package, error) {
 		return Package{}, err
 	}
 	sum := sha256.Sum256(canonical)
-	return Package{Slug: slugify(name), Name: name, Description: strings.TrimSpace(description), Manifest: manifest, SHA256: hex.EncodeToString(sum[:]), CanonicalZIP: canonical, Report: report}, nil
+	return Package{Slug: slugify(name), Name: name, Description: strings.TrimSpace(description), Manifest: manifest, SHA256: hex.EncodeToString(sum[:]), ContentHash: canonicalContentHash(entries), CanonicalZIP: canonical, Report: report}, nil
+}
+
+func canonicalContentHash(entries []entry) string {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].name < entries[j].name })
+	hasher := sha256.New()
+	for _, item := range entries {
+		name := []byte(item.name)
+		_, _ = fmt.Fprintf(hasher, "%d:", len(name))
+		_, _ = hasher.Write(name)
+		_, _ = fmt.Fprintf(hasher, ":%04o:%d:", item.mode.Perm(), len(item.data))
+		_, _ = hasher.Write(item.data)
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func normalizeRoot(entries []entry) ([]entry, error) {

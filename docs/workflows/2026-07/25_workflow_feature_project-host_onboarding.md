@@ -1,5 +1,9 @@
 # Project-host onboarding 工作流
 
+> Historical generation-1 report. Agent enrollment and SSH fallback were
+> removed by the generation-2 Salt Bridge refactor; do not use this document as
+> a deployment runbook. See [`docs/DEPLOYMENT.md`](../../DEPLOYMENT.md).
+
 ## 概述
 
 完成项目所在机器的默认节点 onboarding，并将 Agent enrollment、SSH fallback 和单节点 canary 的可配置部分放入 ToolHub UI。

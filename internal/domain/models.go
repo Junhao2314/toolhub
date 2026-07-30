@@ -6,248 +6,205 @@ import (
 )
 
 const (
-	RuntimeCodex    = "codex"
-	RuntimeClaude   = "claude"
-	RuntimeHermes   = "hermes"
-	RuntimeGrok     = "grok"
-	RuntimeOpenClaw = "openclaw"
-	RuntimeShared   = "shared"
-
-	CapabilityHermesReadOnlyImportV1 = "hermes_read_only_import_v1"
+	RuntimeClaude      = "claude"
+	RuntimeCodex       = "codex"
+	RuntimeHermes      = "hermes"
+	RuntimeSharedRelay = "shared-relay"
 )
 
-func IsConsumerRuntime(kind string) bool {
-	switch kind {
-	case RuntimeCodex, RuntimeClaude, RuntimeHermes, RuntimeGrok, RuntimeOpenClaw:
-		return true
-	default:
-		return false
-	}
-}
-
-func IsSkillRuntime(kind string) bool {
-	return IsConsumerRuntime(kind)
-}
-
-func IsSkillTargetRuntime(kind string) bool {
-	switch kind {
-	case RuntimeCodex, RuntimeClaude, RuntimeGrok, RuntimeOpenClaw:
-		return true
-	default:
-		return false
-	}
-}
-
-func IsMCPRuntime(kind string) bool {
-	return IsConsumerRuntime(kind)
-}
-
-func IsManagedMCPRuntime(kind string) bool {
-	return kind == RuntimeCodex || kind == RuntimeClaude
+type Account struct {
+	Username                  string    `json:"username"`
+	PasswordHash              string    `json:"-"`
+	PasswordChangeRecommended bool      `json:"passwordChangeRecommended"`
+	PasswordChangedAt         time.Time `json:"passwordChangedAt"`
+	CreatedAt                 time.Time `json:"createdAt"`
+	UpdatedAt                 time.Time `json:"updatedAt"`
 }
 
 type Principal struct {
-	ID                        string    `json:"id"`
 	Username                  string    `json:"username"`
-	Email                     string    `json:"email"`
-	DisplayName               string    `json:"displayName"`
-	Roles                     []string  `json:"roles"`
 	PasswordChangeRecommended bool      `json:"passwordChangeRecommended"`
 	CSRFHash                  []byte    `json:"-"`
 	ExpiresAt                 time.Time `json:"expiresAt"`
 }
 
-func (p Principal) HasRole(roles ...string) bool {
-	for _, want := range roles {
-		for _, actual := range p.Roles {
-			if actual == want {
-				return true
-			}
-		}
-	}
-	return false
+type Node struct {
+	ID                      string     `json:"id"`
+	Name                    string     `json:"name"`
+	Kind                    string     `json:"kind"`
+	SaltMinionID            string     `json:"saltMinionId,omitempty"`
+	ManagedUsernameOverride string     `json:"managedUsernameOverride,omitempty"`
+	Status                  string     `json:"status"`
+	SaltVersion             string     `json:"saltVersion,omitempty"`
+	LastSeenAt              *time.Time `json:"lastSeenAt,omitempty"`
+	ArchivedAt              *time.Time `json:"archivedAt,omitempty"`
+	CreatedAt               time.Time  `json:"createdAt"`
+	UpdatedAt               time.Time  `json:"updatedAt"`
 }
 
-type User struct {
-	ID                        string    `json:"id"`
-	Username                  string    `json:"username"`
-	Email                     string    `json:"email"`
-	DisplayName               string    `json:"displayName"`
-	PasswordHash              string    `json:"-"`
-	Roles                     []string  `json:"roles"`
-	Disabled                  bool      `json:"disabled"`
-	PasswordChangeRecommended bool      `json:"passwordChangeRecommended"`
-	CreatedAt                 time.Time `json:"createdAt"`
+type Target struct {
+	ID               string          `json:"id"`
+	TargetKey        string          `json:"targetKey"`
+	NodeID           string          `json:"nodeId"`
+	NodeName         string          `json:"nodeName"`
+	NodeKind         string          `json:"nodeKind"`
+	SaltMinionID     string          `json:"saltMinionId,omitempty"`
+	Runtime          string          `json:"runtime"`
+	ManagedUsername  string          `json:"managedUsername"`
+	Writable         bool            `json:"writable"`
+	Health           string          `json:"health"`
+	DesiredRevision  int64           `json:"desiredRevision"`
+	TargetRevision   string          `json:"targetRevision,omitempty"`
+	DriftSummary     json.RawMessage `json:"driftSummary,omitempty"`
+	LastScannedAt    *time.Time      `json:"lastScannedAt,omitempty"`
+	LastReconciledAt *time.Time      `json:"lastReconciledAt,omitempty"`
+	ErrorCode        string          `json:"errorCode,omitempty"`
+	ErrorReason      string          `json:"errorReason,omitempty"`
+}
+
+type Skill struct {
+	ID                 string          `json:"id"`
+	Slug               string          `json:"slug"`
+	Name               string          `json:"name"`
+	Description        string          `json:"description"`
+	SourceKind         string          `json:"sourceKind"`
+	SourceURL          string          `json:"sourceUrl,omitempty"`
+	SourceCommit       string          `json:"sourceCommit,omitempty"`
+	CurrentVersionID   string          `json:"currentVersionId"`
+	CurrentSHA256      string          `json:"currentSha256"`
+	CurrentContentHash string          `json:"currentContentHash"`
+	Manifest           json.RawMessage `json:"manifest"`
+	ScanReport         json.RawMessage `json:"scanReport"`
+	CreatedAt          time.Time       `json:"createdAt"`
+	UpdatedAt          time.Time       `json:"updatedAt"`
+}
+
+type SkillVersion struct {
+	ID           string          `json:"id"`
+	SkillID      string          `json:"skillId"`
+	ArtifactID   string          `json:"artifactId"`
+	SourceCommit string          `json:"sourceCommit,omitempty"`
+	SHA256       string          `json:"sha256"`
+	Provenance   json.RawMessage `json:"provenance"`
+	Manifest     json.RawMessage `json:"manifest"`
+	ScanReport   json.RawMessage `json:"scanReport"`
+	CreatedAt    time.Time       `json:"createdAt"`
+}
+
+type MCPServer struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	Revision    int64     `json:"revision"`
+	Transport   string    `json:"transport"`
+	Command     string    `json:"command,omitempty"`
+	Args        []string  `json:"args,omitempty"`
+	URL         string    `json:"url,omitempty"`
+	EnvKeys     []string  `json:"envKeys"`
+	HeaderKeys  []string  `json:"headerKeys"`
+	ContentHash string    `json:"contentHash"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+type Profile struct {
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Description  string    `json:"description,omitempty"`
+	Revision     int64     `json:"revision"`
+	SkillIDs     []string  `json:"skillIds"`
+	MCPServerIDs []string  `json:"mcpServerIds"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+type Operation struct {
+	ID              string          `json:"id"`
+	Kind            string          `json:"kind"`
+	Status          string          `json:"status"`
+	SourceID        string          `json:"sourceId,omitempty"`
+	IdempotencyKey  string          `json:"idempotencyKey,omitempty"`
+	Metadata        json.RawMessage `json:"metadata"`
+	ErrorCode       string          `json:"errorCode,omitempty"`
+	ErrorReason     string          `json:"errorReason,omitempty"`
+	CancelRequested bool            `json:"cancelRequested"`
+	CreatedAt       time.Time       `json:"createdAt"`
+	StartedAt       *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt      *time.Time      `json:"finishedAt,omitempty"`
+	UpdatedAt       time.Time       `json:"updatedAt"`
+}
+
+type OperationTarget struct {
+	ID                string          `json:"id"`
+	OperationID       string          `json:"operationId"`
+	TargetID          string          `json:"targetId"`
+	TargetKey         string          `json:"targetKey"`
+	Status            string          `json:"status"`
+	Attempt           int             `json:"attempt"`
+	PendingRerun      bool            `json:"pendingRerun"`
+	BridgeOperationID string          `json:"bridgeOperationId,omitempty"`
+	SaltJID           string          `json:"saltJid,omitempty"`
+	Request           json.RawMessage `json:"-"`
+	Result            json.RawMessage `json:"result,omitempty"`
+	ErrorCode         string          `json:"errorCode,omitempty"`
+	ErrorReason       string          `json:"errorReason,omitempty"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	StartedAt         *time.Time      `json:"startedAt,omitempty"`
+	FinishedAt        *time.Time      `json:"finishedAt,omitempty"`
+	UpdatedAt         time.Time       `json:"updatedAt"`
+}
+
+type Settings struct {
+	ManagedUsername        string    `json:"managedUsername"`
+	UpdateCron             string    `json:"updateCron"`
+	Timezone               string    `json:"timezone"`
+	RelayPort              int       `json:"relayPort"`
+	RelayIntentionalPaused bool      `json:"relayIntentionalPaused"`
+	UpdatedAt              time.Time `json:"updatedAt"`
+}
+
+type DesiredSnapshot struct {
+	ID                    string          `json:"id"`
+	TargetID              string          `json:"targetId"`
+	Revision              int64           `json:"revision"`
+	SourceKind            string          `json:"sourceKind"`
+	SourceID              string          `json:"sourceId,omitempty"`
+	ProfileRevision       int64           `json:"profileRevision,omitempty"`
+	ManifestSchemaVersion int             `json:"manifestSchemaVersion"`
+	ManifestHash          string          `json:"manifestHash"`
+	Manifest              json.RawMessage `json:"manifest"`
+	CreatedAt             time.Time       `json:"createdAt"`
+}
+
+type Backup struct {
+	ID                string          `json:"id"`
+	BridgeBackupID    string          `json:"bridgeBackupId"`
+	TargetID          string          `json:"targetId"`
+	SourceOperationID string          `json:"sourceOperationId,omitempty"`
+	TargetRevision    string          `json:"targetRevision"`
+	ManifestHash      string          `json:"manifestHash,omitempty"`
+	CreatedAt         time.Time       `json:"createdAt"`
+	ExpiresAt         time.Time       `json:"expiresAt"`
+	Metadata          json.RawMessage `json:"metadata"`
 }
 
 type AuditEvent struct {
-	ActorUserID  string
-	Action       string
-	ResourceType string
-	ResourceID   string
-	Outcome      string
-	IPAddress    string
-	Metadata     map[string]any
+	Action       string         `json:"action"`
+	ResourceType string         `json:"resourceType"`
+	ResourceID   string         `json:"resourceId,omitempty"`
+	Outcome      string         `json:"outcome"`
+	IPAddress    string         `json:"ipAddress,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
 }
 
-type EnrollmentResult struct {
-	NodeID      string `json:"nodeId"`
-	AgentToken  string `json:"agentToken"`
-	TaskKey     string `json:"taskKey"`
-	ConnectPath string `json:"connectPath"`
+type AIProvider struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	BaseURL string `json:"baseUrl"`
+	Model   string `json:"model"`
+	APIKey  string `json:"-"`
 }
 
-type InventoryRuntime struct {
-	Kind       string          `json:"kind"`
-	RootPath   string          `json:"rootPath"`
-	Version    string          `json:"version"`
-	Config     map[string]any  `json:"config"`
-	Inventory  map[string]any  `json:"inventory"`
-	MCPServers []MCPDescriptor `json:"mcpServers,omitempty"`
-}
-
-type AgentInventory struct {
-	Runtimes      []InventoryRuntime      `json:"runtimes"`
-	SharedSources []SharedSourceInventory `json:"sharedSources,omitempty"`
-	MCPImports    []MCPDescriptor         `json:"mcpImports,omitempty"`
-	Capabilities  []string                `json:"capabilities,omitempty"`
-}
-
-type MCPDescriptor struct {
-	Name              string   `json:"name"`
-	Identity          string   `json:"identity"`
-	Transport         string   `json:"transport"`
-	Command           string   `json:"command,omitempty"`
-	Args              []string `json:"args,omitempty"`
-	URL               string   `json:"url,omitempty"`
-	EnvKeys           []string `json:"envKeys"`
-	HeaderKeys        []string `json:"headerKeys,omitempty"`
-	ConfigFingerprint string   `json:"configFingerprint"`
-	SecretFingerprint string   `json:"secretFingerprint,omitempty"`
-	ImportSource      string   `json:"importSource,omitempty"`
-	ImportSourceName  string   `json:"importSourceName,omitempty"`
-	ImportRuntime     string   `json:"importRuntime,omitempty"`
-	ImportEnabled     bool     `json:"importEnabled,omitempty"`
-	TargetRuntimes    []string `json:"targetRuntimes,omitempty"`
-	ProfileTags       []string `json:"profileTags,omitempty"`
-}
-
-type SharedSourceInventory struct {
-	Name              string                     `json:"name"`
-	Mode              string                     `json:"mode"`
-	AutoSync          bool                       `json:"autoSync"`
-	SkillsRoot        string                     `json:"skillsRoot"`
-	MCPManifestPath   string                     `json:"mcpManifestPath"`
-	ConfigFingerprint string                     `json:"configFingerprint"`
-	SourceFingerprint string                     `json:"sourceFingerprint"`
-	Status            string                     `json:"status"`
-	LastError         string                     `json:"lastError,omitempty"`
-	Skills            []SharedSkillInventory     `json:"skills"`
-	MCPServers        []SharedMCPServerInventory `json:"mcpServers"`
-	Consumers         []SharedConsumerInventory  `json:"consumers"`
-}
-
-type SharedMCPServerInventory struct {
-	Descriptor  MCPDescriptor `json:"descriptor"`
-	Description string        `json:"description,omitempty"`
-	Enabled     bool          `json:"enabled"`
-}
-
-type SharedSkillInventory struct {
-	Name               string `json:"name"`
-	SourcePath         string `json:"sourcePath"`
-	ResolvedSourcePath string `json:"resolvedSourcePath"`
-	SHA256             string `json:"sha256,omitempty"`
-	EntryType          string `json:"entryType"`
-	Managed            bool   `json:"managed"`
-	State              string `json:"state"`
-	LastError          string `json:"lastError,omitempty"`
-}
-
-type SharedConsumerInventory struct {
-	Kind                string                      `json:"kind"`
-	SkillsPath          string                      `json:"skillsPath,omitempty"`
-	MCPPath             string                      `json:"mcpPath,omitempty"`
-	MCPFormat           string                      `json:"mcpFormat,omitempty"`
-	InheritsFrom        string                      `json:"inheritsFrom,omitempty"`
-	SkillsEnabled       bool                        `json:"skillsEnabled"`
-	MCPEnabled          bool                        `json:"mcpEnabled"`
-	ExpectedFingerprint string                      `json:"expectedFingerprint,omitempty"`
-	ActualFingerprint   string                      `json:"actualFingerprint,omitempty"`
-	State               string                      `json:"state"`
-	LastError           string                      `json:"lastError,omitempty"`
-	SkillLinks          []SharedSkillLinkInventory  `json:"skillLinks"`
-	MCPBindings         []SharedMCPBindingInventory `json:"mcpBindings"`
-}
-
-type SharedSkillLinkInventory struct {
-	SkillName          string `json:"skillName"`
-	SourcePath         string `json:"sourcePath"`
-	ResolvedSourcePath string `json:"resolvedSourcePath"`
-	TargetPath         string `json:"targetPath"`
-	ExpectedTarget     string `json:"expectedTarget"`
-	ActualTarget       string `json:"actualTarget,omitempty"`
-	Managed            bool   `json:"managed"`
-	State              string `json:"state"`
-	LastError          string `json:"lastError,omitempty"`
-}
-
-type SharedMCPBindingInventory struct {
-	ServerName         string   `json:"serverName"`
-	DesiredFingerprint string   `json:"desiredFingerprint,omitempty"`
-	ActualFingerprint  string   `json:"actualFingerprint,omitempty"`
-	EnvKeys            []string `json:"envKeys,omitempty"`
-	HeaderKeys         []string `json:"headerKeys,omitempty"`
-	Enabled            bool     `json:"enabled"`
-	Missing            bool     `json:"missing"`
-	Drift              bool     `json:"drift"`
-	State              string   `json:"state"`
-	LastError          string   `json:"lastError,omitempty"`
-}
-
-type MCPCaptureRequest struct {
-	Token    string `json:"token"`
-	Runtime  string `json:"runtime"`
-	Name     string `json:"name"`
-	Identity string `json:"identity"`
-}
-
-type AgentMessage struct {
-	Type      string          `json:"type"`
-	Timestamp time.Time       `json:"timestamp"`
-	Payload   json.RawMessage `json:"payload"`
-}
-
-type AgentTask struct {
-	ID                string          `json:"id"`
-	Kind              string          `json:"kind"`
-	Payload           json.RawMessage `json:"payload"`
-	Signature         string          `json:"signature"`
-	Attempt           int             `json:"attempt"`
-	Transport         string          `json:"transport,omitempty"`
-	LeaseOwner        string          `json:"leaseOwner,omitempty"`
-	LeaseExpiresAt    *time.Time      `json:"leaseExpiresAt,omitempty"`
-	StartedAt         *time.Time      `json:"startedAt,omitempty"`
-	FinishedAt        *time.Time      `json:"finishedAt,omitempty"`
-	CancelRequestedAt *time.Time      `json:"cancelRequestedAt,omitempty"`
-	TargetKind        string          `json:"targetKind,omitempty"`
-	TargetID          string          `json:"targetId,omitempty"`
-	TargetGeneration  int64           `json:"targetGeneration,omitempty"`
-	SemanticKey       string          `json:"semanticKey,omitempty"`
-	CreatedAt         time.Time       `json:"createdAt"`
-}
-
-type Job struct {
-	ID             string          `json:"id"`
-	Kind           string          `json:"kind"`
-	Status         string          `json:"status"`
-	Payload        json.RawMessage `json:"payload"`
-	DryRun         bool            `json:"dryRun"`
-	Attempts       int             `json:"attempts"`
-	MaxAttempts    int             `json:"maxAttempts"`
-	RunAfter       time.Time       `json:"runAfter"`
-	LeaseOwner     string          `json:"leaseOwner,omitempty"`
-	LeaseExpiresAt *time.Time      `json:"leaseExpiresAt,omitempty"`
-	HeartbeatAt    *time.Time      `json:"heartbeatAt,omitempty"`
-	CreatedBy      string          `json:"createdBy,omitempty"`
+func IsWritableRuntime(runtime string) bool {
+	return runtime == RuntimeClaude || runtime == RuntimeCodex || runtime == RuntimeSharedRelay
 }

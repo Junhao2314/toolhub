@@ -1,87 +1,115 @@
 # ToolHub
 
-ToolHub is a Tailnet-only operations console for managing Skills and MCP configuration across multiple nodes. Codex and Claude are managed MCP targets; Hermes is an automatic read-only discovery source whose Skills and MCP entries enter ToolHub only after an administrator explicitly imports a snapshot. It ships as one Go control-plane container with an embedded React UI, one PostgreSQL container, and a cross-platform Go Agent.
+ToolHub is a single-user Linux control plane for managing Codex and Claude
+Skills and MCP configuration on one host and across Salt minions. The browser
+container never mounts user homes. A root-owned `toolhub-bridge` performs typed,
+guarded host operations over an HMAC-authenticated Unix socket.
 
 Licensed under the [MIT License](LICENSE).
 
-## What Is Implemented
+## Architecture
 
-- Agent-first WSS enrollment, heartbeat, inventory, signed typed tasks, offline queues, retry, cancellation, and pinned SSH/SFTP fallback.
-- Six-hour discovery for Codex, Claude, Hermes, Grok, and OpenClaw homes, including symlink/protected-Skill reporting. Hermes discoveries remain read-only until an administrator explicitly imports or re-imports a snapshot.
-- Immutable Skill artifacts with canonical SHA-256, source commit, provenance, ZIP/Git path safety, review, update approval, sync, and per-node rollback. Materialized targets are Codex, Claude, Grok, and OpenClaw; Hermes is never a target.
-- ToolHub Profiles combine Skills and MCP servers into reusable selections, with preflighted per-node/runtime activation and an effective Runtime View for drift inspection.
-- Multi-source SkillsMP/Xiaping marketplace search with normalized provenance, partial-failure isolation, fixed-commit Git import, and reviewed one-shot Xiaping ZIP intake; OpenAI-compatible structured recommendations never install automatically.
-- MCP server/profile/deployment management for Codex and Claude with automatic first-seen baselines, encrypted one-time secret capture, drift detection, native `mcpm` preference, structured fallback patches, and atomic backups. Hermes MCP is observed and imported explicitly, never reconciled back to Hermes.
-- HttpOnly server-side sessions, Argon2id, CSRF rotation, Admin/Operator/Viewer RBAC, encrypted secrets, redaction, and audit events.
+- `toolhub`: Go API, operation workers, five-minute reconcile scheduler,
+  PostgreSQL state, and embedded React UI.
+- `toolhub-bridge`: Linux host service with a mode-`0600` BoltDB journal,
+  guarded local adapter, fixed Salt CLI driver, backup catalog, and fixed
+  systemd relay controls.
+- PostgreSQL 16: singleton account, encrypted secrets, immutable Library
+  artifacts, unified Profiles, operations, desired snapshots, backups, settings,
+  providers, and actorless audit.
+- Salt 3008.x: accepted-key discovery and remote Claude/Codex/Hermes inventory.
+  Hermes is read-only. Claude/Codex are writable targets.
+- `mcpm`: one local `toolhub` profile served through one shared HTTP relay at
+  `http://127.0.0.1:6276/mcp` by default. Codex and Claude each contain one
+  native user-scope relay anchor.
 
-## Quick Start
+There is no Agent, WebSocket enrollment, SSH fallback, RBAC, multi-user API,
+review/approval workflow, deployment table, or legacy job queue.
 
-Requirements: Docker with Compose v2 and a host already connected to Tailscale.
+## Fresh Database Requirement
+
+Generation 2 intentionally supports fresh databases only. Startup checks
+`app_meta.schema_generation=2` before the HTTP server starts. A legacy or
+unknown schema fails with instructions to create a new PostgreSQL volume.
+Back up the old volume for whole-stack rollback; it is not migration input.
+
+## Host Prerequisites
+
+- Linux with systemd and a local managed user.
+- Docker Engine with Compose v2.
+- PostgreSQL 16 (provided by Compose).
+- Salt Master/minions 3008.x for remote targets. ToolHub reuses the existing
+  `base` root at `/srv/salt/states` and does not edit `/etc/salt/master`.
+- `mcpm` installed at `/usr/bin/mcpm` for local MCP. ToolHub does not install or
+  upgrade it automatically.
+
+Build and install the host services:
 
 ```bash
-git clone https://github.com/Junhao2314/toolhub.git
-cd toolhub
+make build
+sudo install -m 0755 bin/toolhub-bridge /usr/local/sbin/toolhub-bridge
+sudo packaging/systemd/install-toolhub-services.sh "$USER" "$(id -gn)" toolhub
+```
+
+The installer creates `/etc/toolhub-bridge/hmac.key`, the shared socket group,
+and the Bridge/relay units. Record the printed Bridge GID and HMAC key in the
+ToolHub environment. The HMAC key is independent from `TOOLHUB_MASTER_KEY`.
+
+## Clean Start
+
+```bash
 cp .env.example .env
-openssl rand -base64 32
-# Put the generated value in TOOLHUB_MASTER_KEY and set a unique admin username/password.
+openssl rand -base64 32  # TOOLHUB_MASTER_KEY
+# Set the Bridge GID/key, managed username, and a unique bootstrap password.
 docker compose up -d --build --wait
 curl --fail http://127.0.0.1:18480/healthz
+TOOLHUB_SMOKE_USERNAME=admin \
+TOOLHUB_SMOKE_PASSWORD='<bootstrap-password>' \
+sh scripts/smoke-api.sh
 ```
 
-Open `http://127.0.0.1:18480` for local setup. Production cookies default to `Secure`; the local HTTP smoke profile explicitly sets `TOOLHUB_SECURE_COOKIES=false`.
+The bootstrap username/password create the singleton account only when no
+account exists. Later starts ignore both values. Changing either credential
+revokes every session.
 
-ToolHub creates a pending `project-host` node on first startup. Set `TOOLHUB_LOCAL_NODE_NAME` when the project machine should use a different display name. Nodes -> Enroll project host produces the exact one-time Agent command to run on that machine.
+Compose publishes only `127.0.0.1:18480`. Keep that loopback binding and use
+Tailscale Serve/ACLs or another authenticated HTTPS boundary when remote browser
+access is required. Production cookies are `Secure` by default; local plain-HTTP
+smoke must set `TOOLHUB_SECURE_COOKIES=false`.
 
-Expose the loopback listener with Tailscale Serve according to the installed Tailscale version. Keep Docker bound to `127.0.0.1:18480`; do not publish the port on a public interface. Set `TOOLHUB_PUBLIC_URL` to the resulting Tailnet HTTPS URL so enrollment commands and WSS origins are correct.
+## Desired State
 
-## Agent
+Profiles reference Skill IDs and MCP server IDs. Every Apply begins with a
+five-minute, one-use preflight token bound to the Profile revision, target
+revision, and canonical manifest. Apply mirrors the manageable scope and pins
+the exact current artifact versions, MCP revisions, secret IDs, and hashes in an
+immutable desired snapshot.
 
-Create a node enrollment token in the UI, then run on the target:
+Target edit and Restore also create new snapshots. Every five minutes,
+reconcile repairs only pinned managed members and preserves content added after
+Apply. A no-op reconcile creates no backup; every write creates one first.
+Retention is 30 days and at most 10 backups per target.
 
-```bash
-toolhub-agent enroll --server https://toolhub.your-tailnet.ts.net --token '<one-time-token>'
-toolhub-agent run
-```
-
-For the packaged Linux systemd unit, enroll with the paths used by the service:
-
-```bash
-sudo install -d -m 0700 /etc/toolhub-agent /var/lib/toolhub-agent
-sudo toolhub-agent enroll \
-  --server https://toolhub.your-tailnet.ts.net \
-  --token '<one-time-token>' \
-  --home "$HOME" \
-  --config /etc/toolhub-agent/agent.json \
-  --data-dir /var/lib/toolhub-agent
-sudo systemctl enable --now toolhub-agent
-```
-
-The unit keeps the system read-only but allows writes to the configured home because atomic replacement of top-level files such as `~/.claude.json` requires creating a same-directory temporary file. If the Agent manages another user's home, set the service `User=` and enrollment `--home` consistently (or add equivalent `ReadWritePaths=` overrides).
-
-Service templates are under `packaging/systemd`, `packaging/launchd`, and `packaging/windows`. Enrollment immediately scans existing runtime homes. Existing non-Hermes Skills remain read-only until an administrator adopts one from the Discovered view; the Agent writes the management marker only after the backend imports and verifies the snapshot. Hermes uses Import/Re-import instead: the Agent uploads an immutable snapshot but never writes `.toolhub-managed.json` into the Hermes tree.
-
-Existing MCP servers are scanned as normalized commands, arguments, URLs, key names, import provenance, and per-node HMAC fingerprints. Codex/Claude first-seen entries can be captured and baselined automatically. Hermes entries remain candidates: ordinary scans create no central server or secret, and only an administrator's generation-pinned import can authorize one short-lived capture. Every Hermes re-import creates a new enabled central server without adding it to a Profile. Captured values are encrypted immediately and never enter browser APIs, inventory JSON, jobs, audit metadata, or logs. mcpm discovery seeds fixed `toolhub-codex` and `toolhub-claude` profiles in an observed/no-write state, using recognized legacy native anchors instead of blindly mirroring a known single-runtime `all-mcp` profile. After an explicit deployment, ToolHub writes the node-local mcpm registry plus one native relay anchor and treats later edits or deletion as drift. The Codex relay carries a 60-second startup window instead of Codex's default 10 seconds so a cold aggregate has time to initialize. Because stdio members start once per active runtime client, keep fixed profile membership deliberately small on memory-constrained nodes.
-
-Nodes also provides an SSH fallback form. It accepts `user@host`, one pinned `known_hosts` line, and a private key. The key is encrypted before storage; fallback permits only signed task upload and the fixed Agent task runner. Once the project-host inventory is online, its discovered runtimes are preselected in the Skill target matrix as the default single-node canary.
+Target health is `healthy`, `drifted`, `repairing`, `blocked`, or `unavailable`.
+Operation status is `queued`, `running`, `succeeded`, `partial`, `failed`, or
+`cancelled`. Cancel prevents queued dispatch only; a running atomic target step
+is never interrupted.
 
 ## Development
 
 ```bash
-go test ./...
+GOCACHE=/tmp/toolhub-gocache go test ./...
+GOCACHE=/tmp/toolhub-gocache go vet ./...
 cd web && npm ci --ignore-scripts && npm run typecheck && npm run build
 cd .. && make docker-config
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/salt/tests -p '*_test.py'
 ```
 
-The Vite development server uses `127.0.0.1:18481` and proxies API requests to the control plane on `18480`.
+The Vite server uses `127.0.0.1:18481` and proxies `/api` to `18480`. Set
+`TOOLHUB_VITE_API_TARGET` to test against an isolated backend on another port.
+Generated embedded assets under `cmd/toolhub/dist` are ignored; do not hand-edit
+them.
 
-`cmd/toolhub/dist/placeholder.txt` is tracked only so clean Go builds satisfy `go:embed`. The generated `index.html` and hashed assets are ignored and are produced by `make web` or the Docker build.
-
-## Operations
-
-- Update checks discover upstream commit/content changes and build a reviewable candidate. They never change desired state.
-- Admin approval marks the candidate version approved and advances existing deployments to that desired version.
-- Reconcile writes approved Skill desired state for Codex, Claude, Grok, and OpenClaw plus centrally managed MCP desired state for Codex and Claude. Hermes observations are excluded. Offline nodes retain pending tasks for the next Agent connection.
-- Inventory runs on Agent connection and every six hours. Global defaults are update checks at `02:00` and Skill + MCP reconciliation at `03:30 Asia/Shanghai`; more-specific policy scopes take precedence.
-- Deleted Skills and Nodes are archived. Skill artifact purge starts only after 30 days.
-
-See [Security](docs/SECURITY.md), [API](docs/API.md), and [Rollout](docs/ROLLOUT.md).
+See [Browser API](docs/API.md), [Bridge](docs/BRIDGE.md),
+[Security](docs/SECURITY.md), [Deployment](docs/DEPLOYMENT.md),
+[Salt](docs/SALT.md), and [Rollout](docs/ROLLOUT.md).

@@ -1,0 +1,33 @@
+[Unit]
+Description=ToolHub privileged host bridge
+After=network.target salt-master.service
+Wants=salt-master.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/toolhub-bridge --socket /run/toolhub-bridge/bridge.sock --group @TOOLHUB_BRIDGE_GROUP@ --key-file /etc/toolhub-bridge/hmac.key --journal /var/lib/toolhub-bridge/journal.db --staging-root /var/lib/toolhub-bridge/staging --backup-root /var/lib/toolhub-bridge/backups --salt-state-root /srv/salt/states
+Restart=on-failure
+RestartSec=3s
+User=root
+Group=root
+UMask=0077
+RuntimeDirectory=toolhub-bridge
+RuntimeDirectoryMode=0750
+StateDirectory=toolhub-bridge
+StateDirectoryMode=0700
+ConfigurationDirectory=toolhub-bridge
+ConfigurationDirectoryMode=0700
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/toolhub-bridge /var/lib/toolhub-bridge /srv/salt/states /var/cache/salt/minion/toolhub-staging @TOOLHUB_MANAGED_HOME@
+NoNewPrivileges=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

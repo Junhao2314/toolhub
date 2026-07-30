@@ -6,30 +6,32 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/security"
 )
 
 type Config struct {
-	ListenAddr             string
-	DatabaseURL            string
-	MasterKey              []byte
-	BootstrapAdminEmail    string
-	BootstrapAdminUsername string
-	BootstrapAdminName     string
-	BootstrapAdminPassword string
-	LocalNodeName          string
-	PublicURL              string
-	Timezone               *time.Location
-	SkillsMPAPIKey         string
-	XiapingAPIKey          string
-	XiapingBaseURL         string
-	DataDir                string
-	SessionTTL             time.Duration
-	SecureCookies          bool
+	ListenAddr        string
+	DatabaseURL       string
+	MasterKey         []byte
+	BootstrapUsername string
+	BootstrapPassword string
+	LocalNodeName     string
+	ManagedUsername   string
+	BridgeSocket      string
+	BridgeKey         []byte
+	Timezone          *time.Location
+	SkillsMPAPIKey    string
+	XiapingAPIKey     string
+	XiapingBaseURL    string
+	SessionTTL        time.Duration
+	SecureCookies     bool
+	RelayPort         int
 }
 
 func Load() (Config, error) {
@@ -50,27 +52,43 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse TOOLHUB_SECURE_COOKIES: %w", err)
 	}
-	bootstrapUsername, err := security.NormalizeUsername(env("TOOLHUB_BOOTSTRAP_ADMIN_USERNAME", "admin"))
+	bootstrapUsername := env("TOOLHUB_BOOTSTRAP_USERNAME", "admin")
+	if normalized, normalizeErr := security.NormalizeUsername(bootstrapUsername); normalizeErr == nil {
+		bootstrapUsername = normalized
+	}
+	managedUsername, err := validateManagedUsername(env("TOOLHUB_MANAGED_USERNAME", "toolhub"))
 	if err != nil {
-		return Config{}, fmt.Errorf("TOOLHUB_BOOTSTRAP_ADMIN_USERNAME: %w", err)
+		return Config{}, fmt.Errorf("TOOLHUB_MANAGED_USERNAME: %w", err)
+	}
+	bridgeSocket, err := validateSocketPath(env("TOOLHUB_BRIDGE_SOCKET", "/run/toolhub-bridge/bridge.sock"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TOOLHUB_BRIDGE_SOCKET: %w", err)
+	}
+	bridgeKey, err := bridgeprotocol.ParseKey(os.Getenv("TOOLHUB_BRIDGE_HMAC_KEY"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TOOLHUB_BRIDGE_HMAC_KEY: %w", err)
+	}
+	relayPort, err := strconv.Atoi(env("TOOLHUB_RELAY_PORT", "6276"))
+	if err != nil || relayPort < 1 || relayPort > 65535 {
+		return Config{}, errors.New("TOOLHUB_RELAY_PORT must be between 1 and 65535")
 	}
 	cfg := Config{
-		ListenAddr:             env("TOOLHUB_LISTEN_ADDR", "127.0.0.1:18480"),
-		DatabaseURL:            strings.TrimSpace(os.Getenv("TOOLHUB_DATABASE_URL")),
-		MasterKey:              masterKey,
-		BootstrapAdminEmail:    normalizeEmail(os.Getenv("TOOLHUB_BOOTSTRAP_ADMIN_EMAIL")),
-		BootstrapAdminUsername: bootstrapUsername,
-		BootstrapAdminName:     env("TOOLHUB_BOOTSTRAP_ADMIN_NAME", "ToolHub Admin"),
-		BootstrapAdminPassword: os.Getenv("TOOLHUB_BOOTSTRAP_ADMIN_PASSWORD"),
-		LocalNodeName:          env("TOOLHUB_LOCAL_NODE_NAME", "project-host"),
-		PublicURL:              strings.TrimRight(strings.TrimSpace(os.Getenv("TOOLHUB_PUBLIC_URL")), "/"),
-		Timezone:               location,
-		SkillsMPAPIKey:         strings.TrimSpace(os.Getenv("SKILLSMP_API_KEY")),
-		XiapingAPIKey:          strings.TrimSpace(os.Getenv("XIAPING_API_KEY")),
-		XiapingBaseURL:         strings.TrimRight(env("XIAPING_BASE_URL", "https://xiaping.coze.com"), "/"),
-		DataDir:                env("TOOLHUB_DATA_DIR", "/data"),
-		SessionTTL:             ttl,
-		SecureCookies:          secureCookies,
+		ListenAddr:        env("TOOLHUB_LISTEN_ADDR", "127.0.0.1:18480"),
+		DatabaseURL:       strings.TrimSpace(os.Getenv("TOOLHUB_DATABASE_URL")),
+		MasterKey:         masterKey,
+		BootstrapUsername: bootstrapUsername,
+		BootstrapPassword: os.Getenv("TOOLHUB_BOOTSTRAP_PASSWORD"),
+		LocalNodeName:     env("TOOLHUB_LOCAL_NODE_NAME", "project-host"),
+		ManagedUsername:   managedUsername,
+		BridgeSocket:      bridgeSocket,
+		BridgeKey:         bridgeKey,
+		Timezone:          location,
+		SkillsMPAPIKey:    strings.TrimSpace(os.Getenv("SKILLSMP_API_KEY")),
+		XiapingAPIKey:     strings.TrimSpace(os.Getenv("XIAPING_API_KEY")),
+		XiapingBaseURL:    strings.TrimRight(env("XIAPING_BASE_URL", "https://xiaping.coze.com"), "/"),
+		SessionTTL:        ttl,
+		SecureCookies:     secureCookies,
+		RelayPort:         relayPort,
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("TOOLHUB_DATABASE_URL is required")
@@ -80,6 +98,22 @@ func Load() (Config, error) {
 		return Config{}, errors.New("XIAPING_BASE_URL must be an https URL without embedded credentials")
 	}
 	return cfg, nil
+}
+
+func validateManagedUsername(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if err := bridgeprotocol.ValidateManagedUsername(value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func validateSocketPath(value string) (string, error) {
+	value = filepath.Clean(strings.TrimSpace(value))
+	if !filepath.IsAbs(value) || value == string(filepath.Separator) {
+		return "", errors.New("must be an absolute Unix socket path")
+	}
+	return value, nil
 }
 
 func parseMasterKey(value string) ([]byte, error) {
@@ -95,10 +129,6 @@ func parseMasterKey(value string) ([]byte, error) {
 		return []byte(value), nil
 	}
 	return nil, errors.New("TOOLHUB_MASTER_KEY must be exactly 32 raw bytes or base64-encoded 32 bytes")
-}
-
-func normalizeEmail(value string) string {
-	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func env(name, fallback string) string {

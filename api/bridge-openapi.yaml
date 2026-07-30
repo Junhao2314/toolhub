@@ -1,0 +1,555 @@
+openapi: 3.1.0
+info:
+  title: ToolHub Bridge API
+  version: 1.0.0
+  description: |
+    Typed host-management API served only over /run/toolhub-bridge/bridge.sock.
+    Every request is signed over METHOD, request URI, Unix timestamp, nonce,
+    and the SHA-256 of the exact body. The timestamp window is 30 seconds and
+    nonces are durably single-use. There is no TCP listener.
+servers:
+  - url: http://toolhub-bridge/v1
+    description: HTTP transported over the ToolHub Bridge Unix socket
+security:
+  - timestamp: []
+    nonce: []
+    signature: []
+paths:
+  /health:
+    get:
+      operationId: bridgeHealth
+      responses:
+        '200':
+          description: Bridge is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, time]
+                properties: {status: {const: ok}, time: {type: string, format: date-time}}
+        '503': {$ref: '#/components/responses/Error'}
+  /nodes/refresh:
+    post:
+      operationId: refreshNodes
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses:
+        '200':
+          description: Local node and accepted Salt keys
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nodes]
+                properties: {nodes: {type: array, items: {$ref: '#/components/schemas/NodeInfo'}}}
+        '503': {$ref: '#/components/responses/Error'}
+  /targets/scan:
+    post:
+      operationId: scanTarget
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ScanRequest'}}}
+      responses:
+        '200':
+          description: Sandboxed target inventory
+          content: {application/json: {schema: {$ref: '#/components/schemas/ScanResponse'}}}
+        '400': {$ref: '#/components/responses/Error'}
+  /local/skills/export:
+    post:
+      operationId: exportLocalSkill
+      description: Authenticated worker-only ephemeral export. The archive bypasses the idempotency journal and is never exposed to browsers.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/LocalSkillExportRequest'}}}
+      responses:
+        '200':
+          description: Canonical immutable ZIP for immediate Library import
+          content: {application/json: {schema: {$ref: '#/components/schemas/LocalSkillExportResponse'}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /local/mcp/preview:
+    post:
+      operationId: previewLocalMCP
+      description: Authenticated worker-only ephemeral read returning sanitized fields and secret key names only.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/LocalMCPPreviewRequest'}}}
+      responses:
+        '200':
+          description: Sanitized native user-scope MCP candidates
+          content: {application/json: {schema: {$ref: '#/components/schemas/LocalMCPPreviewResponse'}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /local/mcp/capture:
+    post:
+      operationId: captureLocalMCP
+      description: Authenticated worker-only one-time plaintext capture. The response bypasses the idempotency journal and must be encrypted immediately.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/LocalMCPCaptureRequest'}}}
+      responses:
+        '200':
+          description: Ephemeral native entry and secret values; never journaled, logged, audited, or returned to a browser
+          content: {application/json: {schema: {$ref: '#/components/schemas/LocalMCPCaptureResponse'}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /targets/preflight:
+    post:
+      operationId: preflightTarget
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PreflightRequest'}}}
+      responses:
+        '200':
+          description: Revision-bound destructive mirror diff
+          content: {application/json: {schema: {$ref: '#/components/schemas/PreflightResponse'}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /targets/apply:
+    post:
+      operationId: applyTarget
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/Commit'}
+      responses:
+        '200': {$ref: '#/components/responses/TargetResult'}
+        '409': {$ref: '#/components/responses/Error'}
+  /targets/edit:
+    post:
+      operationId: editTarget
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/Commit'}
+      responses:
+        '200': {$ref: '#/components/responses/TargetResult'}
+        '409': {$ref: '#/components/responses/Error'}
+  /targets/restore:
+    post:
+      operationId: restoreTarget
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RestoreRequest'}}}
+      responses:
+        '200': {$ref: '#/components/responses/TargetResult'}
+        '409': {$ref: '#/components/responses/Error'}
+  /targets/reconcile:
+    post:
+      operationId: reconcileTarget
+      description: Repairs only pinned members and preserves later unmanaged entries.
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ReconcileRequest'}}}
+      responses:
+        '200': {$ref: '#/components/responses/TargetResult'}
+        '409': {$ref: '#/components/responses/Error'}
+  /backups:
+    get:
+      operationId: listBridgeBackups
+      parameters:
+        - {name: targetId, in: query, schema: {$ref: '#/components/schemas/UUID'}}
+      responses:
+        '200':
+          description: Safe backup catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties: {items: {type: array, items: {$ref: '#/components/schemas/Backup'}}}
+  /backups/gc:
+    post:
+      operationId: garbageCollectBackups
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [maxAgeDays, maxPerTarget]
+              properties:
+                maxAgeDays: {type: integer, minimum: 1, maximum: 3650}
+                maxPerTarget: {type: integer, minimum: 1, maximum: 1000}
+      responses:
+        '200':
+          description: Number removed
+          content: {application/json: {schema: {type: object, required: [removed, removedBackupIds], properties: {removed: {type: integer, minimum: 0}, removedBackupIds: {type: array, items: {$ref: '#/components/schemas/UUID'}}}}}}
+  /relay/{action}:
+    post:
+      operationId: controlRelay
+      parameters:
+        - {name: action, in: path, required: true, schema: {type: string, enum: [status, start, stop, restart, health]}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RelayActionRequest'}}}
+      responses:
+        '200':
+          description: Fixed relay unit state
+          content: {application/json: {schema: {$ref: '#/components/schemas/RelayStatus'}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /operations/{operationID}:
+    get:
+      operationId: getBridgeOperation
+      parameters: [{$ref: '#/components/parameters/OperationID'}]
+      responses:
+        '200':
+          description: Durable safe operation journal entry
+          content: {application/json: {schema: {$ref: '#/components/schemas/Operation'}}}
+        '404': {$ref: '#/components/responses/Error'}
+  /operations/{operationID}/cancel:
+    post:
+      operationId: cancelBridgeOperation
+      description: Always rejects running destructive target steps; cancellation belongs to queued control-plane targets.
+      parameters:
+        - {$ref: '#/components/parameters/OperationID'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses:
+        '409': {$ref: '#/components/responses/Error'}
+components:
+  securitySchemes:
+    timestamp: {type: apiKey, in: header, name: X-ToolHub-Timestamp}
+    nonce: {type: apiKey, in: header, name: X-ToolHub-Nonce}
+    signature: {type: apiKey, in: header, name: X-ToolHub-Signature}
+  parameters:
+    IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 200}}
+    OperationID: {name: operationID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+  requestBodies:
+    EmptyObject:
+      required: true
+      content: {application/json: {schema: {type: object, additionalProperties: false}}}
+    Commit:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/CommitRequest'}}}
+  responses:
+    Error:
+      description: Typed Bridge error
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    TargetResult:
+      description: One target reached an atomic terminal state
+      content: {application/json: {schema: {$ref: '#/components/schemas/TargetResult'}}}
+  schemas:
+    UUID: {type: string, format: uuid}
+    SHA256: {type: string, pattern: '^[a-f0-9]{64}$'}
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties: {error: {$ref: '#/components/schemas/APIError'}}
+    APIError:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [authentication_failed, nonce_replay, request_expired, idempotency_conflict, invalid_request, unsupported_operation, revision_conflict, protected_scope, target_unavailable, managed_user_missing, salt_version_incompatible, salt_job_missing, mcpm_missing, mcpm_incompatible, relay_port_conflict, relay_unhealthy, atomic_write_failed, backup_failed, hermes_read_only]
+        message: {type: string}
+        retryable: {type: boolean}
+        details: {type: object}
+    Target:
+      type: object
+      additionalProperties: false
+      required: [id, nodeId, nodeKind, runtime, managedUsername]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        nodeId: {$ref: '#/components/schemas/UUID'}
+        nodeKind: {type: string, enum: [local, salt]}
+        saltMinionId: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$'}
+        runtime: {type: string, enum: [claude, codex, hermes, shared-relay]}
+        managedUsername: {type: string}
+        managedHome: {type: string, readOnly: true, description: Canonical home resolved and injected by the Bridge for a transient Salt bundle; caller input is ignored.}
+    NodeInfo:
+      type: object
+      required: [nodeId, name, kind, status]
+      properties:
+        nodeId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        kind: {type: string, enum: [local, salt]}
+        saltMinionId: {type: string}
+        status: {type: string, enum: [online, unavailable]}
+        version: {type: string}
+        errorCode: {type: string}
+    InventoryMember:
+      type: object
+      additionalProperties: false
+      required: [id, kind, name, protected]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [skill, mcp, anchor, entry]}
+        name: {type: string}
+        contentHash: {type: string}
+        protected: {type: boolean}
+        scope: {type: string}
+        revision: {type: integer}
+        secretKeys: {type: array, items: {type: string}}
+    ScanRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties: {target: {$ref: '#/components/schemas/Target'}}
+    ScanResponse:
+      type: object
+      additionalProperties: false
+      required: [targetRevision, members]
+      properties:
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+        members: {type: array, items: {$ref: '#/components/schemas/InventoryMember'}}
+        relay: {$ref: '#/components/schemas/RelayStatus'}
+    LocalSkillExportRequest:
+      type: object
+      additionalProperties: false
+      required: [target, expectedRevision, name, contentHash]
+      properties:
+        target: {$ref: '#/components/schemas/Target'}
+        expectedRevision: {$ref: '#/components/schemas/SHA256'}
+        name: {type: string, minLength: 1}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+    LocalSkillExportResponse:
+      type: object
+      additionalProperties: false
+      required: [name, sha256, contentHash, archive]
+      properties:
+        name: {type: string}
+        sha256: {$ref: '#/components/schemas/SHA256'}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+        archive: {type: string, format: byte, writeOnly: true, description: Ephemeral canonical ZIP; never persisted in the Bridge journal.}
+    LocalMCPServerPreview:
+      type: object
+      additionalProperties: false
+      required: [name, transport, args, envKeys, headerKeys, contentHash]
+      properties:
+        name: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        envKeys: {type: array, items: {type: string}}
+        headerKeys: {type: array, items: {type: string}}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+    LocalMCPPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [target]
+      properties: {target: {$ref: '#/components/schemas/Target'}}
+    LocalMCPPreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [targetRevision, items]
+      properties:
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+        items: {type: array, items: {$ref: '#/components/schemas/LocalMCPServerPreview'}}
+    LocalMCPCaptureRequest:
+      type: object
+      additionalProperties: false
+      required: [target, expectedRevision, name, contentHash]
+      properties:
+        target: {$ref: '#/components/schemas/Target'}
+        expectedRevision: {$ref: '#/components/schemas/SHA256'}
+        name: {type: string, minLength: 1}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+    LocalMCPCaptureResponse:
+      type: object
+      additionalProperties: false
+      writeOnly: true
+      required: [preview]
+      properties:
+        preview: {$ref: '#/components/schemas/LocalMCPServerPreview'}
+        env: {type: object, writeOnly: true, additionalProperties: {type: string, writeOnly: true}}
+        headers: {type: object, writeOnly: true, additionalProperties: {type: string, writeOnly: true}}
+    PreflightRequest:
+      type: object
+      additionalProperties: false
+      required: [target, manifest]
+      properties:
+        target: {$ref: '#/components/schemas/Target'}
+        manifest: {$ref: '#/components/schemas/DesiredManifest'}
+    PreflightResponse:
+      type: object
+      additionalProperties: false
+      required: [targetRevision, manifestHash, diff]
+      properties:
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+        manifestHash: {$ref: '#/components/schemas/SHA256'}
+        diff: {$ref: '#/components/schemas/Diff'}
+    CommitRequest:
+      type: object
+      additionalProperties: false
+      required: [operationId, operationKind, target, expectedRevision, manifest]
+      properties:
+        operationId: {$ref: '#/components/schemas/UUID'}
+        operationKind: {type: string, enum: [apply, edit]}
+        target: {$ref: '#/components/schemas/Target'}
+        expectedRevision: {$ref: '#/components/schemas/SHA256'}
+        manifest: {$ref: '#/components/schemas/DesiredManifest'}
+        artifacts: {type: array, writeOnly: true, items: {$ref: '#/components/schemas/Artifact'}}
+        secretValues: {$ref: '#/components/schemas/SecretValues'}
+        intentionalPaused: {type: boolean}
+    RestoreRequest:
+      type: object
+      additionalProperties: false
+      required: [operationId, operationKind, target, expectedRevision, backupId]
+      properties:
+        operationId: {$ref: '#/components/schemas/UUID'}
+        operationKind: {const: restore}
+        target: {$ref: '#/components/schemas/Target'}
+        expectedRevision: {$ref: '#/components/schemas/SHA256'}
+        manifest: {$ref: '#/components/schemas/DesiredManifest'}
+        artifacts: {type: array, writeOnly: true, items: {$ref: '#/components/schemas/Artifact'}}
+        secretValues: {$ref: '#/components/schemas/SecretValues'}
+        backupId: {$ref: '#/components/schemas/UUID'}
+        intentionalPaused: {type: boolean}
+    ReconcileRequest:
+      type: object
+      additionalProperties: false
+      required: [operationId, target, manifest]
+      properties:
+        operationId: {$ref: '#/components/schemas/UUID'}
+        target: {$ref: '#/components/schemas/Target'}
+        manifest: {$ref: '#/components/schemas/DesiredManifest'}
+        artifacts: {type: array, writeOnly: true, items: {$ref: '#/components/schemas/Artifact'}}
+        secretValues: {$ref: '#/components/schemas/SecretValues'}
+        intentionalPaused: {type: boolean}
+    Artifact:
+      type: object
+      additionalProperties: false
+      writeOnly: true
+      required: [versionId, sha256, archive]
+      properties:
+        versionId: {$ref: '#/components/schemas/UUID'}
+        sha256: {$ref: '#/components/schemas/SHA256'}
+        archive: {type: string, format: byte, writeOnly: true}
+    SecretValues:
+      type: object
+      writeOnly: true
+      additionalProperties: {type: string, writeOnly: true}
+      description: Ephemeral secret-ID to plaintext map. It is never journaled or logged.
+    DesiredManifest:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, target, skills, mcpServers, managedMemberIds]
+      properties:
+        schemaVersion: {const: 1}
+        target: {$ref: '#/components/schemas/Target'}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevision: {type: integer, minimum: 1}
+        skills: {type: array, items: {$ref: '#/components/schemas/SkillMember'}}
+        mcpServers: {type: array, items: {$ref: '#/components/schemas/MCPMember'}}
+        managedMemberIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+        relayPort: {type: integer, minimum: 1, maximum: 65535}
+    SkillMember:
+      type: object
+      additionalProperties: false
+      required: [memberId, skillId, versionId, slug, sha256, contentHash]
+      properties:
+        memberId: {$ref: '#/components/schemas/UUID'}
+        skillId: {$ref: '#/components/schemas/UUID'}
+        versionId: {$ref: '#/components/schemas/UUID'}
+        slug: {type: string}
+        sha256: {$ref: '#/components/schemas/SHA256'}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+    MCPMember:
+      type: object
+      additionalProperties: false
+      required: [memberId, serverId, revision, name, transport, contentHash]
+      properties:
+        memberId: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, minimum: 1}
+        name: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        envRefs: {$ref: '#/components/schemas/SecretReferenceMap'}
+        headerRefs: {$ref: '#/components/schemas/SecretReferenceMap'}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+    SecretReferenceMap:
+      type: object
+      additionalProperties: {$ref: '#/components/schemas/UUID'}
+    Diff:
+      type: object
+      additionalProperties: false
+      required: [add, replace, delete, excluded]
+      properties:
+        add: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        replace: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        delete: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        excluded: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+    DiffItem:
+      type: object
+      additionalProperties: false
+      required: [kind, name]
+      properties:
+        kind: {type: string}
+        memberId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        reason: {type: string}
+    TargetResult:
+      type: object
+      additionalProperties: false
+      required: [status, health]
+      properties:
+        status: {$ref: '#/components/schemas/OperationStatus'}
+        health: {$ref: '#/components/schemas/Health'}
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+        backupId: {$ref: '#/components/schemas/UUID'}
+        repaired: {type: boolean}
+        manifest: {$ref: '#/components/schemas/DesiredManifest'}
+        details: {type: object, description: Redacted safe typed details; plaintext secrets, archives, editable content, and raw Salt output are forbidden.}
+        error: {$ref: '#/components/schemas/APIError'}
+    Backup:
+      type: object
+      additionalProperties: false
+      required: [id, targetId, nodeKind, runtime, revision, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        targetId: {$ref: '#/components/schemas/UUID'}
+        nodeKind: {type: string, enum: [local, salt]}
+        saltMinionId: {type: string}
+        runtime: {type: string}
+        sourceOperationId: {$ref: '#/components/schemas/UUID'}
+        revision: {$ref: '#/components/schemas/SHA256'}
+        createdAt: {type: string, format: date-time}
+    RelayActionRequest:
+      type: object
+      additionalProperties: false
+      required: [target, port]
+      properties:
+        target: {$ref: '#/components/schemas/Target'}
+        port: {type: integer, minimum: 1, maximum: 65535}
+        intentionalPaused: {type: boolean}
+    RelayStatus:
+      type: object
+      additionalProperties: false
+      required: [state, healthy, intentionalPaused, endpoint]
+      properties:
+        state: {type: string}
+        healthy: {type: boolean}
+        intentionalPaused: {type: boolean}
+        endpoint: {type: string, format: uri}
+        version: {type: string}
+        errorCode: {type: string}
+    Operation:
+      type: object
+      additionalProperties: false
+      required: [id, kind, status, targets, createdAt, updatedAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        kind: {type: string}
+        status: {$ref: '#/components/schemas/OperationStatus'}
+        targets: {type: array, items: {$ref: '#/components/schemas/OperationTarget'}}
+        createdAt: {type: string, format: date-time}
+        updatedAt: {type: string, format: date-time}
+    OperationTarget:
+      type: object
+      additionalProperties: false
+      required: [targetId, status]
+      properties:
+        targetId: {$ref: '#/components/schemas/UUID'}
+        status: {$ref: '#/components/schemas/OperationStatus'}
+        saltJid: {type: string, pattern: '^[0-9]{8,32}$'}
+        result: {$ref: '#/components/schemas/TargetResult'}
+        error: {$ref: '#/components/schemas/APIError'}
+    OperationStatus: {type: string, enum: [queued, running, succeeded, partial, failed, cancelled]}
+    Health: {type: string, enum: [healthy, drifted, repairing, blocked, unavailable]}

@@ -1,20 +1,195 @@
 export type Dict = Record<string, unknown>
 
-export interface User {
-  id: string
+export interface AccountUser {
   username: string
-  email: string
-  displayName: string
-  roles: string[]
-  disabled?: boolean
-  passwordChangeRecommended?: boolean
+  passwordChangeRecommended: boolean
+  passwordChangedAt?: string
   createdAt?: string
+  updatedAt?: string
 }
 
 export interface Session {
-  user: User
+  user: AccountUser
   csrfToken?: string
   expiresAt?: string
+}
+
+export interface Node {
+  id: string
+  name: string
+  kind: 'local' | 'salt'
+  saltMinionId?: string
+  managedUsernameOverride?: string | null
+  status: 'online' | 'unavailable'
+  saltVersion?: string
+  lastSeenAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface Skill {
+  id: string
+  slug: string
+  name: string
+  description: string
+  sourceKind: string
+  sourceUrl?: string
+  sourceCommit?: string
+  currentVersionId: string
+  currentSha256: string
+  currentContentHash: string
+  manifest: Dict
+  scanReport: Dict
+  createdAt: string
+  updatedAt: string
+}
+
+export interface MCPServer {
+  id: string
+  name: string
+  description?: string
+  revision: number
+  transport: 'stdio' | 'http' | 'sse'
+  command?: string
+  args: string[]
+  url?: string
+  envKeys: string[]
+  headerKeys: string[]
+  contentHash: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface Profile {
+  id: string
+  name: string
+  description?: string
+  revision: number
+  skillIds: string[]
+  mcpServerIds: string[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface Target {
+  id: string
+  targetKey: string
+  nodeId: string
+  nodeName: string
+  nodeKind: 'local' | 'salt'
+  saltMinionId?: string
+  runtime: 'claude' | 'codex' | 'hermes' | 'shared-relay'
+  managedUsername: string
+  writable: boolean
+  health: string
+  desiredRevision: number
+  targetRevision?: string
+  driftSummary?: Dict
+  lastScannedAt?: string
+  lastReconciledAt?: string
+  errorCode?: string
+  errorReason?: string
+}
+
+export interface InventoryMember {
+  id: string
+  kind: string
+  name: string
+  contentHash?: string
+  protected: boolean
+  scope?: string
+  revision?: number
+  secretKeys?: string[]
+}
+
+export interface DesiredManifest {
+  schemaVersion: number
+  target: { id: string; nodeId: string; nodeKind: string; saltMinionId?: string; runtime: string; managedUsername: string }
+  profileId?: string
+  profileRevision?: number
+  skills: Array<{ memberId: string; skillId: string; versionId: string; slug: string; sha256: string; contentHash: string }>
+  mcpServers: Array<{ memberId: string; serverId: string; revision: number; name: string; transport: string; command?: string; args?: string[]; url?: string; envRefs?: Record<string, string>; headerRefs?: Record<string, string>; contentHash: string }>
+  managedMemberIds: string[]
+  relayPort?: number
+}
+
+export interface TargetDetail {
+  target: Target
+  targetRevision: string
+  inventory: { members?: InventoryMember[]; relay?: { state: string; endpoint: string; healthy: boolean; intentionalPaused: boolean; errorCode?: string } }
+  desired?: { snapshot: { id: string; revision: number; sourceKind: string; profileRevision?: number; manifestHash: string; createdAt: string }; manifest: DesiredManifest }
+}
+
+export interface OperationTarget {
+  id: string
+  targetId: string
+  targetKey: string
+  status: string
+  attempt: number
+  pendingRerun: boolean
+  bridgeOperationId?: string
+  saltJid?: string
+  result?: Dict
+  errorCode?: string
+  errorReason?: string
+  createdAt?: string
+  startedAt?: string
+  finishedAt?: string
+  updatedAt?: string
+}
+
+export interface Operation {
+  id: string
+  kind: string
+  status: string
+  sourceId?: string
+  metadata: Dict
+  errorCode?: string
+  errorReason?: string
+  cancelRequested: boolean
+  createdAt: string
+  startedAt?: string
+  finishedAt?: string
+  updatedAt: string
+  targets?: OperationTarget[]
+}
+
+export interface Backup {
+  id: string
+  bridgeBackupId: string
+  targetId: string
+  sourceOperationId?: string
+  targetRevision: string
+  manifestHash?: string
+  createdAt: string
+  expiresAt: string
+}
+
+export interface LocalMCPServerPreview {
+  name: string
+  transport: 'stdio' | 'http' | 'sse'
+  command?: string
+  args: string[]
+  url?: string
+  envKeys: string[]
+  headerKeys: string[]
+  contentHash: string
+  confirmationToken: string
+  expiresAt: string
+}
+
+export interface LocalMCPImportPreflight {
+  targetRevision: string
+  items: LocalMCPServerPreview[]
+}
+
+export interface Settings {
+  managedUsername: string
+  updateCron: string
+  timezone: string
+  relayPort: number
+  relayIntentionalPaused: boolean
+  updatedAt: string
 }
 
 export class APIError extends Error {
@@ -29,9 +204,11 @@ class ToolHubClient {
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers)
+    const method = (init.method ?? 'GET').toUpperCase()
     if (init.body && !(init.body instanceof FormData)) headers.set('Content-Type', 'application/json')
-    if (this.csrf && init.method && !['GET', 'HEAD'].includes(init.method)) headers.set('X-CSRF-Token', this.csrf)
-    const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: 'same-origin' })
+    if (this.csrf && !['GET', 'HEAD', 'OPTIONS'].includes(method)) headers.set('X-CSRF-Token', this.csrf)
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !headers.has('Idempotency-Key')) headers.set('Idempotency-Key', crypto.randomUUID())
+    const response = await fetch(`/api/v1${path}`, { ...init, method, headers, credentials: 'same-origin' })
     if (response.status === 204) return undefined as T
     const payload = await response.json().catch(() => ({})) as Dict
     if (!response.ok) {
@@ -41,8 +218,8 @@ class ToolHubClient {
     return payload as T
   }
 
-  async login(identifier: string, password: string): Promise<Session> {
-    const session = await this.request<Session>('/auth/login', { method: 'POST', body: JSON.stringify({ identifier, password }) })
+  async login(username: string, password: string): Promise<Session> {
+    const session = await this.request<Session>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
     this.setCSRF(session.csrfToken ?? '')
     return session
   }
@@ -55,11 +232,7 @@ class ToolHubClient {
   }
 
   async logout(): Promise<void> {
-    try {
-      await this.request('/auth/logout', { method: 'POST' })
-    } finally {
-      this.setCSRF('')
-    }
+    try { await this.request('/auth/logout', { method: 'POST' }) } finally { this.setCSRF('') }
   }
 
   async updateOwnUsername(username: string, currentPassword: string): Promise<void> {
@@ -73,7 +246,6 @@ class ToolHubClient {
   }
 
   forgetSession() { this.setCSRF('') }
-
   list<T>(path: string): Promise<{ items: T[] }> { return this.request(path) }
   get<T>(path: string): Promise<T> { return this.request(path) }
   post<T>(path: string, body: unknown = {}): Promise<T> { return this.request(path, { method: 'POST', body: JSON.stringify(body) }) }
@@ -81,23 +253,7 @@ class ToolHubClient {
   patch<T>(path: string, body: unknown): Promise<T> { return this.request(path, { method: 'PATCH', body: JSON.stringify(body) }) }
   delete(path: string): Promise<void> { return this.request(path, { method: 'DELETE' }) }
 
-  preflightProfile<T>(profileID: string, nodeId: string, runtime: string): Promise<T> {
-    return this.post(`/profiles/${profileID}/preflight`, { nodeId, runtime })
-  }
-
-  activateProfile<T>(profileID: string, nodeId: string, runtime: string, confirmSecrets = false): Promise<T> {
-    return this.post(`/profiles/${profileID}/activate`, { nodeId, runtime, confirmSecrets })
-  }
-
-  targetView<T>(nodeID: string, runtime: string): Promise<T> {
-    return this.get(`/targets/${nodeID}/${runtime}`)
-  }
-
-  deactivateTarget(nodeID: string, runtime: string): Promise<void> {
-    return this.post(`/targets/${nodeID}/${runtime}/deactivate`)
-  }
-
-  async uploadSkill(file: File): Promise<Dict> {
+  async uploadSkill(file: File): Promise<Skill> {
     const form = new FormData()
     form.append('file', file)
     return this.request('/skills/upload', { method: 'POST', body: form })

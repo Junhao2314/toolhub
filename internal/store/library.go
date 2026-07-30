@@ -1,0 +1,325 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/skills"
+)
+
+type SourceInput struct {
+	Kind         string         `json:"kind"`
+	Name         string         `json:"name"`
+	URL          string         `json:"url,omitempty"`
+	Subdirectory string         `json:"subdirectory,omitempty"`
+	Commit       string         `json:"commit,omitempty"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+}
+
+func (s *Store) RefreshableSkillSources(ctx context.Context) ([]SourceInput, error) {
+	rows, err := s.pool.Query(ctx, `SELECT kind,name,url,subdirectory,current_commit,metadata FROM skill_sources WHERE kind IN ('git','skillsmp','xiaping') ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []SourceInput
+	for rows.Next() {
+		var source SourceInput
+		var metadata []byte
+		if err := rows.Scan(&source.Kind, &source.Name, &source.URL, &source.Subdirectory, &source.Commit, &metadata); err != nil {
+			return nil, err
+		}
+		if len(metadata) > 0 {
+			if err := json.Unmarshal(metadata, &source.Metadata); err != nil {
+				return nil, err
+			}
+		}
+		result = append(result, source)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) ImportSkill(ctx context.Context, source SourceInput, pkg skills.Package, provenance map[string]any) (domain.Skill, bool, error) {
+	if err := validateSourceInput(source); err != nil {
+		return domain.Skill{}, false, err
+	}
+	if len(pkg.CanonicalZIP) == 0 || len(pkg.CanonicalZIP) > int(skills.DefaultLimits.MaxArchiveBytes) {
+		return domain.Skill{}, false, errors.New("canonical Skill archive is invalid")
+	}
+	manifest, err := json.Marshal(pkg.Manifest)
+	if err != nil {
+		return domain.Skill{}, false, err
+	}
+	report, err := json.Marshal(pkg.Report)
+	if err != nil {
+		return domain.Skill{}, false, err
+	}
+	provenanceJSON, err := json.Marshal(provenance)
+	if err != nil {
+		return domain.Skill{}, false, err
+	}
+	metadata, err := json.Marshal(source.Metadata)
+	if err != nil {
+		return domain.Skill{}, false, err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Skill{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var skillID, sourceID, currentVersionID string
+	err = tx.QueryRow(ctx, `SELECT sk.id::text,sk.source_id::text,sk.current_version_id::text FROM skills sk JOIN skill_sources ss ON ss.id=sk.source_id WHERE sk.slug=$1 AND sk.archived_at IS NULL FOR UPDATE`, pkg.Slug).Scan(&skillID, &sourceID, &currentVersionID)
+	created := false
+	if errors.Is(err, pgx.ErrNoRows) {
+		created = true
+		sourceID, skillID = uuid.NewString(), uuid.NewString()
+		if _, err := tx.Exec(ctx, `INSERT INTO skill_sources(id,kind,name,url,subdirectory,current_commit,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)`, sourceID, source.Kind, source.Name, source.URL, source.Subdirectory, source.Commit, jsonText(metadata)); err != nil {
+			return domain.Skill{}, false, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO skills(id,source_id,slug,name,description) VALUES($1,$2,$3,$4,$5)`, skillID, sourceID, pkg.Slug, pkg.Name, pkg.Description); err != nil {
+			return domain.Skill{}, false, err
+		}
+	} else if err != nil {
+		return domain.Skill{}, false, err
+	} else {
+		var currentSHA string
+		if err := tx.QueryRow(ctx, `SELECT a.canonical_sha256 FROM skill_versions v JOIN skill_artifacts a ON a.id=v.artifact_id WHERE v.id=$1`, currentVersionID).Scan(&currentSHA); err != nil {
+			return domain.Skill{}, false, err
+		}
+		if currentSHA == pkg.SHA256 && source.Commit != "" {
+			if _, err := tx.Exec(ctx, `UPDATE skill_sources SET current_commit=$2,updated_at=now() WHERE id=$1`, sourceID, source.Commit); err != nil {
+				return domain.Skill{}, false, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return domain.Skill{}, false, err
+			}
+			skill, err := s.Skill(ctx, skillID)
+			return skill, false, err
+		}
+	}
+
+	artifactID := uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO skill_artifacts(id,canonical_sha256,content_hash,archive,size_bytes,manifest,scan_report) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(canonical_sha256) DO NOTHING`, artifactID, pkg.SHA256, pkg.ContentHash, pkg.CanonicalZIP, len(pkg.CanonicalZIP), jsonText(manifest), jsonText(report)); err != nil {
+		return domain.Skill{}, false, err
+	}
+	var storedContentHash string
+	var storedSize int64
+	if err := tx.QueryRow(ctx, `SELECT id::text,content_hash,size_bytes FROM skill_artifacts WHERE canonical_sha256=$1`, pkg.SHA256).Scan(&artifactID, &storedContentHash, &storedSize); err != nil {
+		return domain.Skill{}, false, err
+	}
+	if storedContentHash != pkg.ContentHash || storedSize != int64(len(pkg.CanonicalZIP)) {
+		return domain.Skill{}, false, errors.New("existing immutable Skill artifact does not match canonical package")
+	}
+	versionID := uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO skill_versions(id,skill_id,artifact_id,source_commit,provenance) VALUES($1,$2,$3,$4,$5) ON CONFLICT(skill_id,artifact_id,source_commit) DO NOTHING`, versionID, skillID, artifactID, source.Commit, jsonText(provenanceJSON)); err != nil {
+		return domain.Skill{}, false, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM skill_versions WHERE skill_id=$1 AND artifact_id=$2 AND source_commit=$3`, skillID, artifactID, source.Commit).Scan(&versionID); err != nil {
+		return domain.Skill{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE skills SET name=$2,description=$3,current_version_id=$4,updated_at=now() WHERE id=$1`, skillID, pkg.Name, pkg.Description, versionID); err != nil {
+		return domain.Skill{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE skill_sources SET kind=$2,name=$3,url=$4,subdirectory=$5,current_commit=$6,metadata=$7,updated_at=now() WHERE id=$1`, sourceID, source.Kind, source.Name, source.URL, source.Subdirectory, source.Commit, jsonText(metadata)); err != nil {
+		return domain.Skill{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Skill{}, false, err
+	}
+	skill, err := s.Skill(ctx, skillID)
+	return skill, created, err
+}
+
+func validateSourceInput(input SourceInput) error {
+	input.Kind = strings.ToLower(strings.TrimSpace(input.Kind))
+	switch input.Kind {
+	case "zip", "local":
+		if input.URL != "" {
+			return errors.New("ZIP and local Skill sources cannot contain a URL")
+		}
+	case "git", "skillsmp", "xiaping":
+		parsed, err := url.Parse(strings.TrimSpace(input.URL))
+		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
+			return errors.New("remote Skill source requires an HTTPS URL without credentials")
+		}
+	default:
+		return errors.New("unsupported Skill source kind")
+	}
+	if strings.TrimSpace(input.Name) == "" {
+		return errors.New("Skill source name is required")
+	}
+	return nil
+}
+
+func (s *Store) ListSkills(ctx context.Context) (json.RawMessage, error) {
+	return s.JSONList(ctx, `SELECT sk.id::text,sk.slug,sk.name,sk.description,ss.kind AS "sourceKind",ss.url AS "sourceUrl",ss.current_commit AS "sourceCommit",v.id::text AS "currentVersionId",a.canonical_sha256 AS "currentSha256",a.content_hash AS "currentContentHash",a.manifest,a.scan_report AS "scanReport",sk.created_at AS "createdAt",sk.updated_at AS "updatedAt" FROM skills sk JOIN skill_sources ss ON ss.id=sk.source_id JOIN skill_versions v ON v.id=sk.current_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.archived_at IS NULL ORDER BY lower(sk.name),sk.id`)
+}
+
+func (s *Store) Skill(ctx context.Context, id string) (domain.Skill, error) {
+	var skill domain.Skill
+	err := s.pool.QueryRow(ctx, `SELECT sk.id::text,sk.slug,sk.name,sk.description,ss.kind,ss.url,ss.current_commit,v.id::text,a.canonical_sha256,a.content_hash,a.manifest,a.scan_report,sk.created_at,sk.updated_at FROM skills sk JOIN skill_sources ss ON ss.id=sk.source_id JOIN skill_versions v ON v.id=sk.current_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND sk.archived_at IS NULL`, id).Scan(
+		&skill.ID, &skill.Slug, &skill.Name, &skill.Description, &skill.SourceKind, &skill.SourceURL, &skill.SourceCommit, &skill.CurrentVersionID, &skill.CurrentSHA256, &skill.CurrentContentHash, &skill.Manifest, &skill.ScanReport, &skill.CreatedAt, &skill.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Skill{}, ErrNotFound
+	}
+	return skill, err
+}
+
+func (s *Store) SkillArtifact(ctx context.Context, versionID string) ([]byte, string, error) {
+	var archive []byte
+	var sha string
+	err := s.pool.QueryRow(ctx, `SELECT a.archive,a.canonical_sha256 FROM skill_versions v JOIN skill_artifacts a ON a.id=v.artifact_id WHERE v.id=$1`, versionID).Scan(&archive, &sha)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, "", ErrNotFound
+	}
+	return archive, sha, err
+}
+
+type MCPInput struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Transport   string            `json:"transport"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+}
+
+func (s *Store) SaveMCPServer(ctx context.Context, id string, input MCPInput) (domain.MCPServer, error) {
+	input.Name = strings.ToLower(strings.TrimSpace(input.Name))
+	if input.Name == "" || strings.HasPrefix(input.Name, ".") || strings.HasPrefix(input.Name, "toolhub-") {
+		return domain.MCPServer{}, errors.New("MCP server name is invalid or protected")
+	}
+	switch input.Transport {
+	case "stdio":
+		if strings.TrimSpace(input.Command) == "" || input.URL != "" {
+			return domain.MCPServer{}, errors.New("stdio MCP requires command and forbids URL")
+		}
+	case "http", "sse":
+		if strings.TrimSpace(input.URL) == "" || input.Command != "" || len(input.Args) > 0 {
+			return domain.MCPServer{}, errors.New("network MCP requires URL and forbids command/args")
+		}
+	default:
+		return domain.MCPServer{}, errors.New("unsupported MCP transport")
+	}
+	if id == "" {
+		id = uuid.NewString()
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.MCPServer{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var existingEnv, existingHeaders map[string]string
+	var revision int64
+	err = tx.QueryRow(ctx, `SELECT revision,env_refs,header_refs FROM mcp_servers WHERE id=$1 FOR UPDATE`, id).Scan(&revision, &existingEnv, &existingHeaders)
+	if errors.Is(err, pgx.ErrNoRows) {
+		revision = 0
+		existingEnv, existingHeaders = map[string]string{}, map[string]string{}
+	} else if err != nil {
+		return domain.MCPServer{}, err
+	}
+	envRefs, err := s.upsertSecretMap(ctx, tx, id, "env", "mcp-env", existingEnv, input.Env)
+	if err != nil {
+		return domain.MCPServer{}, err
+	}
+	headerRefs, err := s.upsertSecretMap(ctx, tx, id, "header", "mcp-header", existingHeaders, input.Headers)
+	if err != nil {
+		return domain.MCPServer{}, err
+	}
+	argsJSON, _ := json.Marshal(input.Args)
+	envJSON, _ := json.Marshal(envRefs)
+	headerJSON, _ := json.Marshal(headerRefs)
+	hash := mcpHash(input, envRefs, headerRefs)
+	revision++
+	_, err = tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,description,revision,transport,command,args,url,env_refs,header_refs,content_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,revision=EXCLUDED.revision,transport=EXCLUDED.transport,command=EXCLUDED.command,args=EXCLUDED.args,url=EXCLUDED.url,env_refs=EXCLUDED.env_refs,header_refs=EXCLUDED.header_refs,content_hash=EXCLUDED.content_hash,updated_at=now()`, id, input.Name, strings.TrimSpace(input.Description), revision, input.Transport, input.Command, jsonText(argsJSON), input.URL, jsonText(envJSON), jsonText(headerJSON), hash)
+	if err != nil {
+		return domain.MCPServer{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.MCPServer{}, err
+	}
+	return s.MCPServer(ctx, id)
+}
+
+func (s *Store) upsertSecretMap(ctx context.Context, tx pgx.Tx, serverID, namespace, kind string, existing, values map[string]string) (map[string]string, error) {
+	refs := make(map[string]string, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			return nil, errors.New("MCP secret key cannot be empty")
+		}
+		value := values[key]
+		if value == "" {
+			if ref := existing[key]; ref != "" {
+				refs[key] = ref
+			}
+			continue
+		}
+		secretID := uuid.NewString()
+		ciphertext, err := s.cipher.Encrypt([]byte(value), secretID)
+		if err != nil {
+			return nil, err
+		}
+		name := fmt.Sprintf("mcp:%s:%s:%s:%s", serverID, namespace, key, secretID)
+		if _, err := tx.Exec(ctx, `INSERT INTO encrypted_secrets(id,name,kind,ciphertext,metadata) VALUES($1,$2,$3,$4,$5)`, secretID, name, kind, ciphertext, `{"writeOnly":true}`); err != nil {
+			return nil, err
+		}
+		refs[key] = secretID
+	}
+	return refs, nil
+}
+
+func mcpHash(input MCPInput, envRefs, headerRefs map[string]string) string {
+	canonical := struct {
+		Name, Transport, Command, URL string
+		Args                          []string
+		EnvRefs, HeaderRefs           map[string]string
+	}{input.Name, input.Transport, input.Command, input.URL, input.Args, envRefs, headerRefs}
+	body, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Store) ListMCPServers(ctx context.Context) (json.RawMessage, error) {
+	return s.JSONList(ctx, `SELECT id::text,name,description,revision,transport,command,args,url,(SELECT coalesce(jsonb_agg(key ORDER BY key),'[]'::jsonb) FROM jsonb_object_keys(env_refs) key) AS "envKeys",(SELECT coalesce(jsonb_agg(key ORDER BY key),'[]'::jsonb) FROM jsonb_object_keys(header_refs) key) AS "headerKeys",content_hash AS "contentHash",created_at AS "createdAt",updated_at AS "updatedAt" FROM mcp_servers ORDER BY name,id`)
+}
+
+func (s *Store) MCPServer(ctx context.Context, id string) (domain.MCPServer, error) {
+	var server domain.MCPServer
+	err := s.pool.QueryRow(ctx, `SELECT id::text,name,description,revision,transport,command,args,url,ARRAY(SELECT jsonb_object_keys(env_refs) ORDER BY 1),ARRAY(SELECT jsonb_object_keys(header_refs) ORDER BY 1),content_hash,created_at,updated_at FROM mcp_servers WHERE id=$1`, id).Scan(&server.ID, &server.Name, &server.Description, &server.Revision, &server.Transport, &server.Command, &server.Args, &server.URL, &server.EnvKeys, &server.HeaderKeys, &server.ContentHash, &server.CreatedAt, &server.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.MCPServer{}, ErrNotFound
+	}
+	return server, err
+}
+
+func (s *Store) DeleteMCPServer(ctx context.Context, id string) error {
+	command, err := s.pool.Exec(ctx, `DELETE FROM mcp_servers WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM profile_mcp_servers WHERE server_id=$1)`, id)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}

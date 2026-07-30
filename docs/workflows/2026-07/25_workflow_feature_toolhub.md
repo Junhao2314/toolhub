@@ -1,5 +1,9 @@
 # ToolHub 初始构建工作流
 
+> Historical generation-1 report. The Agent/RBAC/deployment design described
+> here was replaced by the generation-2 single-user Salt Bridge architecture.
+> See the [current refactor plan](../../../plans/2026-07-30-single-user-salt-bridge-refactor.md).
+
 ## 概述
 
 在 `/root/docker/toolhub` 完成 Go control plane、Go Agent、React/TypeScript UI、PostgreSQL schema、Docker Compose 与跨平台交付骨架。

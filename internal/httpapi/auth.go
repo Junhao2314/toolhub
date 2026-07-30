@@ -1,11 +1,10 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Junhao2314/toolhub/internal/domain"
@@ -13,163 +12,162 @@ import (
 	"github.com/Junhao2314/toolhub/internal/store"
 )
 
+var dummyHash, _ = security.HashPassword("toolhub-dummy-password-only")
+
+type loginAttempt struct {
+	count int
+	reset time.Time
+}
+type loginLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]loginAttempt
+}
+
+func newLoginLimiter() *loginLimiter { return &loginLimiter{attempts: map[string]loginAttempt{}} }
+func (l *loginLimiter) allow(ip string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	value := l.attempts[ip]
+	if now.After(value.reset) {
+		value = loginAttempt{reset: now.Add(10 * time.Minute)}
+	}
+	if value.count >= 10 {
+		return false
+	}
+	value.count++
+	l.attempts[ip] = value
+	return true
+}
+func (l *loginLimiter) success(ip string) { l.mu.Lock(); delete(l.attempts, ip); l.mu.Unlock() }
+
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
-	if !a.loginLimit.allow(ip) {
-		writeError(w, r, http.StatusTooManyRequests, "login_rate_limited", "Too many login attempts; retry later")
+	if !a.limiter.allow(ip, time.Now()) {
+		writeError(w, r, http.StatusTooManyRequests, "rate_limited", "Too many login attempts")
 		return
 	}
 	var input struct {
-		Identifier string `json:"identifier"`
-		Password   string `json:"password"`
+		Username string `json:"username"`
+		Password string `json:"password"`
 	}
-	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "Invalid login request")
 		return
 	}
-	user, err := a.store.UserByIdentifier(r.Context(), input.Identifier)
-	hash := a.dummyHash
+	account, err := a.store.AccountByUsername(r.Context(), input.Username)
+	hash := dummyHash
 	if err == nil {
-		hash = user.PasswordHash
+		hash = account.PasswordHash
 	}
 	valid, verifyErr := security.VerifyPassword(hash, input.Password)
-	if err != nil || verifyErr != nil || !valid || user.Disabled {
-		_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "login", ResourceType: "session", Outcome: "failure", IPAddress: ip, Metadata: map[string]any{"identifier": strings.ToLower(strings.TrimSpace(input.Identifier))}})
-		writeError(w, r, http.StatusUnauthorized, "invalid_credentials", "Username/email or password is incorrect")
+	if err != nil || verifyErr != nil || !valid {
+		_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "login", ResourceType: "session", Outcome: "denied", IPAddress: ip})
+		writeError(w, r, http.StatusUnauthorized, "invalid_credentials", "Username or password is incorrect")
 		return
 	}
-	token, csrf, expires, err := a.store.CreateSession(r.Context(), user.ID, a.config.SessionTTL, ip, r.UserAgent())
+	a.limiter.success(ip)
+	token, csrfToken, expires, err := a.store.CreateSession(r.Context(), a.config.SessionTTL, ip, r.UserAgent())
 	if err != nil {
 		a.handleStoreError(w, r, err)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "toolhub_session", Value: token, Path: "/", HttpOnly: true, Secure: a.config.SecureCookies, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: user.ID, Action: "login", ResourceType: "session", Outcome: "success", IPAddress: ip})
-	writeJSON(w, http.StatusOK, map[string]any{"user": user, "csrfToken": csrf, "expiresAt": expires})
+	http.SetCookie(w, &http.Cookie{Name: "toolhub_session", Value: token, Path: "/", HttpOnly: true, Secure: a.config.SecureCookies, SameSite: http.SameSiteStrictMode, Expires: expires})
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "login", ResourceType: "session", Outcome: "success", IPAddress: ip})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "user": account, "csrfToken": csrfToken, "expiresAt": expires})
 }
 
-func (a *API) logout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie("toolhub_session"); err == nil {
-		_ = a.store.DeleteSession(r.Context(), cookie.Value)
-	}
-	principal := principalFrom(r.Context())
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "logout", ResourceType: "session", Outcome: "success", IPAddress: clientIP(r)})
-	clearSessionCookie(w, a.config.SecureCookies)
-	w.WriteHeader(http.StatusNoContent)
-}
-
-func (a *API) me(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"user": principalFrom(r.Context())})
-}
-
-func (a *API) session(w http.ResponseWriter, r *http.Request) {
+func (a *API) sessionProbe(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("toolhub_session")
-	if err != nil || cookie.Value == "" {
-		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
 	principal, err := a.store.SessionPrincipal(r.Context(), cookie.Value)
 	if err != nil {
 		clearSessionCookie(w, a.config.SecureCookies)
-		writeJSON(w, http.StatusOK, map[string]bool{"authenticated": false})
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
-	csrf, err := a.store.RotateSessionCSRF(r.Context(), cookie.Value)
+	csrfToken, err := a.store.RotateSessionCSRF(r.Context(), cookie.Value)
 	if err != nil {
-		a.handleStoreError(w, r, err)
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "user": principal, "csrfToken": csrf, "expiresAt": principal.ExpiresAt})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "user": map[string]any{"username": principal.Username, "passwordChangeRecommended": principal.PasswordChangeRecommended}, "csrfToken": csrfToken, "expiresAt": principal.ExpiresAt})
 }
 
 func (a *API) csrf(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("toolhub_session")
-	if err != nil {
-		writeError(w, r, http.StatusUnauthorized, "unauthenticated", "Authentication is required")
-		return
-	}
-	token, err := a.store.RotateSessionCSRF(r.Context(), cookie.Value)
+	token, err := a.store.RotateSessionCSRF(r.Context(), sessionTokenFrom(r.Context()))
 	if err != nil {
 		a.handleStoreError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"csrfToken": token})
+	writeJSON(w, http.StatusOK, map[string]any{"csrfToken": token})
 }
 
-func (a *API) updateOwnUsername(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Username        string `json:"username"`
-		CurrentPassword string `json:"currentPassword"`
-	}
-	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	username, err := security.NormalizeUsername(input.Username)
-	if err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid_username", err.Error())
-		return
-	}
-	principal := principalFrom(r.Context())
-	if err := a.store.UpdateOwnUsername(r.Context(), principal.ID, input.CurrentPassword, username); err != nil {
-		a.writeCredentialMutationError(w, r, err)
-		return
-	}
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update_username", ResourceType: "user", ResourceID: principal.ID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"username": username}})
+func (a *API) logout(w http.ResponseWriter, r *http.Request) {
+	_ = a.store.DeleteSession(r.Context(), sessionTokenFrom(r.Context()))
 	clearSessionCookie(w, a.config.SecureCookies)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *API) updateOwnPassword(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		CurrentPassword string `json:"currentPassword"`
-		NewPassword     string `json:"newPassword"`
+func (a *API) getAccount(w http.ResponseWriter, r *http.Request) {
+	account, err := a.store.Account(r.Context())
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
 	}
-	if err := decodeJSON(w, r, &input, 64<<10); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+	writeJSON(w, http.StatusOK, account)
+}
+
+func (a *API) updateUsername(w http.ResponseWriter, r *http.Request) {
+	var input struct{ Username, CurrentPassword string }
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	if err := a.store.UpdateUsername(r.Context(), input.Username, input.CurrentPassword); err != nil {
+		a.credentialError(w, r, err)
+		return
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "update_username", ResourceType: "account", ResourceID: "singleton", Outcome: "success", IPAddress: clientIP(r)})
+	clearSessionCookie(w, a.config.SecureCookies)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) updatePassword(w http.ResponseWriter, r *http.Request) {
+	var input struct{ CurrentPassword, NewPassword string }
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
 		return
 	}
 	if err := security.ValidatePassword(input.NewPassword); err != nil {
-		writeError(w, r, http.StatusBadRequest, "invalid_password", err.Error())
+		writeError(w, r, 400, "invalid_password", err.Error())
 		return
 	}
-	principal := principalFrom(r.Context())
-	if err := a.store.UpdateOwnPassword(r.Context(), principal.ID, input.CurrentPassword, input.NewPassword); err != nil {
-		a.writeCredentialMutationError(w, r, err)
+	if err := a.store.UpdatePassword(r.Context(), input.CurrentPassword, input.NewPassword); err != nil {
+		a.credentialError(w, r, err)
 		return
 	}
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{ActorUserID: principal.ID, Action: "update_password", ResourceType: "user", ResourceID: principal.ID, Outcome: "success", IPAddress: clientIP(r)})
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "update_password", ResourceType: "account", ResourceID: "singleton", Outcome: "success", IPAddress: clientIP(r)})
 	clearSessionCookie(w, a.config.SecureCookies)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *API) writeCredentialMutationError(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, store.ErrInvalidCurrentPassword):
-		writeError(w, r, http.StatusForbidden, "current_password_invalid", "Current password is incorrect")
-	case errors.Is(err, store.ErrUsernameUnavailable):
-		writeError(w, r, http.StatusConflict, "username_unavailable", "Username is unavailable")
-	case errors.Is(err, store.ErrEmailUnavailable):
-		writeError(w, r, http.StatusConflict, "email_unavailable", "Email is unavailable")
-	default:
-		a.handleStoreError(w, r, err)
+func (a *API) credentialError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrInvalidCurrentPassword) {
+		writeError(w, r, 403, "current_password_invalid", "Current password is incorrect")
+		return
 	}
+	if errors.Is(err, store.ErrUsernameUnavailable) {
+		writeError(w, r, 409, "username_unavailable", "Username is unavailable")
+		return
+	}
+	a.handleStoreError(w, r, err)
 }
 
 func clearSessionCookie(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{Name: "toolhub_session", Value: "", Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: -1, Expires: time.Unix(1, 0)})
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, target any, limit int64) error {
-	r.Body = http.MaxBytesReader(w, r.Body, limit)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	var extra any
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return errors.New("request body must contain one JSON object")
-	}
-	return nil
-}
+var _ = strings.TrimSpace

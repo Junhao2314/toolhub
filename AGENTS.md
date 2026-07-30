@@ -1,37 +1,65 @@
 # ToolHub AI Development Guide
 
-ToolHub is a Tailnet-oriented operations console for managing Codex, Claude, and Hermes Skills and MCP configuration across nodes. It is a Go modular monolith with an embedded React/Vite UI, a PostgreSQL source of truth, and a separate cross-platform Go Agent.
+ToolHub is a single-user Linux control plane for managing Claude and Codex
+Skills/MCP locally and across Salt minions. It is a Go modular monolith with an
+embedded React/Vite UI, PostgreSQL 16, and a separate root-owned Linux Bridge.
 
-Module path: `github.com/Junhao2314/toolhub` (Go 1.22). Web: React 18 + Vite 8 + TypeScript 5.7 (Node 22 in CI/Docker). Database: PostgreSQL 16.
+Module: `github.com/Junhao2314/toolhub` (Go 1.22). Web: React 18, Vite 8,
+TypeScript 5.7, Node 22 in CI. Bridge journal: BoltDB. Remote execution: Salt
+Master/minions 3008.x.
 
-## Project map
+## Project Map
 
-- `cmd/toolhub`: control-plane entrypoint; loads configuration, opens/migrates PostgreSQL, bootstraps the admin and project-host node, then starts API, WebSocket hub, workers (concurrency 4), and scheduler. Embeds SPA from `cmd/toolhub/dist`.
-- `cmd/toolhub-agent`: node CLI/service entrypoint; supports `enroll`, `run`, `scan`, and signed `run-task` execution (plus `agentservice` platform wrappers).
-- `internal/httpapi`: Chi REST transport, validation, response envelopes, authentication, CSRF, and RBAC boundaries.
-- `internal/store`: pgx queries, transactions, embedded SQL migrations, jobs, nodes, Skills, MCP, secrets, audit, and desired/actual state.
-- `internal/security` and `internal/policy`: password/session/CSRF handling, encryption, redaction, task signing, username normalization, and policy resolution helpers (policy package is library-only today; scheduler loads schedules from the store).
-- `internal/runtime`: runtime inventory and managed Skill/MCP filesystem operations.
-- `internal/agenthub`, `internal/agentclient`, `internal/remote`: Agent WSS protocol, enrollment/task execution, and pinned SSH fallback.
-- `internal/skills` and `internal/market`: package safety/provenance plus normalized SkillsMP/Xiaping search and reviewed import support.
-- `internal/worker`: queued job execution plus scheduled update discovery and sync reconciliation.
-- `internal/ai`: OpenAI-compatible structured recommendations (never auto-install).
-- `web/src`: manually routed React pages, shared UI primitives, data hook, and API client.
-- `api/openapi.yaml`: checked-in HTTP contract for `/api/v1`; `docs/API.md` explains the common envelope and auth expectations.
-- `packaging`, `Dockerfile`, `compose.yaml`, `.github/workflows/ci.yml`: platform services, container build, local deployment, and CI.
+- `cmd/toolhub`: configuration, fresh-schema migration, singleton bootstrap,
+  operation workers, scheduler, HTTP API, and embedded SPA.
+- `cmd/toolhub-bridge`: Linux Unix-socket service, guarded adapters, durable
+  journal recovery, and fixed host integration.
+- `internal/httpapi`: Chi routes, session/CSRF middleware, validation, response
+  envelopes, and Browser API handlers.
+- `internal/store`: generation-2 schema, pgx persistence, Library, Profiles,
+  operations, snapshots, backups, settings, secrets, and actorless audit.
+- `internal/bridgeprotocol`: shared typed DTOs, manifest validation, protected
+  scope rules, HMAC canonicalization, operation/health/error catalogs.
+- `internal/bridgeclient`: fixed-path HMAC HTTP client over the Unix socket.
+- `internal/bridge`: Bridge router, BoltDB journal/idempotency, recovery, and
+  local/Salt adapter selection.
+- `internal/runtime`: guarded local Skill manager, shared mcpm relay/profile,
+  native anchors, backups, and atomic replacement.
+- `internal/saltdriver`: fixed Salt CLI argv/function allowlists, asset
+  publication, chunked staging, streaming JSON, async JID polling.
+- `internal/skills` and `internal/market`: immutable package scanning/import and
+  SkillsMP/Xiaping discovery.
+- `internal/worker`: operation/control workers, five-minute reconcile,
+  coalescing, update cron, and daily backup GC.
+- `web/src`: manually routed React operations UI and typed API client.
+- `api/openapi.yaml`: Browser `/api/v1` contract.
+- `api/bridge-openapi.yaml`: private `/v1` Bridge contract.
+- `packaging/systemd` and `packaging/salt`: host units/installer and Salt tests.
 
-## Before changing code
+There is no ToolHub Agent, enrollment/WSS/SSH fallback, RBAC, multi-user API,
+deployment/job/node-task model, review/approval flow, MCP delivery Profile, or
+Profile activation.
 
-Read the smallest relevant set first:
+## Read Before Changing Code
 
-- Always read this file, the target package, its tests, and the matching project skill under `.agents/skills`.
-- For cross-layer work, read `.builder/architecture.md`, `cmd/toolhub/main.go`, `cmd/toolhub-agent/main.go`, `internal/domain/models.go`, `internal/protocol/task.go`, and `internal/worker/worker.go`.
-- For API changes, read `api/openapi.yaml`, `docs/API.md`, `internal/httpapi/api.go`, and the relevant handler/store methods.
-- For schema changes, read `internal/store/migrations/` (currently `001_initial.sql` and `002_username_credentials.sql`), `internal/store/db.go`, and the relevant store transaction code.
-- For UI changes, read `web/src/App.tsx`, `web/src/api/client.ts`, `web/src/hooks/useData.ts`, `web/src/components/ui.tsx`, and the target page.
-- For security-sensitive changes, read `docs/SECURITY.md` plus `internal/security`, `internal/policy`, and the relevant auth/middleware/store code.
+- Always read this file, the target package, adjacent tests, and the matching
+  project skill under `.agents/skills`.
+- Cross-layer work: `.builder/architecture.md`, `cmd/toolhub/main.go`,
+  `cmd/toolhub-bridge/main.go`, `internal/domain/models.go`,
+  `internal/bridgeprotocol/types.go`, `internal/bridge/adapter.go`, and
+  `internal/worker/worker.go`.
+- Browser API: both OpenAPI files as relevant, `docs/API.md`,
+  `internal/httpapi/api.go`, target handlers/store methods, and the web client.
+- Schema: `internal/store/migrations/001_initial.sql`, `internal/store/db.go`,
+  and the target transaction code.
+- UI: `web/src/App.tsx`, `web/src/api/client.ts`, `web/src/hooks/useData.ts`,
+  `web/src/components/ui.tsx`, target page, and `web/e2e/smoke.spec.ts`.
+- Security: `docs/SECURITY.md`, `internal/security`, `internal/bridgeprotocol`,
+  Bridge journal/server, and the full caller path for any secret.
+- Host/Salt: `docs/BRIDGE.md`, `docs/SALT.md`, runtime/saltdriver packages,
+  systemd units, installer, and Salt Python tests.
 
-Use these project skills when their trigger matches:
+Use the matching project skills:
 
 - `.agents/skills/toolhub-architecture`
 - `.agents/skills/toolhub-local-development`
@@ -40,104 +68,151 @@ Use these project skills when their trigger matches:
 - `.agents/skills/toolhub-frontend`
 - `.agents/skills/toolhub-data-migrations`
 - `.agents/skills/toolhub-security-auth`
-- `.agents/skills/toolhub-agent-integrations`
+- `.agents/skills/toolhub-agent-integrations` (Bridge/Salt/runtime packaging)
 
-## Core invariants
+## Core Invariants
 
-- Updates discover candidates only; approval creates the desired version, and sync reconciles approved desired state.
-- Deployments track desired, actual, and previous versions. Rollback is a new desired-state transition (store swaps previous↔desired), not an in-place edit of managed runtime files.
-- Imported Skill artifacts are immutable and identified by source commit, canonical SHA-256, provenance, manifest, and scan report.
-- Agent tasks use a closed typed protocol and HMAC signatures over canonical JSON (`TaskSigningBytes` in package `internal/protocol` plus `SignPayload` in package `internal/security`). Do not add arbitrary shell execution.
-- Agent task kinds accepted by the agent `Executor` are only: `scan_inventory`, `deploy_skill`, `apply_mcp`, `adopt_skill`.
-- Worker job kinds in `internal/worker/worker.go` are: `inventory_scan`, `skill_import`, `skill_adopt`, `update_check`, `sync`, `rollback` (same handler as sync), `mcp_sync`, `profile_activate`, `mcp_health` (currently a no-op stub), `archive_purge`.
-- When a ToolHub Profile activation exists for a `(node, runtime)`, that Profile exclusively owns its Skill and MCP desired state. Manual target and fixed-profile membership mutations must reject the managed target until the activation is deactivated.
-- Existing Skills are read-only during inventory and require explicit administrator adoption before ToolHub writes its marker. Existing MCP configuration is automatically captured and baselined without a first-run rewrite; later local changes are drift.
-- Secrets are encrypted at rest, referenced by ID, and must not be returned in ordinary browser API responses or logs. The intentional plaintext exception is the authorized `/agent/v1/secrets/{secretID}` response for an enabled MCP deployment on that node.
-- The control plane binds to loopback by default; Tailscale Serve/ACL is external infrastructure. Do not expose the container port publicly.
+- PostgreSQL enforces one account. Bootstrap credentials are ignored after it
+  exists; username/password changes revoke every session.
+- Update discovery can import and advance Library current versions, but never
+  Apply. Imported Skill artifacts remain immutable/content-addressed.
+- A Profile references Skill/MCP IDs. Preflight resolves exact current
+  versions/revisions/secrets into a five-minute one-use token bound to Profile
+  revision, target revision, and canonical manifest.
+- Apply/edit/Restore create immutable desired snapshots. The active target
+  pointer and health projection are mutable; snapshot manifests are not.
+- Apply mirrors only manageable scope. Protected/built-in/hidden entries,
+  `.system`, and non-user Claude MCP scopes are excluded.
+- Reconcile repairs pinned members only and preserves later unmanaged content.
+  A no-op does not create a backup; every actual write creates one first.
+- A target has at most one queued/running operation. Overlapping reconcile
+  coalesces one rerun. Cancel affects queued targets only.
+- Local MCP is the independent `local/shared-relay` target. Claude/Codex share
+  one mcpm `toolhub` Profile and one HTTP relay; local Skill targets remain
+  runtime-specific.
+- Remote Claude/Codex MCP writes native user scope. Hermes is always read-only.
+- Secrets are encrypted at rest, referenced by UUID in manifests, write-only in
+  the browser, and ephemeral in Bridge/Salt calls.
+- BoltDB must never store plaintext secrets, archives, editable config, or raw
+  Salt output. Recovery metadata is hashes/routing/JIDs only.
+- Bridge exposes typed operations over a `0660` HMAC Unix socket. No shell,
+  arbitrary executable/path/Salt function/systemd unit, or TCP listener.
+- Salt discovery uses accepted keys only; writes require `3008.x`, a canonical
+  managed home, fixed argv/functions, synced extensions, and chunked staging.
+- ToolHub never edits `/etc/salt/master`, writes Hermes, or mounts managed homes
+  into the container.
 
-Jobs, `node_tasks`, and deployments are separate state machines. A job marked succeeded currently means orchestration/dispatch completed; it is not proof that the Agent completed the task or that actual deployment state is in sync. A disconnected running `node_task` may not be requeued automatically. Hub reconnect redelivers only `pending`/`delivered` tasks.
+## Data And Operation Flow
 
-When changing a task or reconciliation flow, trace the producer, worker consumer, Agent executor, `CompleteTask` projection, and both WSS and SSH paths. The WSS send/mark-delivered and SSH fallback paths are not one atomic transaction.
+For every state-changing path, trace:
 
-**Selector field names are a real contract.** Worker Skill sync consumes `nodeIds`, `skillIds`, `scopeType`, and `scopeId`. MCP sync consumes `nodeIds`, `profileIds`, `deploymentIds`, `scopeType`, and `scopeId`. Producers use these plural fields for target updates, rollback, manual reconcile, and MCP deployment.
+```text
+Browser handler
+  -> transactional operation/target creation
+  -> worker claim and request metadata
+  -> exact Bridge client method + idempotency key
+  -> Bridge route/path-authoritative kind
+  -> local adapter or Salt stage/dispatch/JID poll
+  -> target result + backup
+  -> snapshot/health/operation projection
+  -> UI and audit exposure
+```
 
-Verify producer payload keys against `internal/worker/worker.go` before assuming an operation is scoped.
+Operation status is `queued`, `running`, `succeeded`, `partial`, `failed`, or
+`cancelled`. Target health is `healthy`, `drifted`, `repairing`, `blocked`, or
+`unavailable`. A fleet operation can be partial; always preserve per-target
+terminal results.
 
-## Reuse before adding code
+## Reuse Before Adding Code
 
-- Use `internal/httpapi` helpers: `API.Router` middleware, `decodeJSON`, `writeJSON`/`writeItems`/`serveList`, `writeError`, and `handleStoreError`.
-- Use store `JSONList`/`JSONObject` and existing resource/query methods instead of new SQL in handlers.
-- Use store `EnqueueJob` and worker processing for asynchronous operations. Job kinds must match the worker switch; agent task kinds must match `Executor.Execute`.
-- Use `internal/security` helpers for passwords, tokens, encryption, redaction, signatures, and `NormalizeUsername`.
-- Use `TaskSigningBytes` plus `SignPayload`/`VerifyPayload` for any task signing change.
-- Use `web/src/api/client.ts` (`api` singleton), `useData`, and `web/src/components/ui.tsx` instead of creating parallel request, loading, error, modal, or form primitives.
-- Use `internal/skills` scanning/import functions, runtime `Deployer`, and agentclient `Executor` for their existing safety boundaries.
-- Do not invent universal API-response redaction middleware; call `RedactMap`/`RedactJSON` on the specific audit/inventory/AI paths that already use them.
+- HTTP: `decodeJSON`, `writeJSON`, `writeItems`, `writeError`,
+  `handleStoreError`, `requestIdempotencyKey`.
+- Store: existing operation/snapshot/profile/library transactions; do not add
+  SQL in handlers.
+- Security: password/token/cipher/redaction helpers and manifest secret-ID
+  extraction.
+- Bridge: existing DTOs, error catalog, manifest validation, journal safety,
+  `bridgeclient.Client`, and fixed adapter interfaces.
+- Runtime: `Manager`, `RelayManager`, guarded path helpers, backup/atomic-write
+  helpers.
+- Salt: `Driver` allowlists, `PublishAssets`, `Stage`, `Dispatch`, `Poll`, and
+  streaming JSON parser. Never build a parallel generic runner.
+- Web: `api` singleton, `useData`, and shared UI primitives.
 
-## Common commands
+## Schema Rules
 
-From the repository root:
+Generation 2 intentionally rewrote the clean initial migration. Once deployed,
+`001_initial.sql` is an applied migration and must not be rewritten again; add
+the next numbered migration for generation-2 changes.
 
-    go test ./...
-    go vet ./...
-    make test
-    make lint
-    make build
-    make docker-config
+`Store.Migrate` first inspects every non-empty database. Missing or non-2
+`app_meta.schema_generation` must fail before applying SQL or starting HTTP.
+Never add an in-place generation-1 data migration.
 
-For the web:
+Desired manifest JSONB must retain schema version, canonical hash validation,
+explicit structure validation, and secret-reference-only semantics.
 
-    cd web && npm ci --ignore-scripts
-    cd web && npm run typecheck
-    cd web && npm run build
-    cd web && npm run test:e2e
+## Common Commands
 
-For local Compose smoke:
+From repository root:
 
-    cp .env.example .env
-    # set TOOLHUB_MASTER_KEY (32 raw or base64-32), bootstrap password; optional TOOLHUB_BOOTSTRAP_ADMIN_USERNAME (default admin)
-    docker compose up -d --build --wait
-    curl --fail http://127.0.0.1:18480/healthz
-    TOOLHUB_SMOKE_EMAIL=... TOOLHUB_SMOKE_PASSWORD=... sh scripts/smoke-api.sh
+```bash
+GOCACHE=/tmp/toolhub-gocache go test ./...
+GOCACHE=/tmp/toolhub-gocache go vet ./...
+GOCACHE=/tmp/toolhub-gocache go build -o bin/toolhub ./cmd/toolhub
+GOCACHE=/tmp/toolhub-gocache go build -o bin/toolhub-bridge ./cmd/toolhub-bridge
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/salt/tests -p '*_test.py'
+cd web && npm ci --ignore-scripts
+cd web && npm audit --audit-level=high
+cd web && npm run typecheck && npm run build
+make docker-config
+```
 
-Ports: host control plane `127.0.0.1:18480` (Compose publishes loopback only); Vite dev `127.0.0.1:18481` with proxy to `:18480`. Binaries: `bin/toolhub`, `bin/toolhub-agent`.
+Integrated fresh smoke:
 
-The local HTTP smoke profile must set `TOOLHUB_SECURE_COOKIES=false`. The normal default is secure cookies. `config.Load` requires `TOOLHUB_DATABASE_URL` and a 32-byte `TOOLHUB_MASTER_KEY`. Bootstrap email/password are required by `BootstrapAdmin` when creating the first admin; username defaults to `admin` via `TOOLHUB_BOOTSTRAP_ADMIN_USERNAME`. Optional: `TOOLHUB_SESSION_TTL` (default `12h`, range 15m–168h), `TOOLHUB_DATA_DIR` (default `/data`), `TOOLHUB_PUBLIC_URL`, `TOOLHUB_TIMEZONE` (default `Asia/Shanghai`), `SKILLSMP_API_KEY`, `XIAPING_API_KEY`, and HTTPS-only `XIAPING_BASE_URL`.
+```bash
+docker compose up -d --build --wait
+curl --fail http://127.0.0.1:18480/healthz
+TOOLHUB_SMOKE_USERNAME=admin TOOLHUB_SMOKE_PASSWORD=... sh scripts/smoke-api.sh
+TOOLHUB_E2E_USERNAME=admin TOOLHUB_E2E_PASSWORD=... \
+  sh -c 'cd web && npm run test:e2e'
+```
 
-## Change-specific paths
+Playwright requires a live backend and `/usr/bin/google-chrome`. Vite runs on
+`127.0.0.1:18481` and proxies API calls to `18480`.
 
-- New API behavior: handler in `internal/httpapi`, store/service call, `api/openapi.yaml`, web client/page if used by the UI, and focused Go/UI verification.
-- New persisted state: next numbered SQL migration under `internal/store/migrations/`, store methods/transaction, domain types or JSON shape, API contract, and migration-backed Compose verification. Never rewrite applied migrations.
-- New Agent capability: domain/protocol task kind, control-plane enqueue/authorization, agent executor/runner, runtime implementation, and idempotency/error tests across WSS and SSH.
-- New Skill flow: `internal/skills` safety/provenance first, review/approval and desired-state transitions second; never install marketplace results automatically.
-- New UI page/action: `App.tsx` navigation and role gate, shared primitives, `api` client methods, page data/error/reload behavior, and Playwright smoke coverage when layout/auth/navigation is affected.
+`make lint` runs `gofmt -w`; `make web`/`make build` rewrite ignored embedded
+dist files. Use those mutating targets knowingly. Never hand-edit
+`cmd/toolhub/dist` or commit `.env`, runtime keys, generated dist, BoltDB, or
+Playwright output.
 
-## Generated and high-risk files
+## High-Risk Boundaries
 
-- `cmd/toolhub/dist/placeholder.txt` is the only tracked dist file and keeps clean-clone `go:embed` builds valid. `make web` and Dockerfile populate ignored generated `index.html`/assets; do not hand-edit or commit them.
-- Applied migrations under `internal/store/migrations/` must not be rewritten. Add the next numbered file (for example `003_*.sql`). `Store.Migrate` embeds `migrations/*.sql`, uses advisory lock `18480`, and records versions in `schema_migrations` **without checksums or down migrations**.
-- `.env` and credentials are local runtime state. Do not commit secrets or put real values in examples, logs, tests, or screenshots.
-- Treat `internal/security`, `internal/httpapi/middleware.go`, `internal/protocol/task.go`, `internal/runtime/deploy.go`, `internal/skills/package.go`, and SSH fallback as high-risk boundaries. Preserve their tests and add regression coverage before changing behavior.
-- Redaction is used in audit metadata, inventory persistence, and AI input sanitization, but there is no single universal API-response redaction middleware. Verify the full caller path before treating a `docs/SECURITY.md` claim as enforcement.
-- Store `SecretValue` reads and decrypts by ID without actor authorization; use the caller-specific `AgentSecretValue` boundary for Agent MCP access and add authorization before exposing any other secret.
-- `make lint` runs `gofmt -w`. `make web` rewrites ignored generated dist output while preserving the tracked placeholder. Treat both as filesystem-mutating targets. Prefer `npm ci --ignore-scripts` for CI parity (`make web` currently uses bare `npm ci`).
+Treat auth/session middleware, encryption/secret reads, desired-manifest
+validation, Bridge HMAC/replay/idempotency, journal recovery, filesystem path
+guards, atomic replacement/rollback, Salt argv/staging/JID recovery, and relay
+systemd control as high-risk. Add a focused regression test before changing an
+invariant, then run the full relevant gates.
 
-## Known limits and current rough edges
+Do not infer universal redaction. Audit, operation metadata, browser responses,
+Bridge journal, logs, and Salt bundles are separate boundaries and each caller
+must be checked.
 
-- The OpenAPI file currently describes the `/api/v1` browser API, not `/healthz` or the `/agent/v1` enrollment, WebSocket, artifact, and secret endpoints.
-- HTTP coverage is mostly focused unit coverage; there is no broad router/auth/CSRF/role integration suite or real database fixture in the repository. Packages without `*_test.go` include most of `store`/`httpapi`/`worker`/`agenthub`/`agentclient`/`remote`/`ai`.
-- Existing `internal/httpapi/resources.go` and `settings.go` still contain direct `Pool().Exec` calls. Do not expand that pattern; move new persistence behavior into `internal/store`, and treat refactoring those paths as a separate risk-reviewed change.
-- Some handlers update state and enqueue a job in separate operations (`setSkillTargets`, `rollbackDeployment`, `deployMCPProfile`). Their selectors are scoped, but the state/enqueue pair is still not atomic; verify failure semantics when changing those flows.
-- Playwright has no webServer setting. The backend must already be running; tests use `TOOLHUB_E2E_EMAIL` and `TOOLHUB_E2E_PASSWORD`, pin Chrome at `/usr/bin/google-chrome`, and run workers=1 (desktop + mobile projects).
-- Compose healthchecks PostgreSQL with `pg_isready` and ToolHub with `GET /healthz`; `docker compose up --wait` waits for both. Compose publishes only `127.0.0.1:18480`.
-- CI (`.github/workflows/ci.yml`): `go-test`, matrix `agent-build` (linux/mac/windows), `web` (audit+typecheck+build), `container-smoke` (compose + `scripts/smoke-api.sh` + Playwright). Race tests are not gated. Prefer Makefile/CI over historical `docs/workflows/**` for current gates.
-- `mcp_health` job returns a stub (`queued_on_next_reconcile`) and does not run real health probes today.
-- `SetSkillTargets`, `SetMCPDeployments`, and `ReplaceInventory` are upsert-only; omitted rows are not deleted.
+## Known External Limit
 
-## Completion checklist
+Four of the five currently accepted Salt minions report `3008.x` and are
+online. `racknerd-73661c5` still times out and is projected as unavailable. On
+2026-07-30, a read-only `salt:racknerd/claude` canary passed asset publication,
+module/state sync, managed-user lookup, chunked staging, fixed Salt execution,
+revision capture, and staging cleanup. Fleet rollout must exclude or recover
+the unavailable minion; do not weaken the 3008.x gate or accepted-key
+targeting to hide that condition.
 
-- Confirm every referenced path and command still exists.
-- Run focused tests first, then the relevant make/CI command.
-- Run `gofmt` on changed Go files and web typecheck/build for UI changes.
-- Update `api/openapi.yaml` and `docs/API.md` when the contract changes.
-- Check `git diff` for accidental generated files, secrets, migration rewrites, or unrelated edits.
+## Completion Checklist
+
+- Confirm Browser and Bridge OpenAPI match routes and DTOs.
+- Run focused tests, then full Go/Python/web gates.
+- Run Compose config and feasible fresh smoke/Playwright.
+- Inspect `git diff` for secrets, generated output, stale legacy surfaces,
+  accidental migration rewrites, or unrelated changes.
+- Report exactly what ran and any external acceptance blocker.

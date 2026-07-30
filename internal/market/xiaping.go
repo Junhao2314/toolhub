@@ -176,7 +176,7 @@ func normalizeXiapingStatus(status string) string {
 	}
 }
 
-// Download is a reviewed-import fetch of a skill ZIP archive. It requires the
+// Download is a validated-import fetch of a Skill ZIP archive. It requires the
 // configured API key; official skills charge the account's platform coins.
 type Download struct {
 	Archive    []byte
