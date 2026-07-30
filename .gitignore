@@ -8,6 +8,7 @@ cmd/toolhub/dist/*
 !cmd/toolhub/dist/placeholder.txt
 bin/
 coverage/
+plans/
 playwright-report/
 test-results/
 *.log
