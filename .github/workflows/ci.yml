@@ -27,8 +27,8 @@ jobs:
     env:
       TOOLHUB_TEST_DATABASE_URL: postgres://toolhub:toolhub-test-only@127.0.0.1:5432/toolhub_test?sslmode=disable
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: { go-version: '1.22.x', cache: true }
       - run: go test ./...
       - run: go vet ./...
@@ -37,8 +37,8 @@ jobs:
   bridge-build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with: { go-version: '1.22.x', cache: true }
       - run: go build -o toolhub-bridge ./cmd/toolhub-bridge
 
@@ -48,8 +48,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22.12', cache: npm, cache-dependency-path: web/package-lock.json }
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
@@ -59,31 +59,31 @@ jobs:
   container-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '22.12', cache: npm, cache-dependency-path: web/package-lock.json }
       - run: npm ci --ignore-scripts
         working-directory: web
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with: { go-version: '1.22.x', cache: true }
       - name: Start host Bridge
         env:
           TOOLHUB_BRIDGE_HMAC_KEY: 0123456789abcdef0123456789abcdef
         run: |
-          go build -o /tmp/toolhub-bridge ./cmd/toolhub-bridge
-          install -d -m 0750 /tmp/toolhub-bridge-run /tmp/toolhub-bridge-state /tmp/toolhub-salt-states
-          printf '%s\n' "$TOOLHUB_BRIDGE_HMAC_KEY" > /tmp/toolhub-bridge-key
-          chmod 0600 /tmp/toolhub-bridge-key
           bridge_group="$(id -gn)"
           bridge_gid="$(id -g)"
+          printf 'TOOLHUB_BRIDGE_RUN_DIR=/tmp/toolhub-bridge-run\n' >> "$GITHUB_ENV"
+          printf 'TOOLHUB_BRIDGE_GID=%s\n' "$bridge_gid" >> "$GITHUB_ENV"
+          go build -o /tmp/toolhub-bridge ./cmd/toolhub-bridge
+          install -d -m 0750 /tmp/toolhub-bridge-run /tmp/toolhub-bridge-state /tmp/toolhub-salt-states
+          sudo install -o root -g root -m 0600 /dev/null /tmp/toolhub-bridge-key
+          printf '%s\n' "$TOOLHUB_BRIDGE_HMAC_KEY" | sudo tee /tmp/toolhub-bridge-key >/dev/null
           sudo /tmp/toolhub-bridge --socket /tmp/toolhub-bridge-run/bridge.sock --group "$bridge_group" --key-file /tmp/toolhub-bridge-key --journal /tmp/toolhub-bridge-state/journal.db --staging-root /tmp/toolhub-bridge-state/staging --backup-root /tmp/toolhub-bridge-state/backups --salt-state-root /tmp/toolhub-salt-states >/tmp/toolhub-bridge.log 2>&1 &
           for attempt in $(seq 1 50); do
             test -S /tmp/toolhub-bridge-run/bridge.sock && break
             sleep 0.1
           done
           test -S /tmp/toolhub-bridge-run/bridge.sock
-          printf 'TOOLHUB_BRIDGE_RUN_DIR=/tmp/toolhub-bridge-run\n' >> "$GITHUB_ENV"
-          printf 'TOOLHUB_BRIDGE_GID=%s\n' "$bridge_gid" >> "$GITHUB_ENV"
       - name: Start ToolHub
         env:
           TOOLHUB_MASTER_KEY: 0123456789abcdef0123456789abcdef
@@ -104,7 +104,8 @@ jobs:
           TOOLHUB_E2E_PASSWORD: ToolHubLocal-2026-ChangeMe
         run: npm run test:e2e
         working-directory: web
-      - if: always()
+      - name: Diagnostics
+        if: always()
         env:
           TOOLHUB_MASTER_KEY: 0123456789abcdef0123456789abcdef
           TOOLHUB_BRIDGE_HMAC_KEY: 0123456789abcdef0123456789abcdef
@@ -112,5 +113,7 @@ jobs:
           TOOLHUB_BOOTSTRAP_PASSWORD: ToolHubLocal-2026-ChangeMe
           TOOLHUB_MANAGED_USERNAME: runner
         run: |
-          docker compose logs --no-color
+          export TOOLHUB_BRIDGE_GID="${TOOLHUB_BRIDGE_GID:-0}"
+          export TOOLHUB_BRIDGE_RUN_DIR="${TOOLHUB_BRIDGE_RUN_DIR:-/tmp/toolhub-bridge-run}"
+          docker compose logs --no-color || true
           test ! -f /tmp/toolhub-bridge.log || cat /tmp/toolhub-bridge.log
