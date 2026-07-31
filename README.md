@@ -31,7 +31,10 @@ review/approval workflow, deployment table, or legacy job queue.
 Generation 2 intentionally supports fresh databases only. Startup checks
 `app_meta.schema_generation=2` before the HTTP server starts. A legacy or
 unknown schema fails with instructions to create a new PostgreSQL volume.
-Back up the old volume for whole-stack rollback; it is not migration input.
+Application startup never converts legacy rows. The separate offline
+[`toolhub-config-migrate`](docs/CONFIG_MIGRATION.md) command can read the
+reviewed configuration subset from an exact legacy-v11 database into a
+distinct fresh database. Keep the old volume for whole-stack rollback.
 
 ## Host Prerequisites
 
@@ -112,4 +115,5 @@ them.
 
 See [Browser API](docs/API.md), [Bridge](docs/BRIDGE.md),
 [Security](docs/SECURITY.md), [Deployment](docs/DEPLOYMENT.md),
-[Salt](docs/SALT.md), and [Rollout](docs/ROLLOUT.md).
+[Configuration migration](docs/CONFIG_MIGRATION.md), [Salt](docs/SALT.md),
+and [Rollout](docs/ROLLOUT.md).

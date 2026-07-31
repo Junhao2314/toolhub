@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -199,22 +200,37 @@ type MCPInput struct {
 	Headers     map[string]string `json:"headers,omitempty"`
 }
 
-func (s *Store) SaveMCPServer(ctx context.Context, id string, input MCPInput) (domain.MCPServer, error) {
+var mcpNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+func NormalizeMCPInput(input MCPInput) (MCPInput, error) {
 	input.Name = strings.ToLower(strings.TrimSpace(input.Name))
-	if input.Name == "" || strings.HasPrefix(input.Name, ".") || strings.HasPrefix(input.Name, "toolhub-") {
-		return domain.MCPServer{}, errors.New("MCP server name is invalid or protected")
+	input.Description = strings.TrimSpace(input.Description)
+	if !mcpNamePattern.MatchString(input.Name) || strings.HasPrefix(input.Name, ".") || strings.HasPrefix(input.Name, "toolhub-") {
+		return MCPInput{}, errors.New("MCP server name is invalid or protected")
 	}
 	switch input.Transport {
 	case "stdio":
 		if strings.TrimSpace(input.Command) == "" || input.URL != "" {
-			return domain.MCPServer{}, errors.New("stdio MCP requires command and forbids URL")
+			return MCPInput{}, errors.New("stdio MCP requires command and forbids URL")
 		}
 	case "http", "sse":
 		if strings.TrimSpace(input.URL) == "" || input.Command != "" || len(input.Args) > 0 {
-			return domain.MCPServer{}, errors.New("network MCP requires URL and forbids command/args")
+			return MCPInput{}, errors.New("network MCP requires URL and forbids command/args")
 		}
 	default:
-		return domain.MCPServer{}, errors.New("unsupported MCP transport")
+		return MCPInput{}, errors.New("unsupported MCP transport")
+	}
+	if input.Args == nil {
+		input.Args = []string{}
+	}
+	return input, nil
+}
+
+func (s *Store) SaveMCPServer(ctx context.Context, id string, input MCPInput) (domain.MCPServer, error) {
+	var err error
+	input, err = NormalizeMCPInput(input)
+	if err != nil {
+		return domain.MCPServer{}, err
 	}
 	if id == "" {
 		id = uuid.NewString()
@@ -244,7 +260,7 @@ func (s *Store) SaveMCPServer(ctx context.Context, id string, input MCPInput) (d
 	argsJSON, _ := json.Marshal(input.Args)
 	envJSON, _ := json.Marshal(envRefs)
 	headerJSON, _ := json.Marshal(headerRefs)
-	hash := mcpHash(input, envRefs, headerRefs)
+	hash := MCPContentHash(input, envRefs, headerRefs)
 	revision++
 	_, err = tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,description,revision,transport,command,args,url,env_refs,header_refs,content_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,revision=EXCLUDED.revision,transport=EXCLUDED.transport,command=EXCLUDED.command,args=EXCLUDED.args,url=EXCLUDED.url,env_refs=EXCLUDED.env_refs,header_refs=EXCLUDED.header_refs,content_hash=EXCLUDED.content_hash,updated_at=now()`, id, input.Name, strings.TrimSpace(input.Description), revision, input.Transport, input.Command, jsonText(argsJSON), input.URL, jsonText(envJSON), jsonText(headerJSON), hash)
 	if err != nil {
@@ -289,7 +305,7 @@ func (s *Store) upsertSecretMap(ctx context.Context, tx pgx.Tx, serverID, namesp
 	return refs, nil
 }
 
-func mcpHash(input MCPInput, envRefs, headerRefs map[string]string) string {
+func MCPContentHash(input MCPInput, envRefs, headerRefs map[string]string) string {
 	canonical := struct {
 		Name, Transport, Command, URL string
 		Args                          []string

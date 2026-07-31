@@ -224,12 +224,12 @@ test('local Skill and MCP intake stays revision-bound and browser-safe', async (
   })
 
   await page.goto('/targets')
-  await page.getByRole('button', { name: 'Import Skill · formatter' }).click()
+  await page.getByRole('row').filter({ hasText: 'formatter' }).getByRole('button', { name: 'Import Skill', exact: true }).click()
   await expect(page.getByText(/Skill import queued/)).toBeVisible()
   expect(skillImportBody).toEqual({ name: 'formatter', expectedRevision: targetRevision, contentHash: skillHash })
   expect(skillIdempotency).toBeTruthy()
 
-  await page.getByRole('button', { name: 'Import MCP from runtime' }).click()
+  await page.getByRole('button', { name: 'Import MCP', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: /Import MCP from runtime/ })
   await expect(dialog).toContainText('API_TOKEN')
   await expect(dialog).toContainText('Authorization')
@@ -272,14 +272,14 @@ test('Salt node managed username override can be set and cleared', async ({ page
   })
 
   await page.goto('/targets')
-  await page.getByRole('button', { name: 'Edit node username' }).click()
+  await page.getByRole('button', { name: 'Edit username', exact: true }).click()
   let dialog = page.getByRole('dialog', { name: /Managed username/ })
   await dialog.getByLabel('Node username override').fill('operator')
   await dialog.getByRole('button', { name: 'Save' }).click()
   await expect(dialog).toHaveCount(0)
   await expect(page.getByText('operator', { exact: true })).toBeVisible()
 
-  await page.getByRole('button', { name: 'Edit node username' }).click()
+  await page.getByRole('button', { name: 'Edit username', exact: true }).click()
   dialog = page.getByRole('dialog', { name: /Managed username/ })
   await dialog.getByLabel('Node username override').fill('')
   await dialog.getByRole('button', { name: 'Save' }).click()

@@ -3,6 +3,7 @@
 build: web
 	go build -o bin/toolhub ./cmd/toolhub
 	go build -o bin/toolhub-bridge ./cmd/toolhub-bridge
+	go build -o bin/toolhub-config-migrate ./cmd/toolhub-config-migrate
 
 web:
 	cd web && npm ci && npm run build

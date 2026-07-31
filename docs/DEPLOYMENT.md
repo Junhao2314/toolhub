@@ -2,7 +2,10 @@
 
 ToolHub generation 2 is a fresh-database deployment. It does not migrate users,
 roles, Agent state, jobs, deployments, approvals, or audit history from an older
-ToolHub database. Keep the old volume only as a whole-stack rollback artifact.
+ToolHub database. The optional offline
+[configuration importer](CONFIG_MIGRATION.md) transfers only the reviewed
+Library, MCP, desired-selection, and schedule subset into a distinct fresh
+database. Keep the old volume as a whole-stack rollback artifact.
 
 ## Prerequisites
 
@@ -28,7 +31,9 @@ Before replacing anything, record the current image/version and back up:
 - existing ToolHub/Agent packages and unit files.
 
 Do not attach the generation-2 application to a copied legacy database. The
-backup is for all-at-once rollback only.
+offline importer may read a restored legacy clone, but generation-2 application
+startup must use its distinct fresh database. Retain the backup for all-at-once
+rollback.
 
 ## 2. Build And Install Host Services
 
