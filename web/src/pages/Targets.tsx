@@ -1,4 +1,4 @@
-import { Activity, Download, KeyRound, Pencil, Play, RefreshCw, RotateCcw, Square, UserRoundCog, Wrench } from 'lucide-react'
+import { Activity, Bot, Download, KeyRound, Monitor, Pencil, Play, RefreshCw, RotateCcw, Server, Square, UserRoundCog, Wrench } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, type Backup, type LocalMCPImportPreflight, type LocalMCPServerPreview, type MCPServer, type Node, type Operation, type Skill, type Target, type TargetDetail } from '../api/client'
 import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Status } from '../components/ui'
@@ -21,7 +21,29 @@ export default function Targets() {
   return <>
     <PageHeader title={t('Targets')} detail={t('Runtime inventory and pinned desired snapshots')} actions={<Button variant="secondary" onClick={refreshNodes}><RefreshCw size={16} />{t('Refresh nodes')}</Button>} />
     {notice && <div className="inline-notice">{notice}</div>}
-    {state.loading ? <Loading /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : state.data.targets.length === 0 ? <Empty title={t('No Targets')} /> : <div className="targets-layout"><aside className="target-index">{state.data.targets.map((target) => <button className={activeTargetID === target.id ? 'active' : ''} key={target.id} onClick={() => setSelected(target.id)}><span><strong>{target.runtime === 'shared-relay' ? 'Shared MCP relay' : target.runtime}</strong><small>{target.nodeName}</small></span><Status value={target.health} /></button>)}</aside>{activeTargetID && <TargetInspector key={activeTargetID} targetID={activeTargetID} skills={state.data.skills} servers={state.data.servers} refreshTargets={state.reload} operation={(message) => setNotice(message)} />}</div>}
+    {state.loading ? <Loading /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : state.data.targets.length === 0 ? <Empty title={t('No Targets')} /> : <div className="targets-layout">
+      <aside className="target-index">
+        <div className="target-index-header">
+          <span>{t('Nodes & Targets')}</span>
+          <span className="count-badge">{state.data.targets.length}</span>
+        </div>
+        {state.data.targets.map((target) => (
+          <button className={activeTargetID === target.id ? 'active' : ''} key={target.id} onClick={() => setSelected(target.id)}>
+            <div className="target-item-info">
+              <div className="target-item-icon">
+                {target.runtime === 'shared-relay' ? <Bot size={17} /> : target.nodeKind === 'salt' ? <Server size={17} /> : <Monitor size={17} />}
+              </div>
+              <div className="target-item-text">
+                <strong>{target.runtime === 'shared-relay' ? t('Shared MCP relay') : target.runtime}</strong>
+                <small>{target.nodeName}</small>
+              </div>
+            </div>
+            <Status value={target.health} />
+          </button>
+        ))}
+      </aside>
+      {activeTargetID && <TargetInspector key={activeTargetID} targetID={activeTargetID} skills={state.data.skills} servers={state.data.servers} refreshTargets={state.reload} operation={(message) => setNotice(message)} />}
+    </div>}
   </>
 }
 
@@ -48,12 +70,58 @@ function TargetInspector({ targetID, skills, servers, refreshTargets, operation 
     || (member.kind === 'mcp' && managedMCP.has(member.name))
   const allowsLocalIntake = target.nodeKind === 'local' && ['claude', 'codex'].includes(target.runtime)
   return <div className="target-inspector">
-    <section className="target-summary"><div><span className="runtime-label">{target.nodeKind} / {target.runtime}</span><h2>{target.targetKey}</h2><p>{target.managedUsername}</p></div><div className="summary-actions"><Status value={target.health} />{target.nodeKind === 'salt' && <IconButton label={t('Edit node username')} onClick={() => setUsernameEditor(true)}><UserRoundCog size={17} /></IconButton>}<IconButton label={t('Scan')} onClick={() => queue(api.post(`/targets/${target.id}/scan`), t('Scan queued'))}><RefreshCw size={17} /></IconButton>{allowsLocalIntake && <IconButton label={t('Import MCP from runtime')} onClick={() => setMCPImport(true)}><KeyRound size={17} /></IconButton>}{target.writable && <IconButton label={t('Edit desired membership')} disabled={!detail.targetRevision} onClick={() => setEditor(true)}><Pencil size={17} /></IconButton>}</div></section>
+    <section className="target-hero">
+      <div className="hero-main">
+        <div className="hero-badge">
+          {target.runtime === 'shared-relay' ? <Bot size={22} /> : target.nodeKind === 'salt' ? <Server size={22} /> : <Monitor size={22} />}
+        </div>
+        <div>
+          <div className="hero-tags">
+            <span className="runtime-label">{target.nodeKind} / {target.runtime}</span>
+            <Status value={target.health} />
+          </div>
+          <h2>{target.targetKey}</h2>
+          <p className="hero-sub">{t('Node')}: <strong>{target.nodeName}</strong> · {t('User')}: <code>{target.managedUsername}</code></p>
+        </div>
+      </div>
+      <div className="summary-actions">
+        {target.nodeKind === 'salt' && <Button variant="secondary" onClick={() => setUsernameEditor(true)}><UserRoundCog size={16} />{t('Edit username')}</Button>}
+        <Button variant="secondary" onClick={() => queue(api.post(`/targets/${target.id}/scan`), t('Scan queued'))}><RefreshCw size={16} />{t('Scan')}</Button>
+        {allowsLocalIntake && <Button variant="secondary" onClick={() => setMCPImport(true)}><KeyRound size={16} />{t('Import MCP')}</Button>}
+        {target.writable && <Button variant="primary" disabled={!detail.targetRevision} onClick={() => setEditor(true)}><Pencil size={16} />{t('Edit target')}</Button>}
+      </div>
+    </section>
     {target.errorReason && <ErrorNotice message={`${target.errorCode}: ${target.errorReason}`} />}
-    {target.runtime === 'shared-relay' && <section className="relay-strip"><div><Activity size={18} /><span><strong>{detail.inventory.relay?.endpoint || `http://127.0.0.1:${detail.desired?.manifest.relayPort ?? 6276}/mcp`}</strong><small>{detail.inventory.relay?.state || 'unknown'}</small></span><Status value={detail.inventory.relay?.intentionalPaused ? 'paused' : detail.inventory.relay?.healthy ? 'healthy' : 'blocked'} /></div><div className="relay-actions"><IconButton label={t('Start')} onClick={() => queue(api.post(`/targets/${target.id}/relay/start`), t('Relay start queued'))}><Play size={17} /></IconButton><IconButton label={t('Stop')} onClick={() => queue(api.post(`/targets/${target.id}/relay/stop`), t('Relay stop queued'))}><Square size={16} /></IconButton><IconButton label={t('Restart')} onClick={() => queue(api.post(`/targets/${target.id}/relay/restart`), t('Relay restart queued'))}><RefreshCw size={17} /></IconButton><IconButton label={t('Health check')} onClick={() => queue(api.post(`/targets/${target.id}/relay/health`), t('Health check queued'))}><Activity size={17} /></IconButton></div></section>}
-    <dl className="target-facts"><div><dt>{t('Desired revision')}</dt><dd>{target.desiredRevision || '—'}</dd></div><div><dt>{t('Snapshot source')}</dt><dd>{detail.desired?.snapshot.sourceKind || '—'}</dd></div><div><dt>{t('Last scan')}</dt><dd>{target.lastScannedAt ? new Date(target.lastScannedAt).toLocaleString() : '—'}</dd></div><div><dt>{t('Last reconcile')}</dt><dd>{target.lastReconciledAt ? new Date(target.lastReconciledAt).toLocaleString() : '—'}</dd></div></dl>
-    <section className="target-band"><header><h3>{t('Inventory')}</h3><span>{members.length}</span></header>{members.length === 0 ? <Empty title={t('No inventory snapshot')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Member')}</th><th>{t('Kind')}</th><th>{t('Scope')}</th><th>{t('Hash')}</th><th>{t('State')}</th><th /></tr></thead><tbody>{members.map((member) => { const managed = isManaged(member); const importable = allowsLocalIntake && member.kind === 'skill' && !member.protected && !managed && !!member.contentHash && !!detail.targetRevision; return <tr key={member.id}><td><strong>{member.name}</strong></td><td>{member.kind}</td><td>{member.scope || '—'}</td><td><code>{member.contentHash?.slice(0, 12) || '—'}</code></td><td><Status value={member.protected ? 'protected' : managed ? 'managed' : 'unmanaged'} /></td><td><div className="row-actions">{importable && <IconButton label={`${t('Import Skill')} · ${member.name}`} onClick={() => queue(api.post(`/targets/${target.id}/skill-import`, { name: member.name, expectedRevision: detail.targetRevision, contentHash: member.contentHash }), t('Skill import queued'))}><Download size={16} /></IconButton>}</div></td></tr> })}</tbody></table></div>}</section>
-    <section className="target-band"><header><h3>{t('Backups')}</h3><span>{backups.length}</span></header>{backups.length === 0 ? <Empty title={t('No backups')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Created')}</th><th>{t('Revision')}</th><th>{t('Expires')}</th><th /></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td>{new Date(backup.createdAt).toLocaleString()}</td><td><code>{backup.targetRevision.slice(0, 12)}</code></td><td>{new Date(backup.expiresAt).toLocaleDateString()}</td><td><IconButton label={t('Restore')} onClick={() => setRestoring(backup)}><RotateCcw size={16} /></IconButton></td></tr>)}</tbody></table></div>}</section>
+    {target.runtime === 'shared-relay' && <section className="relay-strip">
+      <div>
+        <Activity size={20} />
+        <span>
+          <strong>{detail.inventory.relay?.endpoint || `http://127.0.0.1:${detail.desired?.manifest.relayPort ?? 6276}/mcp`}</strong>
+          <small>{detail.inventory.relay?.state || 'unknown'}</small>
+        </span>
+        <Status value={detail.inventory.relay?.intentionalPaused ? 'paused' : detail.inventory.relay?.healthy ? 'healthy' : 'blocked'} />
+      </div>
+      <div className="relay-actions">
+        <IconButton label={t('Start')} onClick={() => queue(api.post(`/targets/${target.id}/relay/start`), t('Relay start queued'))}><Play size={16} /></IconButton>
+        <IconButton label={t('Stop')} onClick={() => queue(api.post(`/targets/${target.id}/relay/stop`), t('Relay stop queued'))}><Square size={16} /></IconButton>
+        <IconButton label={t('Restart')} onClick={() => queue(api.post(`/targets/${target.id}/relay/restart`), t('Relay restart queued'))}><RefreshCw size={16} /></IconButton>
+        <IconButton label={t('Health check')} onClick={() => queue(api.post(`/targets/${target.id}/relay/health`), t('Health check queued'))}><Activity size={16} /></IconButton>
+      </div>
+    </section>}
+    <dl className="target-facts">
+      <div className="fact-card"><dt>{t('Desired revision')}</dt><dd><code>{target.desiredRevision || '—'}</code></dd></div>
+      <div className="fact-card"><dt>{t('Snapshot source')}</dt><dd>{detail.desired?.snapshot.sourceKind || '—'}</dd></div>
+      <div className="fact-card"><dt>{t('Last scan')}</dt><dd>{target.lastScannedAt ? new Date(target.lastScannedAt).toLocaleString() : '—'}</dd></div>
+      <div className="fact-card"><dt>{t('Last reconcile')}</dt><dd>{target.lastReconciledAt ? new Date(target.lastReconciledAt).toLocaleString() : '—'}</dd></div>
+    </dl>
+    <section className="target-band">
+      <header><h3>{t('Inventory')}</h3><span>{members.length}</span></header>
+      {members.length === 0 ? <Empty title={t('No inventory snapshot')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Member')}</th><th>{t('Kind')}</th><th>{t('Scope')}</th><th>{t('Hash')}</th><th>{t('State')}</th><th /></tr></thead><tbody>{members.map((member) => { const managed = isManaged(member); const importable = allowsLocalIntake && member.kind === 'skill' && !member.protected && !managed && !!member.contentHash && !!detail.targetRevision; return <tr key={member.id}><td><strong>{member.name}</strong></td><td><Status value={member.kind} /></td><td>{member.scope || '—'}</td><td><code>{member.contentHash?.slice(0, 12) || '—'}</code></td><td><Status value={member.protected ? 'protected' : managed ? 'managed' : 'unmanaged'} /></td><td><div className="row-actions">{importable && <Button variant="secondary" onClick={() => queue(api.post(`/targets/${target.id}/skill-import`, { name: member.name, expectedRevision: detail.targetRevision, contentHash: member.contentHash }), t('Skill import queued'))}><Download size={15} />{t('Import Skill')}</Button>}</div></td></tr> })}</tbody></table></div>}
+    </section>
+    <section className="target-band">
+      <header><h3>{t('Backups')}</h3><span>{backups.length}</span></header>
+      {backups.length === 0 ? <Empty title={t('No backups')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Created')}</th><th>{t('Revision')}</th><th>{t('Expires')}</th><th /></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td>{new Date(backup.createdAt).toLocaleString()}</td><td><code>{backup.targetRevision.slice(0, 12)}</code></td><td>{new Date(backup.expiresAt).toLocaleDateString()}</td><td><div className="row-actions"><Button variant="secondary" onClick={() => setRestoring(backup)}><RotateCcw size={15} />{t('Restore')}</Button></div></td></tr>)}</tbody></table></div>}
+    </section>
     {editor && <TargetEditor detail={detail} skills={skills} servers={servers} close={() => setEditor(false)} queued={(op) => { setEditor(false); operation(`${t('Edit queued')} · ${op.id.slice(0, 8)}`) }} />}
     {restoring && <RestoreDialog target={target} revision={detail.targetRevision} backup={restoring} close={() => setRestoring(null)} queued={(op) => { setRestoring(null); operation(`${t('Restore queued')} · ${op.id.slice(0, 8)}`) }} />}
     {mcpImport && <LocalMCPImportDialog target={target} close={() => setMCPImport(false)} queued={(op) => { setMCPImport(false); operation(`${t('MCP import queued')} · ${op.id.slice(0, 8)}`) }} />}
@@ -132,3 +200,5 @@ function RestoreDialog({ target, revision, backup, close, queued }: { target: Ta
   const submit = () => api.post<Operation>(`/targets/${target.id}/restore`, { backupId: backup.id, expectedRevision: revision }).then(queued).catch((reason: Error) => setError(reason.message))
   return <Modal title={`${t('Restore')} · ${target.targetKey}`} close={close}>{error && <ErrorNotice message={error} />}<dl className="detail-list"><div><dt>{t('Backup')}</dt><dd><code>{backup.id}</code></dd></div><div><dt>{t('Created')}</dt><dd>{new Date(backup.createdAt).toLocaleString()}</dd></div><div><dt>{t('Target revision')}</dt><dd><code>{backup.targetRevision}</code></dd></div></dl><div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button><Button variant="danger" onClick={submit}><RotateCcw size={16} />{t('Restore')}</Button></div></Modal>
 }
+
+
