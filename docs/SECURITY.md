@@ -69,6 +69,12 @@ restore, or atomic replacement. Salt independently resolves the managed user
 with `user.info` and repeats canonical-home and symlink-parent checks on the
 minion.
 
+The Bridge service hides other home directories with a private tmpfs and binds
+only the configured managed home into its mount namespace. Local symlinks inside
+protected inventory are never followed or managed and are preserved as symlink
+objects across backup, Apply, and Restore. Symlinks in managed Skill artifacts
+and managed parent paths remain rejected.
+
 Skills reject absolute/backslash/traversal paths, symlinks, unsafe types,
 oversized archives/files, and multiple package roots. Artifacts are rescanned and
 must match their pinned canonical SHA-256 before each write.
@@ -90,6 +96,11 @@ Local MCP requires a compatible preinstalled `mcpm`. ToolHub manages one profile
 named `toolhub`, one fixed relay unit, and one `toolhub-relay` user-scope anchor in
 `~/.claude.json` and `~/.codex/config.toml`. It does not auto-find, install,
 upgrade, or fall back to native per-server local delivery.
+
+Each managed mcpm registry entry carries its Library content hash plus a runtime
+integrity hash. Relay scans project the Library hash only while the actual entry,
+including its ephemeral secret values, still matches that integrity hash;
+otherwise they return a drift hash. Inventory never returns plaintext values.
 
 Remote Claude writes only top-level user `mcpServers` in `~/.claude.json`.
 Remote Codex writes only `mcp_servers` in `~/.codex/config.toml`. Claude

@@ -27,7 +27,8 @@ sudo packaging/systemd/install-toolhub-services.sh MANAGED_USER MANAGED_GROUP BR
 - creates the shared Bridge group when necessary;
 - creates `/etc/toolhub-bridge/hmac.key` as a root-only file;
 - creates `/var/lib/toolhub-bridge/mcpm-relay.env` with port `6276`;
-- renders and installs the Bridge and relay units;
+- renders the Bridge unit with only the selected managed home bound writable
+  into its private mount namespace, then installs both units;
 - enables and starts `toolhub-bridge.service`;
 - prints the GID required by Compose.
 

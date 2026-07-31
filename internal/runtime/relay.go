@@ -26,10 +26,14 @@ import (
 )
 
 const (
-	RelayUnitName  = "toolhub-mcpm-relay.service"
-	RelayProfile   = "toolhub"
-	RelayAnchor    = "toolhub-relay"
-	MCPMExecutable = "/usr/bin/mcpm"
+	RelayUnitName          = "toolhub-mcpm-relay.service"
+	RelayProfile           = "toolhub"
+	RelayAnchor            = "toolhub-relay"
+	MCPMExecutable         = "/usr/bin/mcpm"
+	relayReadinessInterval = 250 * time.Millisecond
+	relayReadinessTimeout  = 15 * time.Second
+	relayContentHashField  = "toolhub_content_hash"
+	relayIntegrityField    = "toolhub_runtime_integrity"
 )
 
 var mcpmVersionPattern = regexp.MustCompile(`(?i)\b(?:v)?([0-9]+)\.([0-9]+)(?:\.[0-9]+)?\b`)
@@ -60,17 +64,29 @@ func (SystemdRelayController) Action(ctx context.Context, action string) (string
 }
 
 type RelayManager struct {
-	Controller      RelayController
-	HTTPClient      *http.Client
-	BackupRoot      string
-	EnvironmentFile string
-	MCPMPath        string
-	now             func() time.Time
-	portAvailable   func(int) error
+	Controller        RelayController
+	HTTPClient        *http.Client
+	BackupRoot        string
+	EnvironmentFile   string
+	MCPMPath          string
+	now               func() time.Time
+	portAvailable     func(int) error
+	readinessInterval time.Duration
+	readinessTimeout  time.Duration
 }
 
 func NewRelayManager(controller RelayController, backupRoot string) *RelayManager {
-	return &RelayManager{Controller: controller, HTTPClient: &http.Client{Timeout: 3 * time.Second}, BackupRoot: backupRoot, EnvironmentFile: "/var/lib/toolhub-bridge/mcpm-relay.env", MCPMPath: MCPMExecutable, now: time.Now, portAvailable: ensureRelayPortAvailable}
+	return &RelayManager{
+		Controller:        controller,
+		HTTPClient:        &http.Client{Timeout: 3 * time.Second},
+		BackupRoot:        backupRoot,
+		EnvironmentFile:   "/var/lib/toolhub-bridge/mcpm-relay.env",
+		MCPMPath:          MCPMExecutable,
+		now:               time.Now,
+		portAvailable:     ensureRelayPortAvailable,
+		readinessInterval: relayReadinessInterval,
+		readinessTimeout:  relayReadinessTimeout,
+	}
 }
 
 func (r *RelayManager) ValidateMCPM(ctx context.Context) (string, error) {
@@ -112,9 +128,13 @@ func ScanSharedRelay(paths TargetPaths) ([]bridgeprotocol.InventoryMember, error
 		if !ok || !stringSliceContains(entry["profile_tags"], RelayProfile) {
 			continue
 		}
-		body, _ := json.Marshal(entry)
-		sum := sha256.Sum256(body)
-		members = append(members, bridgeprotocol.InventoryMember{ID: "mcp:" + name, Kind: "mcp", Name: name, ContentHash: hex.EncodeToString(sum[:]), Scope: "user"})
+		actualHash := relayEntryHash(entry)
+		contentHash, _ := entry[relayContentHashField].(string)
+		integrity, _ := entry[relayIntegrityField].(string)
+		if !bridgeprotocol.IsSHA256(contentHash) || integrity != actualHash {
+			contentHash = actualHash
+		}
+		members = append(members, bridgeprotocol.InventoryMember{ID: "mcp:" + name, Kind: "mcp", Name: name, ContentHash: contentHash, Scope: "user"})
 	}
 	anchorMembers, err := scanRelayAnchors(paths)
 	if err != nil {
@@ -190,16 +210,10 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 		}
 		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: true}, nil
 	}
-	if _, err := r.Controller.Action(ctx, "restart"); err != nil {
+	if err := r.restartAndCheck(ctx, request.Manifest.RelayPort, status.State); err != nil {
 		_ = restoreRelayFiles(rollback)
 		_, _ = r.Controller.Action(ctx, "restart")
-		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "New relay configuration could not start"}
-	}
-	status, err = r.Status(ctx, request.Manifest.RelayPort, false)
-	if err != nil || !status.Healthy {
-		_ = restoreRelayFiles(rollback)
-		_, _ = r.Controller.Action(ctx, "restart")
-		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "New relay configuration failed its health check"}
+		return bridgeprotocol.TargetResult{}, err
 	}
 	after, err := (&Manager{}).scanRelay(paths)
 	if err != nil {
@@ -217,11 +231,36 @@ func (r *RelayManager) restartAndCheck(ctx context.Context, port int, currentSta
 	if _, err := r.Controller.Action(ctx, "restart"); err != nil {
 		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay could not be restarted"}
 	}
-	status, err := r.Status(ctx, port, false)
-	if err != nil || !status.Healthy {
+	if err := r.waitUntilHealthy(ctx, port); err != nil {
 		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay failed its health check after restart"}
 	}
 	return nil
+}
+
+func (r *RelayManager) waitUntilHealthy(ctx context.Context, port int) error {
+	interval := r.readinessInterval
+	if interval <= 0 {
+		interval = relayReadinessInterval
+	}
+	timeout := r.readinessTimeout
+	if timeout <= 0 {
+		timeout = relayReadinessTimeout
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		status, _ := r.Status(waitCtx, port, false)
+		if status.Healthy {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (r *RelayManager) checkPortAvailable(port int) error {
@@ -246,6 +285,10 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 	if _, err := r.ValidateMCPM(ctx); err != nil {
 		return bridgeprotocol.TargetResult{}, err
 	}
+	currentState := ""
+	if !request.IntentionalPaused {
+		currentState, _ = r.Controller.Action(ctx, "status")
+	}
 	recovery, err := r.backup(user, request.Target, paths, request.OperationID, current.Revision)
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrBackup, Message: "Could not back up relay before restore"}
@@ -268,10 +311,10 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrBackup, Message: "Restored relay configuration does not match the pinned backup manifest"}
 	}
 	if !request.IntentionalPaused {
-		if _, err := r.Controller.Action(ctx, "restart"); err != nil {
+		if err := r.restartAndCheck(ctx, request.Manifest.RelayPort, currentState); err != nil {
 			_ = restoreRelayFiles(rollback)
 			_, _ = r.Controller.Action(ctx, "restart")
-			return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Restored relay configuration could not start"}
+			return bridgeprotocol.TargetResult{}, err
 		}
 	}
 	after, err := (&Manager{}).scanRelay(paths)
@@ -514,7 +557,7 @@ func writeRelayConfiguration(paths TargetPaths, manifest bridgeprotocol.DesiredM
 }
 
 func expectedRelayEntry(server bridgeprotocol.MCPMember, secrets map[string]string) map[string]any {
-	entry := map[string]any{"name": server.Name, "profile_tags": []string{RelayProfile}, "toolhub_member_id": server.MemberID}
+	entry := map[string]any{"name": server.Name, "profile_tags": []string{RelayProfile}, "toolhub_member_id": server.MemberID, relayContentHashField: server.ContentHash}
 	if server.Transport == "stdio" {
 		entry["command"], entry["args"] = server.Command, server.Args
 	} else {
@@ -526,7 +569,20 @@ func expectedRelayEntry(server bridgeprotocol.MCPMember, secrets map[string]stri
 	if headers := resolveSecretMap(server.HeaderRefs, secrets); len(headers) > 0 {
 		entry["headers"] = headers
 	}
+	entry[relayIntegrityField] = relayEntryHash(entry)
 	return entry
+}
+
+func relayEntryHash(entry map[string]any) string {
+	projection := make(map[string]any, len(entry))
+	for key, value := range entry {
+		if key != relayIntegrityField {
+			projection[key] = value
+		}
+	}
+	body, _ := json.Marshal(projection)
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 func relayConfigurationMatches(paths TargetPaths, environmentFile string, manifest bridgeprotocol.DesiredManifest, secrets map[string]string, preserveUnmanaged bool) (bool, error) {

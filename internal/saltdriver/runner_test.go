@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,41 @@ func (f *fakeRunner) CombinedOutput(_ context.Context, name string, args ...stri
 		err = f.errors[index]
 	}
 	return output, err
+}
+
+func TestExecRunnerKeepsStderrOutOfJSONOutput(t *testing.T) {
+	output, err := (ExecRunner{}).CombinedOutput(
+		context.Background(),
+		"/bin/sh",
+		"-c",
+		`printf '%s\n' '[WARNING] log file is read-only' >&2; printf '%s\n' '{"minions":["minion-a"]}'`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(output), "WARNING") {
+		t.Fatalf("stderr contaminated machine-readable output: %q", output)
+	}
+	ids, err := parseAcceptedKeys(output)
+	if err != nil || !reflect.DeepEqual(ids, []string{"minion-a"}) {
+		t.Fatalf("ids=%v err=%v output=%q", ids, err, output)
+	}
+}
+
+func TestExecRunnerLimitsDiscardedStderr(t *testing.T) {
+	t.Setenv("TOOLHUB_SALT_RUNNER_HELPER", "stderr-limit")
+	_, err := (ExecRunner{}).CombinedOutput(context.Background(), os.Args[0], "-test.run=^TestExecRunnerHelperProcess$")
+	if err == nil || err.Error() != "Salt output exceeds safety limit" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestExecRunnerHelperProcess(t *testing.T) {
+	if os.Getenv("TOOLHUB_SALT_RUNNER_HELPER") != "stderr-limit" {
+		return
+	}
+	_, _ = os.Stderr.Write(make([]byte, maxSaltOutput+1))
+	os.Exit(0)
 }
 
 func TestDecodeStreamingJSONAcceptsPerMinionObjects(t *testing.T) {

@@ -70,32 +70,38 @@ func scanSkillRoot(root string) (ScanResult, error) {
 	}
 	members := make([]bridgeprotocol.InventoryMember, 0, len(entries))
 	for _, entry := range entries {
-		name := entry.Name()
-		protected := bridgeprotocol.IsProtectedSkillEntry(name)
-		info, err := entry.Info()
+		member, err := inspectSkillEntry(root, entry)
 		if err != nil {
 			return ScanResult{}, err
 		}
-		if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeType != 0 && !info.IsDir() {
-			members = append(members, bridgeprotocol.InventoryMember{ID: "skill:" + name, Kind: "skill", Name: name, Protected: true, Scope: "user"})
-			continue
-		}
-		if !entry.IsDir() {
-			members = append(members, bridgeprotocol.InventoryMember{ID: "entry:" + name, Kind: "entry", Name: name, Protected: true, Scope: "user"})
-			continue
-		}
-		hash := ""
-		if !protected {
-			pkg, scanErr := skills.ScanDirectory(filepath.Join(root, name), skills.DefaultLimits)
-			if scanErr != nil {
-				protected = true
-			} else {
-				hash = pkg.ContentHash
-			}
-		}
-		members = append(members, bridgeprotocol.InventoryMember{ID: "skill:" + name, Kind: "skill", Name: name, ContentHash: hash, Protected: protected, Scope: "user"})
+		members = append(members, member)
 	}
 	return hashInventory(members), nil
+}
+
+func inspectSkillEntry(root string, entry os.DirEntry) (bridgeprotocol.InventoryMember, error) {
+	name := entry.Name()
+	protected := bridgeprotocol.IsProtectedSkillEntry(name)
+	info, err := entry.Info()
+	if err != nil {
+		return bridgeprotocol.InventoryMember{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeType != 0 && !info.IsDir() {
+		return bridgeprotocol.InventoryMember{ID: "skill:" + name, Kind: "skill", Name: name, Protected: true, Scope: "user"}, nil
+	}
+	if !entry.IsDir() {
+		return bridgeprotocol.InventoryMember{ID: "entry:" + name, Kind: "entry", Name: name, Protected: true, Scope: "user"}, nil
+	}
+	hash := ""
+	if !protected {
+		pkg, scanErr := skills.ScanDirectory(filepath.Join(root, name), skills.DefaultLimits)
+		if scanErr != nil {
+			protected = true
+		} else {
+			hash = pkg.ContentHash
+		}
+	}
+	return bridgeprotocol.InventoryMember{ID: "skill:" + name, Kind: "skill", Name: name, ContentHash: hash, Protected: protected, Scope: "user"}, nil
 }
 
 func hashInventory(members []bridgeprotocol.InventoryMember) ScanResult {
@@ -238,6 +244,9 @@ func mirrorSkillRoot(user ManagedUser, root string, manifest bridgeprotocol.Desi
 		return err
 	}
 	defer os.RemoveAll(stage)
+	if err := os.Chmod(stage, 0755); err != nil {
+		return err
+	}
 	if err := os.Chown(stage, user.UID, user.GID); err != nil && os.Geteuid() == 0 {
 		return err
 	}
@@ -270,6 +279,13 @@ func mirrorSkillRoot(user ManagedUser, root string, manifest bridgeprotocol.Desi
 			if bridgeprotocol.IsProtectedSkillEntry(entry.Name()) || desiredNames[entry.Name()] {
 				continue
 			}
+			member, err := inspectSkillEntry(stage, entry)
+			if err != nil {
+				return err
+			}
+			if member.Protected {
+				continue
+			}
 			if err := os.RemoveAll(filepath.Join(stage, entry.Name())); err != nil {
 				return err
 			}
@@ -289,8 +305,14 @@ func copyRootForStage(root, stage string, preserveAll bool) error {
 	var files int
 	var bytesCopied int64
 	for _, entry := range entries {
-		if !preserveAll && !bridgeprotocol.IsProtectedSkillEntry(entry.Name()) {
-			continue
+		if !preserveAll {
+			member, err := inspectSkillEntry(root, entry)
+			if err != nil {
+				return err
+			}
+			if !member.Protected {
+				continue
+			}
 		}
 		if err := copyTree(filepath.Join(root, entry.Name()), filepath.Join(stage, entry.Name()), &files, &bytesCopied); err != nil {
 			return err
@@ -304,11 +326,21 @@ func copyTree(source, target string, files *int, bytesCopied *int64) error {
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeType != 0 && !info.IsDir() {
+	if info.Mode()&os.ModeSymlink != 0 {
+		linkTarget, err := os.Readlink(source)
+		if err != nil {
+			return err
+		}
+		if err := accountCopiedEntry(files, bytesCopied, int64(len(linkTarget))); err != nil {
+			return err
+		}
+		return os.Symlink(linkTarget, target)
+	}
+	if info.Mode()&os.ModeType != 0 && !info.IsDir() {
 		return fmt.Errorf("unsafe file type in managed root: %s", filepath.Base(source))
 	}
 	if info.IsDir() {
-		if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
+		if err := os.Mkdir(target, 0700); err != nil {
 			return err
 		}
 		entries, err := os.ReadDir(source)
@@ -320,23 +352,25 @@ func copyTree(source, target string, files *int, bytesCopied *int64) error {
 				return err
 			}
 		}
-		return nil
+		return os.Chmod(target, info.Mode().Perm())
 	}
-	*files++
-	*bytesCopied += info.Size()
-	if *files > maxManagedFiles || *bytesCopied > maxManagedRootBytes {
-		return errors.New("managed root exceeds copy safety limits")
+	if err := accountCopiedEntry(files, bytesCopied, info.Size()); err != nil {
+		return err
 	}
 	sourceFile, err := os.Open(source)
 	if err != nil {
 		return err
 	}
 	defer sourceFile.Close()
-	targetFile, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	targetFile, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(targetFile, io.LimitReader(sourceFile, skills.DefaultLimits.MaxFileBytes+1)); err != nil {
+		targetFile.Close()
+		return err
+	}
+	if err := targetFile.Chmod(info.Mode().Perm()); err != nil {
 		targetFile.Close()
 		return err
 	}
@@ -345,6 +379,15 @@ func copyTree(source, target string, files *int, bytesCopied *int64) error {
 		return err
 	}
 	return targetFile.Close()
+}
+
+func accountCopiedEntry(files *int, bytesCopied *int64, size int64) error {
+	*files++
+	*bytesCopied += size
+	if *files > maxManagedFiles || *bytesCopied > maxManagedRootBytes {
+		return errors.New("managed root exceeds copy safety limits")
+	}
+	return nil
 }
 
 func extractSkillArtifact(target string, artifact bridgeprotocol.Artifact, user ManagedUser) error {
@@ -359,7 +402,7 @@ func extractSkillArtifact(target string, artifact bridgeprotocol.Artifact, user 
 	if err != nil {
 		return err
 	}
-	if err := os.Mkdir(target, 0755); err != nil {
+	if err := os.Mkdir(target, 0700); err != nil {
 		return err
 	}
 	for _, item := range reader.File {
@@ -374,14 +417,14 @@ func extractSkillArtifact(target string, artifact bridgeprotocol.Artifact, user 
 		if err := ensureWithin(target, destination); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
 			return err
 		}
 		reader, err := item.Open()
 		if err != nil {
 			return err
 		}
-		file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, item.Mode().Perm())
+		file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			reader.Close()
 			return err
@@ -392,6 +435,10 @@ func extractSkillArtifact(target string, artifact bridgeprotocol.Artifact, user 
 			file.Close()
 			return errors.New("artifact file exceeds safety limit")
 		}
+		if err := file.Chmod(item.Mode().Perm()); err != nil {
+			file.Close()
+			return err
+		}
 		if err := file.Sync(); err != nil {
 			file.Close()
 			return err
@@ -399,6 +446,9 @@ func extractSkillArtifact(target string, artifact bridgeprotocol.Artifact, user 
 		if err := file.Close(); err != nil {
 			return err
 		}
+	}
+	if err := chmodDirectories(target, 0755); err != nil {
+		return err
 	}
 	if err := chownTree(target, user.UID, user.GID); err != nil && os.Geteuid() == 0 {
 		return err
@@ -429,22 +479,45 @@ func (m *Manager) backupRoot(user ManagedUser, target bridgeprotocol.Target, roo
 	if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
 		return backupRecord{}, err
 	}
-	if info, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(destination, 0700); err != nil {
-			return backupRecord{}, err
-		}
+	rootExists := true
+	mode := os.FileMode(0700)
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		rootExists = false
 	} else if err != nil {
 		return backupRecord{}, err
 	} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return backupRecord{}, errors.New("cannot back up unsafe runtime root")
 	} else {
-		var files int
-		var copied int64
-		if err := copyTree(root, destination, &files, &copied); err != nil {
+		mode = info.Mode().Perm()
+	}
+	if err := os.Mkdir(destination, 0700); err != nil {
+		return backupRecord{}, err
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = os.RemoveAll(destination)
+		}
+	}()
+	if rootExists {
+		entries, err := os.ReadDir(root)
+		if err != nil {
 			return backupRecord{}, err
 		}
+		var files int
+		var copied int64
+		for _, entry := range entries {
+			if err := copyTree(filepath.Join(root, entry.Name()), filepath.Join(destination, entry.Name()), &files, &copied); err != nil {
+				return backupRecord{}, err
+			}
+		}
+	}
+	if err := os.Chmod(destination, mode); err != nil {
+		return backupRecord{}, err
 	}
 	backup := bridgeprotocol.Backup{ID: id, TargetID: target.ID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, SourceOperationID: operationID, Revision: revision, CreatedAt: m.now().UTC()}
+	complete = true
 	return backupRecord{Backup: backup, Path: destination}, nil
 }
 
@@ -492,6 +565,13 @@ func (m *Manager) restoreRoot(user ManagedUser, root, backupPath string) error {
 	if err := rejectSymlinkParent(filepath.Join(backupPath, "entry")); err != nil {
 		return err
 	}
+	backupInfo, err := os.Lstat(backupPath)
+	if err != nil {
+		return err
+	}
+	if !backupInfo.IsDir() || backupInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("backup root must be a real directory")
+	}
 	stage, err := os.MkdirTemp(parent, ".toolhub-restore-")
 	if err != nil {
 		return err
@@ -507,6 +587,9 @@ func (m *Manager) restoreRoot(user ManagedUser, root, backupPath string) error {
 		if err := copyTree(filepath.Join(backupPath, entry.Name()), filepath.Join(stage, entry.Name()), &files, &copied); err != nil {
 			return err
 		}
+	}
+	if err := os.Chmod(stage, backupInfo.Mode().Perm()); err != nil {
+		return err
 	}
 	if err := chownTree(stage, user.UID, user.GID); err != nil && os.Geteuid() == 0 {
 		return err
@@ -584,9 +667,21 @@ func chownTree(root string, uid, gid int) error {
 			return walkErr
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			return errors.New("symlink encountered during ownership update")
+			return os.Lchown(path, uid, gid)
 		}
 		return os.Chown(path, uid, gid)
+	})
+}
+
+func chmodDirectories(root string, mode os.FileMode) error {
+	return filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return os.Chmod(path, mode)
+		}
+		return nil
 	})
 }
 

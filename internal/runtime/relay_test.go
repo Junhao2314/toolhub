@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -113,6 +115,25 @@ func TestRelayApplyRollbackRestoresFiles(t *testing.T) {
 	}
 }
 
+func TestRelayApplyWaitsForHealthReadiness(t *testing.T) {
+	manager, _, user, target, port := relayFixture(t, false)
+	manager.readinessInterval = time.Millisecond
+	manager.readinessTimeout = 100 * time.Millisecond
+	attempts := 0
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, errors.New("relay is still starting")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	})}
+
+	result := applyRelay(t, manager, user, relayManifest(target, port, "https://example.invalid/one"), "apply", false)
+	if result.Health != bridgeprotocol.HealthHealthy || attempts != 3 {
+		t.Fatalf("Apply result=%+v health attempts=%d", result, attempts)
+	}
+}
+
 func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	manager, _, user, target, port := relayFixture(t, true)
 	firstManifest := relayManifest(target, port, "https://example.invalid/one")
@@ -120,6 +141,16 @@ func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	second := applyRelay(t, manager, user, relayManifest(target, port, "https://example.invalid/two"), "apply", false)
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
 	current, _ := (&Manager{}).scanRelay(paths)
+	manager.readinessInterval = time.Millisecond
+	manager.readinessTimeout = 100 * time.Millisecond
+	attempts := 0
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, errors.New("restored relay is still starting")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	})}
 	result, err := manager.Restore(context.Background(), user, bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "restore", Target: target, ExpectedRevision: current.Revision, BackupID: second.BackupID, Manifest: firstManifest})
 	if err != nil || result.BackupID == "" {
 		t.Fatalf("Restore result=%+v err=%v", result, err)
@@ -131,6 +162,9 @@ func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	server := registry["server"].(map[string]any)
 	if server["url"] != "https://example.invalid/one" {
 		t.Fatalf("restored registry=%v", registry)
+	}
+	if attempts != 3 {
+		t.Fatalf("Restore health attempts=%d", attempts)
 	}
 }
 
@@ -162,6 +196,54 @@ func TestSharedRelayScanRejectsSymlinkParent(t *testing.T) {
 	}
 	if _, err := ScanSharedRelay(paths); err == nil || !strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("ScanSharedRelay error=%v", err)
+	}
+}
+
+func TestSharedRelayScanProjectsContentHashOnlyForIntactRuntimeEntry(t *testing.T) {
+	home := t.TempDir()
+	paths, err := PathsFor(ManagedUser{Home: home}, bridgeprotocol.RuntimeSharedRelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretID := uuid.NewString()
+	server := bridgeprotocol.MCPMember{
+		MemberID:    uuid.NewString(),
+		ServerID:    uuid.NewString(),
+		Revision:    1,
+		Name:        "server",
+		Transport:   "stdio",
+		Command:     "/usr/bin/server",
+		Args:        []string{"serve"},
+		EnvRefs:     map[string]string{"TOKEN": secretID},
+		ContentHash: strings.Repeat("a", 64),
+	}
+	entry := expectedRelayEntry(server, map[string]string{secretID: "initial-secret"})
+	writeRelayRegistry(t, paths.MCPMRegistry, entry)
+
+	members, err := ScanSharedRelay(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 || members[0].ContentHash != server.ContentHash {
+		t.Fatalf("intact relay inventory=%+v", members)
+	}
+	encodedInventory, _ := json.Marshal(members)
+	if strings.Contains(string(encodedInventory), "initial-secret") {
+		t.Fatal("relay inventory exposed a plaintext secret")
+	}
+
+	entry["env"].(map[string]string)["TOKEN"] = "drifted-secret"
+	writeRelayRegistry(t, paths.MCPMRegistry, entry)
+	members, err = ScanSharedRelay(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(members) != 1 || members[0].ContentHash == server.ContentHash || !bridgeprotocol.IsSHA256(members[0].ContentHash) {
+		t.Fatalf("drifted relay inventory=%+v", members)
+	}
+	encodedInventory, _ = json.Marshal(members)
+	if strings.Contains(string(encodedInventory), "drifted-secret") {
+		t.Fatal("drifted relay inventory exposed a plaintext secret")
 	}
 }
 
@@ -224,4 +306,13 @@ func writeTestFile(t *testing.T, path string, body []byte) {
 	if err := os.WriteFile(path, body, 0600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeRelayRegistry(t *testing.T, path string, entry map[string]any) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"server": entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, body)
 }

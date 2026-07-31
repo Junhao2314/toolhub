@@ -56,6 +56,19 @@ func TestPackagedBridgePreservesDockerMountedRuntimeDirectory(t *testing.T) {
 	}
 }
 
+func TestPackagedBridgeBindsOnlyTheManagedHomeWritable(t *testing.T) {
+	unit := readPackagingFile(t, "toolhub-bridge.service")
+	if !strings.Contains(unit, "ProtectHome=tmpfs") {
+		t.Fatal("Bridge must hide homes that do not belong to the managed user")
+	}
+	if !strings.Contains(unit, "BindPaths=@TOOLHUB_MANAGED_HOME@") {
+		t.Fatal("Bridge must bind the selected managed home into its private namespace")
+	}
+	if strings.Contains(unit, "ProtectHome=read-only") {
+		t.Fatal("ProtectHome=read-only prevents the managed-home write allowlist from taking effect")
+	}
+}
+
 func readPackagingFile(t *testing.T, name string) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("..", "..", "packaging", "systemd", name))

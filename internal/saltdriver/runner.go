@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,32 +41,49 @@ type ExecRunner struct{}
 
 func (ExecRunner) CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
-	var output limitedBuffer
-	command.Stdout, command.Stderr = &output, &output
+	var stdout bytes.Buffer
+	limit := &outputLimit{remaining: maxSaltOutput}
+	command.Stdout = limitedWriter{limit: limit, output: &stdout}
+	command.Stderr = limitedWriter{limit: limit}
 	err := command.Run()
-	if errors.Is(output.err, errOutputLimit) {
+	if limit.wasExceeded() {
 		return nil, errors.New("Salt output exceeds safety limit")
 	}
-	return output.Bytes(), err
+	return stdout.Bytes(), err
 }
 
 var errOutputLimit = errors.New("output limit exceeded")
 
-type limitedBuffer struct {
-	bytes.Buffer
-	err error
+type outputLimit struct {
+	mu        sync.Mutex
+	remaining int
+	exceeded  bool
 }
 
-func (b *limitedBuffer) Write(value []byte) (int, error) {
-	if b.Len()+len(value) > maxSaltOutput {
-		remaining := maxSaltOutput - b.Len()
-		if remaining > 0 {
-			_, _ = b.Buffer.Write(value[:remaining])
-		}
-		b.err = errOutputLimit
+type limitedWriter struct {
+	limit  *outputLimit
+	output *bytes.Buffer
+}
+
+func (w limitedWriter) Write(value []byte) (int, error) {
+	w.limit.mu.Lock()
+	defer w.limit.mu.Unlock()
+	allowed := min(len(value), w.limit.remaining)
+	if allowed > 0 && w.output != nil {
+		_, _ = w.output.Write(value[:allowed])
+	}
+	w.limit.remaining -= allowed
+	if allowed < len(value) {
+		w.limit.exceeded = true
 		return len(value), errOutputLimit
 	}
-	return b.Buffer.Write(value)
+	return len(value), nil
+}
+
+func (l *outputLimit) wasExceeded() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.exceeded
 }
 
 type Driver struct {

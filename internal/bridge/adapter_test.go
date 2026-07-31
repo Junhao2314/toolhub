@@ -37,6 +37,15 @@ func TestRelayHealthPreservesIntentionalPause(t *testing.T) {
 	}
 }
 
+func TestRelayDiffAcceptsProjectedManagedContentHash(t *testing.T) {
+	contentHash := strings.Repeat("a", 64)
+	server := bridgeprotocol.MCPMember{MemberID: uuid.NewString(), Name: "server", ContentHash: contentHash}
+	diff := relayDiff([]bridgeprotocol.InventoryMember{{ID: "mcp:server", Kind: "mcp", Name: server.Name, ContentHash: contentHash}}, bridgeprotocol.DesiredManifest{MCPServers: []bridgeprotocol.MCPMember{server}})
+	if len(diff.Add) != 0 || len(diff.Replace) != 0 || len(diff.Delete) != 0 {
+		t.Fatalf("relay diff=%+v", diff)
+	}
+}
+
 type blockingSaltRunner struct {
 	pollStarted chan struct{}
 	releasePoll chan struct{}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -293,7 +294,17 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 		if err := w.store.ReplaceRuntimeSnapshot(ctx, item.Target.ID, response.TargetRevision, map[string]any{"members": response.Members, "relay": response.Relay}); err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
-		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: item.Target.Health, TargetRevision: response.TargetRevision}, nil
+		health := item.Target.Health
+		if _, manifest, manifestErr := w.store.ActiveDesiredManifest(ctx, item.Target.ID); manifestErr == nil {
+			var drift bridgeprotocol.Diff
+			health, drift = projectScanHealth(manifest, response.Members)
+			if _, err := w.store.UpdateTargetHealth(ctx, item.Target.ID, health, "", "", drift, false); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
+		} else if !errors.Is(manifestErr, store.ErrNotFound) {
+			return bridgeprotocol.TargetResult{}, publicError(manifestErr)
+		}
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: response.TargetRevision}, nil
 	case "skill_import":
 		return w.executeLocalSkillImport(ctx, item, target)
 	case "mcp_import":
@@ -331,6 +342,63 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 	default:
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrUnsupportedOperation, Message: "Operation kind is not executable on a target"}
 	}
+}
+
+func projectScanHealth(manifest bridgeprotocol.DesiredManifest, members []bridgeprotocol.InventoryMember) (string, bridgeprotocol.Diff) {
+	drift := bridgeprotocol.Diff{
+		Add:      []bridgeprotocol.DiffItem{},
+		Replace:  []bridgeprotocol.DiffItem{},
+		Delete:   []bridgeprotocol.DiffItem{},
+		Excluded: []bridgeprotocol.DiffItem{},
+	}
+	current := map[string]bridgeprotocol.InventoryMember{}
+	protected := map[string]bool{}
+	for _, member := range members {
+		if member.Kind != "skill" && member.Kind != "mcp" {
+			continue
+		}
+		key := member.Kind + "\x00" + member.Name
+		if member.Protected {
+			protected[key] = true
+			continue
+		}
+		current[key] = member
+	}
+	compare := func(kind, memberID, name, contentHash string) {
+		key := kind + "\x00" + name
+		member, ok := current[key]
+		if !ok {
+			reason := "missing"
+			if protected[key] {
+				reason = "protected"
+			}
+			drift.Add = append(drift.Add, bridgeprotocol.DiffItem{Kind: kind, MemberID: memberID, Name: name, Reason: reason})
+			return
+		}
+		if member.ContentHash != contentHash {
+			drift.Replace = append(drift.Replace, bridgeprotocol.DiffItem{Kind: kind, MemberID: memberID, Name: name, Reason: "content_hash_mismatch"})
+		}
+	}
+	for _, skill := range manifest.Skills {
+		compare("skill", skill.MemberID, skill.Slug, skill.ContentHash)
+	}
+	for _, server := range manifest.MCPServers {
+		compare("mcp", server.MemberID, server.Name, server.ContentHash)
+	}
+	sortItems := func(items []bridgeprotocol.DiffItem) {
+		sort.Slice(items, func(i, j int) bool {
+			if items[i].Kind != items[j].Kind {
+				return items[i].Kind < items[j].Kind
+			}
+			return items[i].Name < items[j].Name
+		})
+	}
+	sortItems(drift.Add)
+	sortItems(drift.Replace)
+	if len(drift.Add) != 0 || len(drift.Replace) != 0 {
+		return bridgeprotocol.HealthDrifted, drift
+	}
+	return bridgeprotocol.HealthHealthy, drift
 }
 
 func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
