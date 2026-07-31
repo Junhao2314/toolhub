@@ -31,3 +31,36 @@ func TestLoadKeyRequiresRootOnlyMode(t *testing.T) {
 		t.Fatalf("key length=%d err=%v", len(key), err)
 	}
 }
+
+func TestPackagedInstallerGeneratesBridgeCompatibleKey(t *testing.T) {
+	installer := readPackagingFile(t, "install-toolhub-services.sh")
+	if !strings.Contains(installer, "openssl rand -hex 32 > /etc/toolhub-bridge/hmac.key") {
+		t.Fatal("installer must generate the 64-hex key accepted by the Bridge protocol")
+	}
+	if strings.Contains(installer, "openssl rand -base64") {
+		t.Fatal("installer must not generate an unsupported base64 Bridge key")
+	}
+}
+
+func TestPackagedBridgeAllowsMissingSaltMinionStaging(t *testing.T) {
+	unit := readPackagingFile(t, "toolhub-bridge.service")
+	if !strings.Contains(unit, "-/var/cache/salt/minion/toolhub-staging") {
+		t.Fatal("Salt minion staging must be optional on Salt Master-only hosts")
+	}
+}
+
+func TestPackagedBridgePreservesDockerMountedRuntimeDirectory(t *testing.T) {
+	unit := readPackagingFile(t, "toolhub-bridge.service")
+	if !strings.Contains(unit, "RuntimeDirectoryPreserve=yes") {
+		t.Fatal("Bridge restarts must preserve the Docker-mounted runtime directory inode")
+	}
+}
+
+func readPackagingFile(t *testing.T, name string) string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "packaging", "systemd", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}

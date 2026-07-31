@@ -23,7 +23,7 @@ esac
 install -d -m 0700 /etc/toolhub-bridge /var/lib/toolhub-bridge
 if [ ! -f /etc/toolhub-bridge/hmac.key ]; then
     umask 077
-    openssl rand -base64 32 > /etc/toolhub-bridge/hmac.key
+    openssl rand -hex 32 > /etc/toolhub-bridge/hmac.key
 fi
 chown root:root /etc/toolhub-bridge/hmac.key
 chmod 0600 /etc/toolhub-bridge/hmac.key
