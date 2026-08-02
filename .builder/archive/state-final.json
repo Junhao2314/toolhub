@@ -1,9 +1,0 @@
-{
-  "project":"ToolHub",
-  "status":"completed",
-  "completedAt":"2026-07-25T16:06:51+08:00",
-  "featuresCompleted":11,
-  "featuresPending":0,
-  "verificationScore":0.974,
-  "nextAction":"Use the UI-generated command to enroll project-host, then execute the documented single-node canary"
-}
