@@ -14,6 +14,9 @@
   --bg-input: #18181b;
   --bg-overlay: rgba(0, 0, 0, 0.75);
   --bg-tooltip: #27272a;
+  --bg-topbar: rgba(23, 23, 23, 0.96);
+  --badge-bg: rgba(255, 255, 255, 0.06);
+  --accent-bg: rgba(62, 207, 142, 0.08);
 
   /* Text — High-contrast WCAG AA scale */
   --text-primary: #f4f4f5;
@@ -21,11 +24,16 @@
   --text-muted: #a1a1aa;
   --text-disabled: #71717a;
 
-  /* Brand — Supabase emerald green */
+  /* Brand — Supabase emerald green. --accent is the readable foreground
+     (links, active nav, icons); --accent-fill is the brand surface
+     (primary buttons, brand marks). They split so the light theme can keep
+     the brand green on fills while text stays WCAG AA. */
   --accent: #3ecf8e;
   --accent-hover: #4ddb9a;
   --accent-dim: rgba(62, 207, 142, 0.25);
-  --accent-text: #09090b;
+  --accent-fill: #3ecf8e;
+  --accent-fill-hover: #4ddb9a;
+  --accent-text: #0f0f0f;
 
   /* Borders — Clear gray hierarchy */
   --border-subtle: #27272a;
@@ -36,16 +44,29 @@
   /* Semantic status colors */
   --green: #3ecf8e;
   --green-bg: rgba(62, 207, 142, 0.15);
+  --green-border: rgba(62, 207, 142, 0.3);
   --blue: #60a5fa;
   --blue-bg: rgba(96, 165, 250, 0.15);
+  --blue-border: rgba(96, 165, 250, 0.3);
   --amber: #fbbf24;
   --amber-bg: rgba(251, 191, 36, 0.15);
+  --amber-border: rgba(251, 191, 36, 0.3);
   --red: #f87171;
   --red-bg: rgba(248, 113, 113, 0.15);
+  --red-border: rgba(248, 113, 113, 0.3);
+  --red-hover: #e06065;
+  --danger-text: #09090b;
   --purple: #c084fc;
   --purple-bg: rgba(192, 132, 252, 0.15);
+  --purple-border: rgba(192, 132, 252, 0.3);
   --pink: #f472b6;
   --pink-bg: rgba(244, 114, 182, 0.15);
+  --pink-border: rgba(244, 114, 182, 0.3);
+
+  /* Shadows */
+  --shadow-card: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-modal: 0 22px 60px rgba(0, 0, 0, 0.45);
+  --shadow-drawer: 14px 0 38px rgba(0, 0, 0, 0.45);
 
   /* Radius */
   --radius-sm: 6px;
@@ -56,6 +77,67 @@
 
   /* Sidebar */
   --sidebar-w: 232px;
+
+  color-scheme: dark;
+}
+
+/* ===== Light theme — same token surface, WCAG AA palette ===== */
+:root[data-theme='light'] {
+  --bg-page: #f5f5f6;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-hover: #ececee;
+  --bg-active: #dfdfe2;
+  --bg-input: #ffffff;
+  --bg-overlay: rgba(18, 18, 20, 0.5);
+  --bg-tooltip: #27272a;
+  --bg-topbar: rgba(250, 250, 250, 0.92);
+  --badge-bg: rgba(18, 18, 20, 0.05);
+  --accent-bg: rgba(7, 106, 73, 0.07);
+
+  --text-primary: #18181b;
+  --text-secondary: #3f3f46;
+  --text-muted: #5e5e66;
+  --text-disabled: #9c9ca3;
+
+  --accent: #076a49;
+  --accent-hover: #055a3e;
+  --accent-dim: rgba(7, 106, 73, 0.14);
+  --accent-fill: #3ecf8e;
+  --accent-fill-hover: #31c07f;
+  --accent-text: #0f0f0f;
+
+  --border-subtle: #ececee;
+  --border: #dddee2;
+  --border-prominent: #c7c8ce;
+  --border-hover: #a0a1a8;
+
+  --green: #08744c;
+  --green-bg: #e3f6ec;
+  --green-border: #b0e5cd;
+  --blue: #1d5fc7;
+  --blue-bg: #e5f0fd;
+  --blue-border: #b6d2f4;
+  --amber: #7c5400;
+  --amber-bg: #fdf3dd;
+  --amber-border: #eed9a4;
+  --red: #c92a2a;
+  --red-bg: #fdecea;
+  --red-border: #f4c4bf;
+  --red-hover: #b02424;
+  --danger-text: #ffffff;
+  --purple: #6d28d9;
+  --purple-bg: #f1eafe;
+  --purple-border: #d6c8f2;
+  --pink: #be185d;
+  --pink-bg: #fce8f0;
+  --pink-border: #f2c3d7;
+
+  --shadow-card: 0 6px 20px rgba(18, 18, 20, 0.1);
+  --shadow-modal: 0 22px 60px rgba(18, 18, 20, 0.18);
+  --shadow-drawer: 14px 0 38px rgba(18, 18, 20, 0.12);
+
+  color-scheme: light;
 }
 
 /* ===== Reset & Base ===== */
@@ -104,7 +186,7 @@ code {
   width: 48px; height: 48px;
   display: grid; place-items: center;
   border-radius: var(--radius-md);
-  background: var(--accent);
+  background: var(--accent-fill);
   color: var(--accent-text);
 }
 .brand-mark.small { width: 32px; height: 32px; }
@@ -145,14 +227,14 @@ code {
   border-color: var(--border-prominent);
 }
 .button.primary {
-  background: var(--accent);
-  color: #0f0f0f;
-  border-color: var(--accent);
+  background: var(--accent-fill);
+  color: var(--accent-text);
+  border-color: var(--accent-fill);
   font-weight: 600;
 }
 .button.primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+  background: var(--accent-fill-hover);
+  border-color: var(--accent-fill-hover);
 }
 .button.secondary {
   background: transparent;
@@ -165,12 +247,12 @@ code {
 }
 .button.danger {
   background: var(--red);
-  color: var(--accent-text);
+  color: var(--danger-text);
   border-color: var(--red);
 }
 .button.danger:hover:not(:disabled) {
-  background: #e06065;
-  border-color: #e06065;
+  background: var(--red-hover);
+  border-color: var(--red-hover);
 }
 .button.ghost {
   background: transparent;
@@ -358,7 +440,7 @@ code {
   align-items: center;
   gap: 12px;
   padding: 0 24px;
-  background: rgba(23, 23, 23, .96);
+  background: var(--bg-topbar);
   border-bottom: 1px solid var(--border);
 }
 .topbar > .icon-button:first-child { display: none; }
@@ -580,7 +662,7 @@ main {
 .status.healthy, .status.succeeded, .status.online,
 .status.active, .status.ready, .status.managed, .status.http, .status.sse {
   color: var(--green);
-  border-color: rgba(62, 207, 142, 0.3);
+  border-color: var(--green-border);
   background: var(--green-bg);
 }
 .status.healthy i, .status.succeeded i, .status.online i,
@@ -588,7 +670,7 @@ main {
 
 .status.blocked, .status.failed, .status.unavailable, .status.suspended {
   color: var(--red);
-  border-color: rgba(248, 113, 113, 0.3);
+  border-color: var(--red-border);
   background: var(--red-bg);
 }
 .status.blocked i, .status.failed i, .status.unavailable i, .status.suspended i { background: var(--red); }
@@ -596,7 +678,7 @@ main {
 .status.drifted, .status.repairing, .status.running,
 .status.queued, .status.paused, .status.git, .status.zip {
   color: var(--amber);
-  border-color: rgba(251, 191, 36, 0.3);
+  border-color: var(--amber-border);
   background: var(--amber-bg);
 }
 .status.drifted i, .status.repairing i, .status.running i,
@@ -605,7 +687,7 @@ main {
 .status.protected, .status.unmanaged, .status.hermes,
 .status.local, .status.salt, .status.stdio, .status.anchor, .status.skill, .status.mcp {
   color: var(--blue);
-  border-color: rgba(96, 165, 250, 0.3);
+  border-color: var(--blue-border);
   background: var(--blue-bg);
 }
 .status.protected i, .status.unmanaged i, .status.hermes i,
@@ -613,14 +695,14 @@ main {
 
 .status.skillsmp {
   color: var(--purple);
-  border-color: rgba(192, 132, 252, 0.3);
+  border-color: var(--purple-border);
   background: var(--purple-bg);
 }
 .status.skillsmp i { background: var(--purple); }
 
 .status.xiaping {
   color: var(--pink);
-  border-color: rgba(244, 114, 182, 0.3);
+  border-color: var(--pink-border);
   background: var(--pink-bg);
 }
 .status.xiaping i { background: var(--pink); }
@@ -868,7 +950,7 @@ td small {
 }
 .market-item:hover {
   border-color: var(--border-hover);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-card);
   transform: translateY(-2px);
 }
 .market-item header {
@@ -882,7 +964,7 @@ td small {
   font-size: 11px;
   padding: 2px 7px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--badge-bg);
   border: 1px solid var(--border);
   color: var(--text-secondary);
 }
@@ -957,7 +1039,7 @@ td small {
   border: 1px solid var(--border-prominent);
   border-radius: var(--radius-lg);
   background: var(--bg-elevated);
-  box-shadow: 0 22px 60px rgba(0, 0, 0, .45);
+  box-shadow: var(--shadow-modal);
   overflow: hidden;
 }
 .modal > header {
@@ -1186,7 +1268,7 @@ td small {
   background: var(--bg-hover);
 }
 .target-index button.active {
-  background: rgba(62, 207, 142, 0.08);
+  background: var(--accent-bg);
   border-left-color: var(--accent);
   color: var(--text-primary);
 }
@@ -1327,10 +1409,10 @@ td small {
   justify-content: space-between;
   gap: 16px;
   padding: 14px 18px;
-  border: 1px solid rgba(96, 165, 250, 0.3);
+  border: 1px solid var(--blue-border);
   border-left: 4px solid var(--blue);
   border-radius: var(--radius-md);
-  background: rgba(96, 165, 250, 0.08);
+  background: var(--blue-bg);
 }
 .relay-strip > div:first-child {
   min-width: 0;
@@ -1644,7 +1726,7 @@ td small {
     width: min(280px, 86vw);
     transform: translateX(-105%);
     transition: transform .18s;
-    box-shadow: 14px 0 38px rgba(0, 0, 0, .45);
+    box-shadow: var(--shadow-drawer);
     border-right: 0;
   }
   .sidebar.open { transform: translateX(0); }

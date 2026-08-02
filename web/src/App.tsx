@@ -3,6 +3,7 @@ import { Boxes, Bot, BriefcaseBusiness, CircleUserRound, ClipboardList, KeyRound
 import { api, APIError, type Session } from './api/client'
 import { IconButton, Loading } from './components/ui'
 import { LanguageToggle, useI18n } from './i18n'
+import { ThemeToggle } from './theme'
 import Account from './pages/Account'
 import Login from './pages/Login'
 import Marketplace from './pages/Marketplace'
@@ -80,6 +81,7 @@ export default function App() {
       <header className="topbar">
         <IconButton label={t('Open navigation')} onClick={() => setMobileNav(true)}><Menu size={20} /></IconButton>
         <div className="topbar-product">ToolHub <span>/</span> {t(navigation.find((item) => path.startsWith(item.path))?.label ?? 'Overview')}</div>
+        <ThemeToggle />
         <LanguageToggle />
         <div className="account"><CircleUserRound size={18} /><strong>{session.user.username}</strong><IconButton label={t('Sign out')} onClick={() => api.logout().finally(signedOut)}><LogOut size={17} /></IconButton></div>
       </header>
