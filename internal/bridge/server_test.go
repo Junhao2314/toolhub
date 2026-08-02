@@ -260,6 +260,20 @@ func TestPendingIdempotencyReplaysRecoveredTargetResult(t *testing.T) {
 	}
 }
 
+func TestRecoveredBlockedRelayResultRemainsSuccessfulHTTPResponse(t *testing.T) {
+	server, _, _ := testServer(t)
+	apiErr := &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "namespace unavailable", Retryable: true}
+	result := bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthBlocked, Relay: &bridgeprotocol.RelayStatus{State: "active", Endpoint: "http://127.0.0.1:6276/mcp", FixedPort: 6276, SystemdEnabled: true, Contract: "incompatible", ErrorCode: apiErr.Code, ErrorReason: apiErr.Message}, Error: apiErr}
+	server.persistSafeOperation("relay-blocked", "apply", "target", result)
+	status, body, ok := server.recoveredIdempotencyResponse("relay-blocked")
+	if !ok || status != http.StatusOK || !bytes.Contains(body, []byte(`"health":"blocked"`)) || !bytes.Contains(body, []byte(`"relay"`)) {
+		t.Fatalf("recovered relay status=%d ok=%v body=%s", status, ok, body)
+	}
+	if bytes.Contains(body, []byte(`{"error":{"code"`)) {
+		t.Fatalf("blocked target was converted into a failed HTTP response: %s", body)
+	}
+}
+
 func TestBackupGCAppliesAgeAndCount(t *testing.T) {
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "journal.db"))
 	if err != nil {

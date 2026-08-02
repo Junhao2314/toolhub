@@ -413,6 +413,7 @@ type CommitRequest struct {
 	SecretValues      map[string]string `json:"secretValues,omitempty"`
 	BackupID          string            `json:"backupId,omitempty"`
 	IntentionalPaused bool              `json:"intentionalPaused,omitempty"`
+	FullRelayProbe    bool              `json:"fullRelayProbe,omitempty"`
 }
 
 type ReconcileRequest struct {
@@ -422,6 +423,7 @@ type ReconcileRequest struct {
 	Artifacts         []Artifact        `json:"artifacts,omitempty"`
 	SecretValues      map[string]string `json:"secretValues,omitempty"`
 	IntentionalPaused bool              `json:"intentionalPaused,omitempty"`
+	FullRelayProbe    bool              `json:"fullRelayProbe,omitempty"`
 }
 
 type TargetResult struct {
@@ -431,6 +433,7 @@ type TargetResult struct {
 	BackupID       string           `json:"backupId,omitempty"`
 	Repaired       bool             `json:"repaired,omitempty"`
 	Manifest       *DesiredManifest `json:"manifest,omitempty"`
+	Relay          *RelayStatus     `json:"relay,omitempty"`
 	Details        map[string]any   `json:"details,omitempty"`
 	Error          *APIError        `json:"error,omitempty"`
 }
@@ -461,18 +464,42 @@ type BackupGCResponse struct {
 }
 
 type RelayActionRequest struct {
-	Target            Target `json:"target"`
-	Port              int    `json:"port,omitempty"`
-	IntentionalPaused bool   `json:"intentionalPaused,omitempty"`
+	Target            Target           `json:"target"`
+	Port              int              `json:"port,omitempty"`
+	IntentionalPaused bool             `json:"intentionalPaused,omitempty"`
+	Manifest          *DesiredManifest `json:"manifest,omitempty"`
 }
 
 type RelayStatus struct {
-	State             string `json:"state"`
-	Healthy           bool   `json:"healthy"`
-	IntentionalPaused bool   `json:"intentionalPaused"`
-	Endpoint          string `json:"endpoint"`
-	Version           string `json:"version,omitempty"`
-	ErrorCode         string `json:"errorCode,omitempty"`
+	State             string              `json:"state"`
+	Healthy           bool                `json:"healthy"`
+	IntentionalPaused bool                `json:"intentionalPaused"`
+	Endpoint          string              `json:"endpoint"`
+	FixedPort         int                 `json:"fixedPort"`
+	SystemdEnabled    bool                `json:"systemdEnabled"`
+	Version           string              `json:"version,omitempty"`
+	Contract          string              `json:"contract,omitempty"`
+	MemberStatuses    []RelayMemberStatus `json:"memberStatuses,omitempty"`
+	ErrorCode         string              `json:"errorCode,omitempty"`
+	ErrorReason       string              `json:"errorReason,omitempty"`
+}
+
+type RelayCapabilityCounts struct {
+	Tools             int `json:"tools"`
+	Resources         int `json:"resources"`
+	ResourceTemplates int `json:"resourceTemplates"`
+	Prompts           int `json:"prompts"`
+}
+
+type RelayMemberStatus struct {
+	MemberID        string                `json:"memberId"`
+	Name            string                `json:"name"`
+	Status          string                `json:"status"`
+	CapabilityKinds []string              `json:"capabilityKinds"`
+	Capabilities    RelayCapabilityCounts `json:"capabilities"`
+	CheckedAt       time.Time             `json:"checkedAt"`
+	ErrorCode       string                `json:"errorCode,omitempty"`
+	ErrorReason     string                `json:"errorReason,omitempty"`
 }
 
 type Operation struct {

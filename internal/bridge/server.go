@@ -368,6 +368,14 @@ func (s *Server) relay(ctx context.Context, action string, body []byte) (int, an
 	if input.Port < 1 || input.Port > 65535 {
 		return 0, nil, invalidRequest(errors.New("relay controls require a valid fixed port"))
 	}
+	if input.Manifest != nil {
+		if input.Manifest.Target != input.Target || input.Manifest.RelayPort != input.Port {
+			return 0, nil, invalidRequest(errors.New("relay manifest does not match the fixed target and port"))
+		}
+		if err := input.Manifest.Validate(true); err != nil {
+			return 0, nil, invalidRequest(err)
+		}
+	}
 	result, err := s.adapter.Relay(ctx, action, input)
 	return http.StatusOK, result, err
 }
@@ -421,7 +429,11 @@ func (s *Server) persistSafeOperation(operationID, kind, targetID string, result
 			saltJID = existing.Targets[0].SaltJID
 		}
 	}
-	operation := bridgeprotocol.Operation{ID: operationID, Kind: kind, Status: status, Targets: []bridgeprotocol.OperationTarget{{TargetID: targetID, Status: status, SaltJID: saltJID, Result: &result, Error: result.Error}}, CreatedAt: createdAt, UpdatedAt: now}
+	targetError := result.Error
+	if status == bridgeprotocol.OperationSucceeded {
+		targetError = nil
+	}
+	operation := bridgeprotocol.Operation{ID: operationID, Kind: kind, Status: status, Targets: []bridgeprotocol.OperationTarget{{TargetID: targetID, Status: status, SaltJID: saltJID, Result: &result, Error: targetError}}, CreatedAt: createdAt, UpdatedAt: now}
 	if err := s.journal.PutOperation(operation); err != nil {
 		s.logger.Error("persist safe Bridge operation", "operationId", operationID, "error", err)
 	}
@@ -451,7 +463,7 @@ func (s *Server) recoveredIdempotencyResponse(operationID string) (int, []byte, 
 	}
 	status := http.StatusOK
 	var response any = result
-	if result.Error != nil {
+	if result.Status == bridgeprotocol.OperationFailed && result.Error != nil {
 		status = statusForBridgeError(result.Error)
 		response = map[string]any{"error": result.Error}
 	}

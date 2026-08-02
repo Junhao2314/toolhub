@@ -65,6 +65,10 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
    `intentional_paused` prevents automatic start while config drift is still
    detected/repaired.
 6. Restart and run the explicit health action.
+7. Require every desired MCP member to be `ready`; for the current canary this
+   means eight namespaces and 75 tools. Call the safe read-only ACEMCP indexing
+   status, Desktop Commander config, Grok config info, and Trellis UI info tools.
+8. Wait through one 30-minute full member-health cadence and repeat the check.
 
 ### Salt Minion
 
@@ -101,7 +105,8 @@ Pause expansion when any of the following occurs:
 
 - schema-generation mismatch or unexpected non-empty database;
 - Bridge authentication, replay, journal, or socket permission error;
-- missing/incompatible mcpm or unhealthy relay rollback;
+- blocked/suspended relay, incomplete desired namespace projection, or fixed
+  port fallback;
 - Salt version mismatch, missing managed home, staging leak, or unprovable JID;
 - protected-scope deletion, unmanaged reconcile deletion, or missing backup;
 - plaintext secret in a browser response, operation, audit entry, journal, or
@@ -125,6 +130,11 @@ Rollback is a generation switch, not a schema migration:
 Never point the old application at the generation-2 volume or the new
 application at the old volume. Keep the generation-2 backups intact until the
 rollback decision window closes.
+
+Migration `002` only adds relay projection columns; an older application ignores
+them. Relay runtime failures do not require reverting MCPM registry/profile,
+secrets, or active membership because validated configuration remains pinned for
+repair.
 
 ## Current External Status
 

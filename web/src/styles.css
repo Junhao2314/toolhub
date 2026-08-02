@@ -586,12 +586,12 @@ main {
 .status.healthy i, .status.succeeded i, .status.online i,
 .status.active i, .status.ready i, .status.managed i, .status.http i, .status.sse i { background: var(--green); }
 
-.status.blocked, .status.failed, .status.unavailable {
+.status.blocked, .status.failed, .status.unavailable, .status.suspended {
   color: var(--red);
   border-color: rgba(248, 113, 113, 0.3);
   background: var(--red-bg);
 }
-.status.blocked i, .status.failed i, .status.unavailable i { background: var(--red); }
+.status.blocked i, .status.failed i, .status.unavailable i, .status.suspended i { background: var(--red); }
 
 .status.drifted, .status.repairing, .status.running,
 .status.queued, .status.paused, .status.git, .status.zip {
@@ -1353,6 +1353,47 @@ td small {
   align-items: center;
   gap: 6px;
 }
+.relay-facts {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 0;
+  border-block: 1px solid var(--border);
+  background: var(--bg-surface);
+}
+.relay-facts > div {
+  min-width: 0;
+  padding: 10px 12px;
+  border-left: 1px solid var(--border-subtle);
+}
+.relay-facts > div:first-child { border-left: 0; }
+.relay-facts dt {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.relay-facts dd {
+  min-width: 0;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.relay-capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.relay-capabilities span { white-space: nowrap; }
+.relay-reason {
+  display: grid;
+  gap: 3px;
+  max-width: 280px;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: 12px;
+}
 
 /* ===== Target Band ===== */
 .target-band {
@@ -1588,6 +1629,9 @@ td small {
   .overview-grid { grid-template-columns: 1fr; }
   .targets-layout { grid-template-columns: 210px minmax(0, 1fr); gap: 16px; }
   .target-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .relay-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .relay-facts > div:nth-child(odd) { border-left: 0; }
+  .relay-facts > div:nth-child(n+3) { border-top: 1px solid var(--border-subtle); }
   .target-facts div:nth-child(3) { border-left: 0; border-top: 1px solid var(--border); }
   .target-facts div:nth-child(4) { border-top: 1px solid var(--border); }
 }
@@ -1654,6 +1698,9 @@ td small {
   .target-summary h2 { font-size: 16px; }
   .summary-actions { flex-wrap: wrap; justify-content: flex-end; }
   .relay-strip { align-items: flex-start; flex-direction: column; }
+  .relay-facts { grid-template-columns: 1fr; }
+  .relay-facts > div, .relay-facts > div:nth-child(n) { border-left: 0; border-top: 1px solid var(--border-subtle); }
+  .relay-facts > div:first-child { border-top: 0; }
   .target-facts { grid-template-columns: 1fr; }
   .target-facts div, .target-facts div:nth-child(n) {
     border-left: 0;

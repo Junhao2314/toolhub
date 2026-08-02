@@ -157,7 +157,7 @@ paths:
       tags: [Library]
       operationId: searchMarketplace
       parameters:
-        - {name: q, in: query, required: true, schema: {type: string, minLength: 2, maxLength: 200}}
+        - {name: q, in: query, required: false, schema: {type: string, maxLength: 200}}
         - {name: source, in: query, schema: {type: string, enum: [skillsmp, xiaping]}}
         - {name: page, in: query, schema: {type: integer, minimum: 1}}
         - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100}}
@@ -772,7 +772,7 @@ components:
         updatedAt: {type: string, format: date-time}
     Target:
       type: object
-      required: [id, targetKey, nodeId, nodeName, nodeKind, runtime, managedUsername, writable, health, desiredRevision]
+      required: [id, targetKey, nodeId, nodeName, nodeKind, runtime, managedUsername, writable, health, desiredRevision, relayFailureCount, relaySuspended, relayMemberStatuses]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         targetKey: {type: string}
@@ -791,6 +791,11 @@ components:
         lastReconciledAt: {type: [string, 'null'], format: date-time}
         errorCode: {type: string}
         errorReason: {type: string}
+        relayFailureCount: {type: integer, minimum: 0}
+        relayNextRetryAt: {type: [string, 'null'], format: date-time}
+        relaySuspended: {type: boolean}
+        relayLastMemberCheckAt: {type: [string, 'null'], format: date-time}
+        relayMemberStatuses: {type: array, items: {$ref: '#/components/schemas/RelayMemberStatus'}}
     TargetDetail:
       type: object
       required: [target, inventory, targetRevision]
@@ -996,14 +1001,42 @@ components:
           required: [updatedAt]
     RelayStatus:
       type: object
-      required: [state, healthy, intentionalPaused, endpoint]
+      additionalProperties: false
+      required: [state, healthy, intentionalPaused, endpoint, fixedPort, systemdEnabled]
       properties:
         state: {type: string}
         healthy: {type: boolean}
         intentionalPaused: {type: boolean}
         endpoint: {type: string, format: uri}
+        fixedPort: {type: integer, minimum: 1, maximum: 65535}
+        systemdEnabled: {type: boolean}
         version: {type: string}
+        contract: {type: string, enum: [verified, incompatible, unavailable]}
+        memberStatuses: {type: array, items: {$ref: '#/components/schemas/RelayMemberStatus'}}
         errorCode: {type: string}
+        errorReason: {type: string, maxLength: 200}
+    RelayCapabilityCounts:
+      type: object
+      additionalProperties: false
+      required: [tools, resources, resourceTemplates, prompts]
+      properties:
+        tools: {type: integer, minimum: 0}
+        resources: {type: integer, minimum: 0}
+        resourceTemplates: {type: integer, minimum: 0}
+        prompts: {type: integer, minimum: 0}
+    RelayMemberStatus:
+      type: object
+      additionalProperties: false
+      required: [memberId, name, status, capabilityKinds, capabilities, checkedAt]
+      properties:
+        memberId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        status: {type: string, enum: [ready, unavailable]}
+        capabilityKinds: {type: array, uniqueItems: true, items: {type: string, enum: [tools, resources, resourceTemplates, prompts]}}
+        capabilities: {$ref: '#/components/schemas/RelayCapabilityCounts'}
+        checkedAt: {type: string, format: date-time}
+        errorCode: {type: string}
+        errorReason: {type: string, maxLength: 200}
     SHA256: {type: string, pattern: '^[a-f0-9]{64}$'}
     Health: {type: string, enum: [healthy, drifted, repairing, blocked, unavailable]}
     OperationStatus: {type: string, enum: [queued, running, succeeded, partial, failed, cancelled]}

@@ -410,8 +410,31 @@ func journalSafeTargetResult(result bridgeprotocol.TargetResult) bridgeprotocol.
 		TargetRevision: result.TargetRevision,
 		BackupID:       result.BackupID,
 		Repaired:       result.Repaired,
+		Relay:          journalSafeRelayStatus(result.Relay),
 		Error:          result.Error,
 	}
+}
+
+func journalSafeRelayStatus(status *bridgeprotocol.RelayStatus) *bridgeprotocol.RelayStatus {
+	if status == nil {
+		return nil
+	}
+	safe := *status
+	safe.ErrorReason = truncateJournalReason(safe.ErrorReason)
+	safe.MemberStatuses = append([]bridgeprotocol.RelayMemberStatus(nil), status.MemberStatuses...)
+	for index := range safe.MemberStatuses {
+		safe.MemberStatuses[index].CapabilityKinds = append([]string(nil), safe.MemberStatuses[index].CapabilityKinds...)
+		safe.MemberStatuses[index].ErrorReason = truncateJournalReason(safe.MemberStatuses[index].ErrorReason)
+	}
+	return &safe
+}
+
+func truncateJournalReason(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 200 {
+		return value[:200]
+	}
+	return value
 }
 
 func stringsTrim(value string) string  { return strings.TrimSpace(value) }

@@ -291,20 +291,42 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 		if err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
+		var activeManifest *bridgeprotocol.DesiredManifest
+		if _, manifest, manifestErr := w.store.ActiveDesiredManifest(ctx, item.Target.ID); manifestErr == nil {
+			activeManifest = &manifest
+		} else if !errors.Is(manifestErr, store.ErrNotFound) {
+			return bridgeprotocol.TargetResult{}, publicError(manifestErr)
+		}
+		if target.Runtime == bridgeprotocol.RuntimeSharedRelay {
+			settings, settingsErr := w.store.Settings(ctx)
+			if settingsErr != nil {
+				return bridgeprotocol.TargetResult{}, publicError(settingsErr)
+			}
+			status, statusErr := w.bridge.Relay(ctx, "health", item.OperationTarget.ID+":relay-health", bridgeprotocol.RelayActionRequest{Target: target, Port: settings.RelayPort, IntentionalPaused: settings.RelayIntentionalPaused, Manifest: activeManifest})
+			if statusErr != nil {
+				return bridgeprotocol.TargetResult{}, publicError(statusErr)
+			}
+			response.Relay = &status
+		}
 		if err := w.store.ReplaceRuntimeSnapshot(ctx, item.Target.ID, response.TargetRevision, map[string]any{"members": response.Members, "relay": response.Relay}); err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
 		health := item.Target.Health
-		if _, manifest, manifestErr := w.store.ActiveDesiredManifest(ctx, item.Target.ID); manifestErr == nil {
+		if activeManifest != nil {
 			var drift bridgeprotocol.Diff
-			health, drift = projectScanHealth(manifest, response.Members)
-			if _, err := w.store.UpdateTargetHealth(ctx, item.Target.ID, health, "", "", drift, false); err != nil {
+			health, drift = projectScanHealth(*activeManifest, response.Members)
+			if response.Relay != nil && !response.Relay.Healthy {
+				health = bridgeprotocol.HealthBlocked
+			}
+			if response.Relay != nil {
+				if _, err := w.store.UpdateRelayProjection(ctx, item.Target.ID, *response.Relay, health, response.Relay.ErrorCode, response.Relay.ErrorReason, drift, false, store.RelayProjectionObserve); err != nil {
+					return bridgeprotocol.TargetResult{}, publicError(err)
+				}
+			} else if _, err := w.store.UpdateTargetHealth(ctx, item.Target.ID, health, "", "", drift, false); err != nil {
 				return bridgeprotocol.TargetResult{}, publicError(err)
 			}
-		} else if !errors.Is(manifestErr, store.ErrNotFound) {
-			return bridgeprotocol.TargetResult{}, publicError(manifestErr)
 		}
-		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: response.TargetRevision}, nil
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: response.TargetRevision, Relay: response.Relay}, nil
 	case "skill_import":
 		return w.executeLocalSkillImport(ctx, item, target)
 	case "mcp_import":
@@ -319,7 +341,13 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 		if err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
-		status, err := w.bridge.Relay(ctx, action, item.OperationTarget.ID, bridgeprotocol.RelayActionRequest{Target: target, Port: settings.RelayPort, IntentionalPaused: settings.RelayIntentionalPaused})
+		var manifest *bridgeprotocol.DesiredManifest
+		if _, desired, manifestErr := w.store.ActiveDesiredManifest(ctx, item.Target.ID); manifestErr == nil {
+			manifest = &desired
+		} else if !errors.Is(manifestErr, store.ErrNotFound) {
+			return bridgeprotocol.TargetResult{}, publicError(manifestErr)
+		}
+		status, err := w.bridge.Relay(ctx, action, item.OperationTarget.ID, bridgeprotocol.RelayActionRequest{Target: target, Port: settings.RelayPort, IntentionalPaused: settings.RelayIntentionalPaused, Manifest: manifest})
 		if err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
@@ -334,11 +362,21 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 			}
 			status.IntentionalPaused = false
 		}
-		health := bridgeprotocol.HealthHealthy
-		if !status.Healthy && !status.IntentionalPaused {
-			health = bridgeprotocol.HealthBlocked
+		health := relayProjectedHealth(status)
+		result := bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, Relay: &status, Error: relayProjectionError(status)}
+		if manifest != nil {
+			policy := store.RelayProjectionObserve
+			if action == "start" || action == "restart" {
+				policy = store.RelayProjectionReset
+			}
+			if _, err := w.store.UpdateRelayProjection(ctx, item.Target.ID, status, health, status.ErrorCode, status.ErrorReason, nil, false, policy); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
+			if err := w.store.UpdateRuntimeRelayStatus(ctx, item.Target.ID, item.Target.TargetRevision, status); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
 		}
-		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health}, nil
+		return result, nil
 	default:
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrUnsupportedOperation, Message: "Operation kind is not executable on a target"}
 	}
@@ -470,6 +508,14 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
 		return bridgeprotocol.TargetResult{}, apiErr
 	}
+	if target.Runtime == bridgeprotocol.RuntimeSharedRelay && (item.Operation.Kind == "apply" || item.Operation.Kind == "edit") {
+		if err := w.store.SetRelayIntentionalPaused(ctx, false); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+		if result.Relay != nil {
+			result.Relay.IntentionalPaused = false
+		}
+	}
 	if result.BackupID != "" {
 		_, _ = w.store.RecordBackup(ctx, bridgeprotocol.Backup{ID: result.BackupID, TargetID: target.ID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, Revision: metadata.TargetRevision, CreatedAt: time.Now().UTC()}, item.Operation.ID, &beforeManifest)
 	}
@@ -487,11 +533,36 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
 	}
-	_, _ = w.store.UpdateTargetHealth(ctx, target.ID, bridgeprotocol.HealthHealthy, "", "", map[string]any{}, false)
+	result.Health = normalizedResultHealth(result.Health)
+	if target.Runtime == bridgeprotocol.RuntimeSharedRelay {
+		status := relayStatusFromResult(result)
+		code, reason := resultProjectionError(result)
+		if _, err := w.store.UpdateRelayProjection(ctx, target.ID, status, result.Health, code, reason, map[string]any{}, result.Repaired, store.RelayProjectionReset); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+		if result.Relay != nil {
+			if err := w.store.UpdateRuntimeRelayStatus(ctx, target.ID, result.TargetRevision, *result.Relay); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
+		}
+	} else {
+		code, reason := resultProjectionError(result)
+		if _, err := w.store.UpdateTargetHealth(ctx, target.ID, result.Health, code, reason, map[string]any{}, result.Repaired); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+	}
 	return result, nil
 }
 
 func (w *Worker) executeReconcile(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	var options struct {
+		FullRelayProbe bool `json:"fullRelayProbe"`
+	}
+	if len(item.OperationTarget.Request) > 0 {
+		if err := json.Unmarshal(item.OperationTarget.Request, &options); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+	}
 	_, manifest, err := w.store.ActiveDesiredManifest(ctx, target.ID)
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, publicError(err)
@@ -514,7 +585,7 @@ func (w *Worker) executeReconcile(ctx context.Context, item store.WorkItem, targ
 		clear(secrets)
 		return bridgeprotocol.TargetResult{}, publicError(settingsErr)
 	}
-	result, err := w.bridge.Reconcile(ctx, item.OperationTarget.ID, bridgeprotocol.ReconcileRequest{OperationID: item.OperationTarget.ID, Target: target, Manifest: manifest, Artifacts: artifacts, SecretValues: secrets, IntentionalPaused: target.Runtime == bridgeprotocol.RuntimeSharedRelay && settings.RelayIntentionalPaused})
+	result, err := w.bridge.Reconcile(ctx, item.OperationTarget.ID, bridgeprotocol.ReconcileRequest{OperationID: item.OperationTarget.ID, Target: target, Manifest: manifest, Artifacts: artifacts, SecretValues: secrets, IntentionalPaused: target.Runtime == bridgeprotocol.RuntimeSharedRelay && settings.RelayIntentionalPaused, FullRelayProbe: options.FullRelayProbe})
 	clear(secrets)
 	w.captureBridgeSaltJID(ctx, item.OperationTarget.ID)
 	if err != nil {
@@ -525,8 +596,71 @@ func (w *Worker) executeReconcile(ctx context.Context, item store.WorkItem, targ
 	if result.BackupID != "" {
 		_, _ = w.store.RecordBackup(ctx, bridgeprotocol.Backup{ID: result.BackupID, TargetID: target.ID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, Revision: result.TargetRevision, CreatedAt: time.Now().UTC()}, item.Operation.ID, &manifest)
 	}
-	_, _ = w.store.UpdateTargetHealth(ctx, target.ID, bridgeprotocol.HealthHealthy, "", "", map[string]any{}, result.Repaired)
+	result.Health = normalizedResultHealth(result.Health)
+	if target.Runtime == bridgeprotocol.RuntimeSharedRelay {
+		status := relayStatusFromResult(result)
+		policy := store.RelayProjectionObserve
+		if item.Target.RelayNextRetryAt != nil {
+			policy = store.RelayProjectionRetry
+		}
+		code, reason := resultProjectionError(result)
+		if _, err := w.store.UpdateRelayProjection(ctx, target.ID, status, result.Health, code, reason, map[string]any{}, result.Repaired, policy); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+		if result.Relay != nil {
+			if err := w.store.UpdateRuntimeRelayStatus(ctx, target.ID, result.TargetRevision, *result.Relay); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
+		}
+	} else {
+		code, reason := resultProjectionError(result)
+		if _, err := w.store.UpdateTargetHealth(ctx, target.ID, result.Health, code, reason, map[string]any{}, result.Repaired); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+	}
 	return result, nil
+}
+
+func normalizedResultHealth(health string) string {
+	if health == "" {
+		return bridgeprotocol.HealthHealthy
+	}
+	return health
+}
+
+func relayStatusFromResult(result bridgeprotocol.TargetResult) bridgeprotocol.RelayStatus {
+	if result.Relay != nil {
+		return *result.Relay
+	}
+	return bridgeprotocol.RelayStatus{Healthy: result.Health == bridgeprotocol.HealthHealthy}
+}
+
+func relayProjectedHealth(status bridgeprotocol.RelayStatus) string {
+	if status.Healthy {
+		return bridgeprotocol.HealthHealthy
+	}
+	return bridgeprotocol.HealthBlocked
+}
+
+func resultProjectionError(result bridgeprotocol.TargetResult) (string, string) {
+	if result.Error != nil {
+		return result.Error.Code, result.Error.Message
+	}
+	if result.Relay != nil {
+		return result.Relay.ErrorCode, result.Relay.ErrorReason
+	}
+	return "", ""
+}
+
+func relayProjectionError(status bridgeprotocol.RelayStatus) *bridgeprotocol.APIError {
+	if status.Healthy || status.ErrorCode == "" {
+		return nil
+	}
+	message := status.ErrorReason
+	if message == "" {
+		message = "Relay runtime is blocked"
+	}
+	return &bridgeprotocol.APIError{Code: status.ErrorCode, Message: message, Retryable: true}
 }
 
 func (w *Worker) captureBridgeSaltJID(ctx context.Context, operationTargetID string) {

@@ -69,6 +69,43 @@ func TestPackagedBridgeBindsOnlyTheManagedHomeWritable(t *testing.T) {
 	}
 }
 
+func TestPackagedRelaySupportsDynamicManagedHomeMCPs(t *testing.T) {
+	unit := readPackagingFile(t, "toolhub-mcpm-relay.service")
+	for _, required := range []string{
+		"ProtectHome=tmpfs",
+		"BindPaths=@TOOLHUB_MANAGED_HOME@",
+		"Environment=HOME=@TOOLHUB_MANAGED_HOME@",
+		"WorkingDirectory=@TOOLHUB_MANAGED_HOME@",
+		"CapabilityBoundingSet=",
+		"PrivateDevices=yes",
+		"ProtectControlGroups=yes",
+		"ProtectKernelModules=yes",
+		"ProtectKernelTunables=yes",
+		"SystemCallArchitectures=native",
+		"StartLimitBurst=3",
+	} {
+		if !strings.Contains(unit, required) {
+			t.Fatalf("relay unit is missing %q", required)
+		}
+	}
+	if strings.Contains(unit, "MemoryDenyWriteExecute=yes") {
+		t.Fatal("relay unit must allow executable anonymous memory required by supported Node/V8 MCPs")
+	}
+	if strings.Contains(unit, "ProtectHome=read-only") {
+		t.Fatal("relay unit must expose the selected managed home through an explicit bind")
+	}
+}
+
+func TestPackagedInstallerRendersCanonicalRelayHome(t *testing.T) {
+	installer := readPackagingFile(t, "install-toolhub-services.sh")
+	if !strings.Contains(installer, `canonical_home="$(readlink -f -- "$managed_home")"`) {
+		t.Fatal("installer must resolve the managed home canonically")
+	}
+	if strings.Count(installer, `s|@TOOLHUB_MANAGED_HOME@|$managed_home|g`) != 2 {
+		t.Fatal("installer must render the canonical managed home into both packaged units")
+	}
+}
+
 func readPackagingFile(t *testing.T, name string) string {
 	t.Helper()
 	body, err := os.ReadFile(filepath.Join("..", "..", "packaging", "systemd", name))

@@ -2,7 +2,9 @@ package bridgeprotocol
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
+	"reflect"
 	"testing"
 	"time"
 
@@ -119,5 +121,26 @@ func TestValidateManagedUsername(t *testing.T) {
 	manifest.Target.ManagedUsername = "Root"
 	if err := manifest.Validate(true); err == nil {
 		t.Fatal("manifest accepted an invalid managed username")
+	}
+}
+
+func TestRelayStatusRoundTripKeepsOnlyTypedHealthProjection(t *testing.T) {
+	checkedAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	result := TargetResult{Status: OperationSucceeded, Health: HealthBlocked, Relay: &RelayStatus{State: "active", Endpoint: "http://127.0.0.1:6276/mcp", FixedPort: 6276, SystemdEnabled: true, Contract: "incompatible", MemberStatuses: []RelayMemberStatus{{MemberID: uuid.NewString(), Name: "server", Status: "unavailable", CapabilityKinds: []string{}, Capabilities: RelayCapabilityCounts{}, CheckedAt: checkedAt, ErrorCode: ErrMCPMIncompatible, ErrorReason: "namespace unavailable"}}, ErrorCode: ErrMCPMIncompatible, ErrorReason: "namespace unavailable"}}
+	body, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"command", "args", "env", "headers", "secretValues", "rawOutput"} {
+		if bytes.Contains(body, []byte(forbidden)) {
+			t.Fatalf("relay projection exposed forbidden field %q: %s", forbidden, body)
+		}
+	}
+	var decoded TargetResult
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result, decoded) {
+		t.Fatalf("relay DTO round trip changed: before=%+v after=%+v", result, decoded)
 	}
 }

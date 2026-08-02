@@ -111,7 +111,7 @@ type xiapingSkill struct {
 // Search queries the public Xiaping skill listing.
 func (c *XiapingClient) Search(ctx context.Context, query string, page, limit int) ([]Result, error) {
 	query = strings.TrimSpace(query)
-	if len(query) < 2 || len(query) > 200 {
+	if (len(query) > 0 && len(query) < 2) || len(query) > 200 {
 		return nil, ErrInvalidQuery
 	}
 	if page < 1 {
@@ -125,7 +125,9 @@ func (c *XiapingClient) Search(ctx context.Context, query string, page, limit in
 		return nil, err
 	}
 	values := endpoint.Query()
-	values.Set("search", query)
+	if query != "" {
+		values.Set("search", query)
+	}
 	values.Set("page", strconv.Itoa(page))
 	values.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = values.Encode()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 
 type fakeRelayController struct {
 	state       string
+	enabled     bool
 	failRestart bool
 	actions     []string
 }
@@ -31,14 +33,28 @@ func (f *fakeRelayController) Action(_ context.Context, action string) (string, 
 			return "inactive", errors.New("inactive")
 		}
 		return f.state, nil
-	case "restart", "start":
+	case "is-enabled":
+		if f.enabled {
+			return "enabled", nil
+		}
+		return "disabled", errors.New("disabled")
+	case "enable":
+		f.enabled = true
+		return "enabled", nil
+	case "restart", "start", "start-unit":
 		if f.failRestart {
 			return f.state, errors.New("injected restart failure")
 		}
+		if action == "start" {
+			f.enabled = true
+		}
 		f.state = "active"
 		return f.state, nil
-	case "stop":
+	case "stop", "stop-unit":
 		f.state = "inactive"
+		if action == "stop" {
+			f.enabled = false
+		}
 		return f.state, nil
 	default:
 		return "", errors.New("unsupported action")
@@ -57,7 +73,7 @@ func TestRelayReconcileNoOpCreatesNoBackup(t *testing.T) {
 	if result.BackupID != "" || result.Repaired {
 		t.Fatalf("no-op reconcile result=%+v", result)
 	}
-	if len(controller.actions) != beforeActions+1 || controller.actions[len(controller.actions)-1] != "status" {
+	if len(controller.actions) != beforeActions+2 || controller.actions[len(controller.actions)-2] != "status" || controller.actions[len(controller.actions)-1] != "is-enabled" {
 		t.Fatalf("no-op reconcile actions=%v", controller.actions[beforeActions:])
 	}
 	entries, err := os.ReadDir(filepath.Join(manager.BackupRoot, target.ID))
@@ -67,7 +83,7 @@ func TestRelayReconcileNoOpCreatesNoBackup(t *testing.T) {
 }
 
 func TestRelayPausedReconcileRepairsConfigWithoutRestart(t *testing.T) {
-	manager, controller, user, target, port := relayFixture(t, false)
+	manager, controller, user, target, port := relayFixture(t, true)
 	manifest := relayManifest(target, port, "https://example.invalid/one")
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
 	writeTestFile(t, paths.MCPMRegistry, []byte(`{"server":{"profile_tags":["toolhub"],"url":"https://drift.invalid","transport":"http"}}`))
@@ -80,16 +96,19 @@ func TestRelayPausedReconcileRepairsConfigWithoutRestart(t *testing.T) {
 		t.Fatalf("paused repair result=%+v", result)
 	}
 	for _, action := range controller.actions {
-		if action == "restart" || action == "start" {
+		if action == "restart" || action == "start" || action == "start-unit" {
 			t.Fatalf("paused reconcile started relay: %v", controller.actions)
 		}
+	}
+	if controller.state != "inactive" || controller.enabled {
+		t.Fatalf("paused reconcile did not disable and stop relay: state=%q enabled=%v actions=%v", controller.state, controller.enabled, controller.actions)
 	}
 	if body, _ := os.ReadFile(manager.EnvironmentFile); string(body) != "TOOLHUB_RELAY_PORT="+strconv.Itoa(port)+"\n" {
 		t.Fatalf("invalid relay environment %q", body)
 	}
 }
 
-func TestRelayApplyRollbackRestoresFiles(t *testing.T) {
+func TestRelayApplyRuntimeFailureKeepsValidatedConfiguration(t *testing.T) {
 	manager, controller, user, target, port := relayFixture(t, true)
 	firstManifest := relayManifest(target, port, "https://example.invalid/one")
 	applyRelay(t, manager, user, firstManifest, "apply", false)
@@ -102,14 +121,51 @@ func TestRelayApplyRollbackRestoresFiles(t *testing.T) {
 	controller.failRestart = true
 	current, _ := (&Manager{}).scanRelay(paths)
 	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: relayManifest(target, port, "https://example.invalid/two")}
-	_, err := manager.Apply(context.Background(), user, request)
-	var apiErr *bridgeprotocol.APIError
-	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrRelayUnhealthy {
-		t.Fatalf("Apply error=%v", err)
+	result, err := manager.Apply(context.Background(), user, request)
+	if err != nil || result.Status != bridgeprotocol.OperationSucceeded || result.Health != bridgeprotocol.HealthBlocked || result.Error == nil || result.Error.Code != bridgeprotocol.ErrRelayUnhealthy {
+		t.Fatalf("Apply result=%+v error=%v", result, err)
 	}
-	for _, path := range files {
-		after, readErr := os.ReadFile(path)
-		if readErr != nil || string(after) != string(before[path]) {
+	after, readErr := os.ReadFile(paths.MCPMRegistry)
+	if readErr != nil || string(after) == string(before[paths.MCPMRegistry]) || !strings.Contains(string(after), "https://example.invalid/two") {
+		t.Fatalf("validated registry was not retained: %s err=%v", after, readErr)
+	}
+}
+
+func TestRelayApplyMCPMContractFailureKeepsValidatedConfiguration(t *testing.T) {
+	manager, _, user, target, port := relayFixture(t, false)
+	manager.MCPMPath = filepath.Join(t.TempDir(), "missing-mcpm")
+	manifest := relayManifest(target, port, "https://example.invalid/one")
+	result := applyRelay(t, manager, user, manifest, "apply", false)
+	if result.Status != bridgeprotocol.OperationSucceeded || result.Health != bridgeprotocol.HealthBlocked || result.BackupID == "" || result.Manifest == nil {
+		t.Fatalf("Apply result=%+v", result)
+	}
+	if result.Error == nil || result.Error.Code != bridgeprotocol.ErrMCPMMissing || result.Relay == nil || result.Relay.ErrorCode != bridgeprotocol.ErrMCPMMissing {
+		t.Fatalf("Apply did not project the MCPM contract failure: %+v", result)
+	}
+	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	if matches, err := relayConfigurationMatches(paths, manager.EnvironmentFile, manifest, nil, false); err != nil || !matches {
+		t.Fatalf("validated configuration was not retained: matches=%v err=%v", matches, err)
+	}
+}
+
+func TestRelayApplyWriteFailureRollsBackConfiguration(t *testing.T) {
+	manager, _, user, target, port := relayFixture(t, true)
+	firstManifest := relayManifest(target, port, "https://example.invalid/one")
+	applyRelay(t, manager, user, firstManifest, "apply", false)
+	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	before, err := backupRelayFiles(paths, manager.EnvironmentFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.EnvironmentFile = filepath.Join("/proc", "toolhub-relay-env-"+uuid.NewString())
+	current, _ := (&Manager{}).scanRelay(paths)
+	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: relayManifest(target, port, "https://example.invalid/two")}
+	if _, err := manager.Apply(context.Background(), user, request); err == nil {
+		t.Fatal("Apply unexpectedly succeeded with an unwritable environment path")
+	}
+	for _, path := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig} {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil || string(body) != string(before[path].Body) {
 			t.Fatalf("rollback mismatch for %s: err=%v", path, readErr)
 		}
 	}
@@ -119,18 +175,20 @@ func TestRelayApplyWaitsForHealthReadiness(t *testing.T) {
 	manager, _, user, target, port := relayFixture(t, false)
 	manager.readinessInterval = time.Millisecond
 	manager.readinessTimeout = 100 * time.Millisecond
-	attempts := 0
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		attempts++
-		if attempts < 3 {
+	readinessAttempts := 0
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			readinessAttempts++
+		}
+		if request.Method == http.MethodGet && readinessAttempts < 3 {
 			return nil, errors.New("relay is still starting")
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		return healthyRelayResponse(request)
 	})}
 
 	result := applyRelay(t, manager, user, relayManifest(target, port, "https://example.invalid/one"), "apply", false)
-	if result.Health != bridgeprotocol.HealthHealthy || attempts != 3 {
-		t.Fatalf("Apply result=%+v health attempts=%d", result, attempts)
+	if result.Health != bridgeprotocol.HealthHealthy || readinessAttempts != 3 {
+		t.Fatalf("Apply result=%+v health attempts=%d", result, readinessAttempts)
 	}
 }
 
@@ -143,13 +201,15 @@ func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	current, _ := (&Manager{}).scanRelay(paths)
 	manager.readinessInterval = time.Millisecond
 	manager.readinessTimeout = 100 * time.Millisecond
-	attempts := 0
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		attempts++
-		if attempts < 3 {
+	readinessAttempts := 0
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			readinessAttempts++
+		}
+		if request.Method == http.MethodGet && readinessAttempts < 3 {
 			return nil, errors.New("restored relay is still starting")
 		}
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+		return healthyRelayResponse(request)
 	})}
 	result, err := manager.Restore(context.Background(), user, bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "restore", Target: target, ExpectedRevision: current.Revision, BackupID: second.BackupID, Manifest: firstManifest})
 	if err != nil || result.BackupID == "" {
@@ -163,8 +223,8 @@ func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	if server["url"] != "https://example.invalid/one" {
 		t.Fatalf("restored registry=%v", registry)
 	}
-	if attempts != 3 {
-		t.Fatalf("Restore health attempts=%d", attempts)
+	if readinessAttempts != 3 {
+		t.Fatalf("Restore health attempts=%d", readinessAttempts)
 	}
 }
 
@@ -181,6 +241,54 @@ func TestValidateMCPMRejectsUnparseableVersion(t *testing.T) {
 	var apiErr *bridgeprotocol.APIError
 	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
 		t.Fatalf("ValidateMCPM error=%v", err)
+	}
+}
+
+func TestValidateMCPMReturnsCanonicalVersionOnly(t *testing.T) {
+	mcpm := filepath.Join(t.TempDir(), "mcpm")
+	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf 'mcpm v12.3.4 build=private-output\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewRelayManager(&fakeRelayController{}, t.TempDir())
+	manager.MCPMPath = mcpm
+	version, err := manager.ValidateMCPM(context.Background())
+	if err != nil || version != "12.3.4" {
+		t.Fatalf("ValidateMCPM version=%q err=%v", version, err)
+	}
+}
+
+func TestRelayRestartUsesFixedPortStopWaitStartSequence(t *testing.T) {
+	manager, controller, _, _, port := relayFixture(t, false)
+	controller.state = "activating"
+	controller.enabled = false
+	portChecks := 0
+	manager.portAvailable = func(int) error {
+		portChecks++
+		return nil
+	}
+	controller.actions = nil
+	if err := manager.RestartFixed(context.Background(), port); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"enable", "stop-unit", "start-unit"}
+	if strings.Join(controller.actions, ",") != strings.Join(want, ",") || portChecks != 1 || !controller.enabled || controller.state != "active" {
+		t.Fatalf("restart actions=%v portChecks=%d state=%q enabled=%v", controller.actions, portChecks, controller.state, controller.enabled)
+	}
+}
+
+func TestRelayRestartStopsBeforeReportingFixedPortConflict(t *testing.T) {
+	manager, controller, _, _, port := relayFixture(t, true)
+	manager.portAvailable = func(int) error { return errors.New("occupied") }
+	controller.actions = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	err := manager.RestartFixed(ctx, port)
+	var apiErr *bridgeprotocol.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrRelayPortConflict {
+		t.Fatalf("RestartFixed error=%v", err)
+	}
+	if len(controller.actions) != 2 || controller.actions[0] != "enable" || controller.actions[1] != "stop-unit" || controller.state != "inactive" {
+		t.Fatalf("port-conflict restart actions=%v state=%q", controller.actions, controller.state)
 	}
 }
 
@@ -261,13 +369,14 @@ func relayFixture(t *testing.T, healthy bool) (*RelayManager, *fakeRelayControll
 	port := 6276
 	if healthy {
 		controller.state = "active"
+		controller.enabled = true
 	}
 	manager := NewRelayManager(controller, t.TempDir())
 	manager.MCPMPath = mcpm
 	manager.EnvironmentFile = filepath.Join(t.TempDir(), "mcpm-relay.env")
 	manager.portAvailable = func(int) error { return nil }
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return healthyRelayResponse(request)
 	})}
 	target := bridgeprotocol.Target{ID: uuid.NewString(), NodeID: uuid.NewString(), NodeKind: bridgeprotocol.NodeKindLocal, Runtime: bridgeprotocol.RuntimeSharedRelay, ManagedUsername: user.Name}
 	return manager, controller, user, target, port
@@ -296,6 +405,30 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+func healthyRelayResponse(request *http.Request) (*http.Response, error) {
+	if request.Method == http.MethodGet {
+		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header)}, nil
+	}
+	var envelope struct {
+		Method string `json:"method"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Method == "notifications/initialized" {
+		return &http.Response{StatusCode: http.StatusAccepted, Body: http.NoBody, Header: make(http.Header)}, nil
+	}
+	result := `{"tools":[]}`
+	switch envelope.Method {
+	case "initialize":
+		result = `{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mcpm","version":"1"}}`
+	case "tools/list":
+		result = `{"tools":[{"name":"server_status"}]}`
+	}
+	body := `{"jsonrpc":"2.0","id":"` + envelope.Method + `","result":` + result + `}`
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 }
 
 func writeTestFile(t *testing.T, path string, body []byte) {

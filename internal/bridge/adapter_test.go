@@ -32,7 +32,7 @@ func TestRelayHealthPreservesIntentionalPause(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !status.IntentionalPaused || status.Healthy || status.ErrorCode != "" {
+	if !status.IntentionalPaused || !status.Healthy || status.SystemdEnabled || status.ErrorCode != "" {
 		t.Fatalf("paused relay status=%+v", status)
 	}
 }

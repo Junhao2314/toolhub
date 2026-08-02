@@ -87,6 +87,29 @@ func TestValidateTargetBindingRejectsRelayPortChange(t *testing.T) {
 	assertRevisionConflict(t, validateTargetBinding(target, manifest, 6277))
 }
 
+func TestRelayResultProjectionPreservesBlockedSuccess(t *testing.T) {
+	status := bridgeprotocol.RelayStatus{Healthy: false, ErrorCode: bridgeprotocol.ErrRelayUnhealthy, ErrorReason: "relay unavailable"}
+	result := bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthBlocked, Relay: &status, Error: relayProjectionError(status)}
+	if normalizedResultHealth(result.Health) != bridgeprotocol.HealthBlocked {
+		t.Fatal("blocked result was normalized to healthy")
+	}
+	code, reason := resultProjectionError(result)
+	if code != bridgeprotocol.ErrRelayUnhealthy || reason != "relay unavailable" || !result.Error.Retryable {
+		t.Fatalf("relay projection error code=%q reason=%q error=%+v", code, reason, result.Error)
+	}
+}
+
+func TestPausedRelayIsHealthyOnlyWhenPauseIsEnforced(t *testing.T) {
+	paused := bridgeprotocol.RelayStatus{Healthy: true, IntentionalPaused: true, State: "inactive", SystemdEnabled: false}
+	if relayProjectedHealth(paused) != bridgeprotocol.HealthHealthy || relayProjectionError(paused) != nil {
+		t.Fatalf("enforced pause projected incorrectly: %+v", paused)
+	}
+	failed := bridgeprotocol.RelayStatus{IntentionalPaused: true, State: "active", SystemdEnabled: true, ErrorCode: bridgeprotocol.ErrRelayUnhealthy, ErrorReason: "intentional relay pause is not enforced"}
+	if relayProjectedHealth(failed) != bridgeprotocol.HealthBlocked || relayProjectionError(failed) == nil {
+		t.Fatalf("unenforced pause projected incorrectly: %+v", failed)
+	}
+}
+
 func assertRevisionConflict(t *testing.T, err error) {
 	t.Helper()
 	var apiErr *bridgeprotocol.APIError

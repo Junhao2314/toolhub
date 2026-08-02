@@ -27,8 +27,8 @@ sudo packaging/systemd/install-toolhub-services.sh MANAGED_USER MANAGED_GROUP BR
 - creates the shared Bridge group when necessary;
 - creates `/etc/toolhub-bridge/hmac.key` as a root-only file;
 - creates `/var/lib/toolhub-bridge/mcpm-relay.env` with port `6276`;
-- renders the Bridge unit with only the selected managed home bound writable
-  into its private mount namespace, then installs both units;
+- renders both units with only the selected canonical managed home exposed in
+  their private home namespaces;
 - enables and starts `toolhub-bridge.service`;
 - prints the GID required by Compose.
 
@@ -89,9 +89,11 @@ idempotency records remain replayable across Bridge restart.
 
 Only the safe terminal projection is journaled. Manifest and editable `details`
 fields are stripped, `managedHome` is never persisted, and the Salt JID is
-retained for operation projection and recovery. Journal validation rejects
-secret values, archives, editable configuration, plaintext fields, and raw Salt
-output.
+retained for operation projection and recovery. Relay results retain only the
+fixed endpoint/unit state, bounded contract result, member names, capability
+counts, stable error codes, and truncated safe reasons. Journal validation
+rejects secret values, archives, editable configuration, plaintext fields, and
+raw Salt output.
 
 Before opening the Unix socket after a restart, the Bridge resolves every
 journaled running Salt JID. If the job cache still contains a result, normal
@@ -124,8 +126,21 @@ API capability. Restore verifies the restored pinned Skill/MCP members before
 accepting the write; a mismatch atomically rolls back to the recovery backup.
 
 The only allowed relay unit is `toolhub-mcpm-relay.service`; allowed actions are
-status, start, stop, and restart plus the HTTP health projection. Running
-destructive target work cannot be force-cancelled.
+status, start, stop, and restart plus structured MCP protocol health. Start and
+successful Apply enable the unit; Stop disables it. Restart stops the unit,
+waits for the configured port to become bindable, and starts it without MCPM
+port fallback. Full health initializes one Streamable HTTP session and discovers
+advertised tools, resources, templates, and prompts without invoking business
+tools. Each discovery request is limited to 30 seconds; a failed method is
+retried once within the 90-second total budget so MCPM can finish lazy member
+startup, and a second failure remains fail-closed. Running destructive target
+work cannot be force-cancelled.
+
+Once backup, registry/profile writes, and integrity validation succeed, Apply
+and Restore keep the new relay configuration even if the fixed port, systemd
+process, or member namespace probe fails. The Bridge returns a successful target
+result with `health=blocked`; write or integrity failures still roll back and
+return an operation error.
 
 ## Service Checks
 

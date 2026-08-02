@@ -136,7 +136,9 @@ credentials have no effect after the account exists.
 
 Apply is destructive only inside the documented manageable scope and always
 requires a fresh preflight confirmation. Reconcile begins automatically every
-five minutes once a target has an active desired snapshot.
+five minutes once a target has an active desired snapshot. Shared-relay member
+discovery runs every 30 minutes; blocked relays retry after 5 minutes, 15
+minutes, and 1 hour before suspension.
 
 ## Updates
 

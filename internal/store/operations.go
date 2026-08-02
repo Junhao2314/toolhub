@@ -339,24 +339,29 @@ func (s *Store) EnqueueReconciles(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	rows, err := tx.Query(ctx, `SELECT target_id::text FROM target_desired_snapshots ORDER BY target_id`)
+	rows, err := tx.Query(ctx, `SELECT ds.target_id::text,t.runtime,(t.runtime='shared-relay' AND (ds.health='blocked' OR ds.relay_last_member_check_at IS NULL OR ds.relay_last_member_check_at<=now()-interval '30 minutes')) AS full_relay_probe FROM target_desired_snapshots ds JOIN targets t ON t.id=ds.target_id WHERE t.runtime<>'shared-relay' OR (NOT ds.relay_suspended AND (ds.health<>'blocked' OR ds.relay_next_retry_at IS NULL OR ds.relay_next_retry_at<=now())) ORDER BY ds.target_id`)
 	if err != nil {
 		return 0, err
 	}
-	var targets []string
+	type reconcileTarget struct {
+		id             string
+		fullRelayProbe bool
+	}
+	var targets []reconcileTarget
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var target reconcileTarget
+		var runtime string
+		if err := rows.Scan(&target.id, &runtime, &target.fullRelayProbe); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		targets = append(targets, id)
+		targets = append(targets, target)
 	}
 	rows.Close()
 	created := 0
-	for _, targetID := range targets {
+	for _, target := range targets {
 		var activeID string
-		err := tx.QueryRow(ctx, `SELECT id::text FROM operation_targets WHERE target_id=$1 AND status IN ('queued','running')`, targetID).Scan(&activeID)
+		err := tx.QueryRow(ctx, `SELECT id::text FROM operation_targets WHERE target_id=$1 AND status IN ('queued','running')`, target.id).Scan(&activeID)
 		if err == nil {
 			if _, err := tx.Exec(ctx, `UPDATE operation_targets SET pending_rerun=true,updated_at=now() WHERE id=$1`, activeID); err != nil {
 				return 0, err
@@ -370,7 +375,11 @@ func (s *Store) EnqueueReconciles(ctx context.Context) (int, error) {
 		if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,'reconcile','queued','{"scheduled":true}')`, operationID); err != nil {
 			return 0, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id) VALUES($1,$2,$3)`, uuid.NewString(), operationID, targetID); err != nil {
+		request := `{}`
+		if target.fullRelayProbe {
+			request = `{"fullRelayProbe":true}`
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request) VALUES($1,$2,$3,$4)`, uuid.NewString(), operationID, target.id, request); err != nil {
 			return 0, err
 		}
 		created++
@@ -385,7 +394,8 @@ func (s *Store) EnqueuePendingRerun(ctx context.Context, operationTargetID strin
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var targetID string
-	err = tx.QueryRow(ctx, `SELECT target_id::text FROM operation_targets WHERE id=$1 AND pending_rerun AND status IN ('succeeded','failed','cancelled') FOR UPDATE`, operationTargetID).Scan(&targetID)
+	var eligible, fullRelayProbe bool
+	err = tx.QueryRow(ctx, `SELECT ot.target_id::text,(t.runtime<>'shared-relay' OR (NOT ds.relay_suspended AND (ds.health<>'blocked' OR ds.relay_next_retry_at IS NULL OR ds.relay_next_retry_at<=now()))) AS eligible,(t.runtime='shared-relay' AND (ds.health='blocked' OR ds.relay_last_member_check_at IS NULL OR ds.relay_last_member_check_at<=now()-interval '30 minutes')) AS full_relay_probe FROM operation_targets ot JOIN targets t ON t.id=ot.target_id JOIN target_desired_snapshots ds ON ds.target_id=ot.target_id WHERE ot.id=$1 AND ot.pending_rerun AND ot.status IN ('succeeded','failed','cancelled') FOR UPDATE OF ot`, operationTargetID).Scan(&targetID, &eligible, &fullRelayProbe)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -395,11 +405,18 @@ func (s *Store) EnqueuePendingRerun(ctx context.Context, operationTargetID strin
 	if _, err := tx.Exec(ctx, `UPDATE operation_targets SET pending_rerun=false WHERE id=$1`, operationTargetID); err != nil {
 		return false, err
 	}
+	if !eligible {
+		return false, tx.Commit(ctx)
+	}
 	operationID := uuid.NewString()
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,'reconcile','queued','{"coalesced":true}')`, operationID); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id) VALUES($1,$2,$3)`, uuid.NewString(), operationID, targetID); err != nil {
+	request := `{}`
+	if fullRelayProbe {
+		request = `{"fullRelayProbe":true}`
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request) VALUES($1,$2,$3,$4)`, uuid.NewString(), operationID, targetID, request); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)

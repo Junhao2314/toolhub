@@ -1,12 +1,16 @@
 [Unit]
 Description=ToolHub shared MCPM HTTP relay
 After=network.target
+StartLimitIntervalSec=60s
+StartLimitBurst=3
 
 [Service]
 Type=simple
 EnvironmentFile=/var/lib/toolhub-bridge/mcpm-relay.env
+Environment=HOME=@TOOLHUB_MANAGED_HOME@
 User=@TOOLHUB_MANAGED_USER@
 Group=@TOOLHUB_MANAGED_GROUP@
+WorkingDirectory=@TOOLHUB_MANAGED_HOME@
 ExecStart=/usr/bin/mcpm profile run --http --host 127.0.0.1 --port ${TOOLHUB_RELAY_PORT} toolhub
 Restart=on-failure
 RestartSec=3s
@@ -14,11 +18,17 @@ UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=-%h/.config/mcpm -%h/.codex -%h/.claude -%h/.claude.json
+ProtectHome=tmpfs
+BindPaths=@TOOLHUB_MANAGED_HOME@
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+SystemCallArchitectures=native
 LockPersonality=yes
-MemoryDenyWriteExecute=yes
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 

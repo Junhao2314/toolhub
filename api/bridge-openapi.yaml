@@ -385,6 +385,7 @@ components:
         artifacts: {type: array, writeOnly: true, items: {$ref: '#/components/schemas/Artifact'}}
         secretValues: {$ref: '#/components/schemas/SecretValues'}
         intentionalPaused: {type: boolean}
+        fullRelayProbe: {type: boolean, description: Worker-selected capability discovery intent; ignored for non-relay targets.}
     RestoreRequest:
       type: object
       additionalProperties: false
@@ -410,6 +411,7 @@ components:
         artifacts: {type: array, writeOnly: true, items: {$ref: '#/components/schemas/Artifact'}}
         secretValues: {$ref: '#/components/schemas/SecretValues'}
         intentionalPaused: {type: boolean}
+        fullRelayProbe: {type: boolean, description: Run bounded MCP capability discovery in addition to registry/config reconcile.}
     Artifact:
       type: object
       additionalProperties: false
@@ -496,6 +498,7 @@ components:
         backupId: {$ref: '#/components/schemas/UUID'}
         repaired: {type: boolean}
         manifest: {$ref: '#/components/schemas/DesiredManifest'}
+        relay: {$ref: '#/components/schemas/RelayStatus'}
         details: {type: object, description: Redacted safe typed details; plaintext secrets, archives, editable content, and raw Salt output are forbidden.}
         error: {$ref: '#/components/schemas/APIError'}
     Backup:
@@ -519,17 +522,45 @@ components:
         target: {$ref: '#/components/schemas/Target'}
         port: {type: integer, minimum: 1, maximum: 65535}
         intentionalPaused: {type: boolean}
+        manifest: {$ref: '#/components/schemas/DesiredManifest', description: Optional secret-reference-only desired membership used for full protocol health discovery.}
     RelayStatus:
       type: object
       additionalProperties: false
-      required: [state, healthy, intentionalPaused, endpoint]
+      required: [state, healthy, intentionalPaused, endpoint, fixedPort, systemdEnabled]
       properties:
         state: {type: string}
         healthy: {type: boolean}
         intentionalPaused: {type: boolean}
         endpoint: {type: string, format: uri}
+        fixedPort: {type: integer, minimum: 1, maximum: 65535}
+        systemdEnabled: {type: boolean}
         version: {type: string}
+        contract: {type: string, enum: [verified, incompatible, unavailable]}
+        memberStatuses: {type: array, items: {$ref: '#/components/schemas/RelayMemberStatus'}}
         errorCode: {type: string}
+        errorReason: {type: string, maxLength: 200}
+    RelayCapabilityCounts:
+      type: object
+      additionalProperties: false
+      required: [tools, resources, resourceTemplates, prompts]
+      properties:
+        tools: {type: integer, minimum: 0}
+        resources: {type: integer, minimum: 0}
+        resourceTemplates: {type: integer, minimum: 0}
+        prompts: {type: integer, minimum: 0}
+    RelayMemberStatus:
+      type: object
+      additionalProperties: false
+      required: [memberId, name, status, capabilityKinds, capabilities, checkedAt]
+      properties:
+        memberId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string}
+        status: {type: string, enum: [ready, unavailable]}
+        capabilityKinds: {type: array, uniqueItems: true, items: {type: string, enum: [tools, resources, resourceTemplates, prompts]}}
+        capabilities: {$ref: '#/components/schemas/RelayCapabilityCounts'}
+        checkedAt: {type: string, format: date-time}
+        errorCode: {type: string}
+        errorReason: {type: string, maxLength: 200}
     Operation:
       type: object
       additionalProperties: false

@@ -97,6 +97,14 @@ named `toolhub`, one fixed relay unit, and one `toolhub-relay` user-scope anchor
 `~/.claude.json` and `~/.codex/config.toml`. It does not auto-find, install,
 upgrade, or fall back to native per-server local delivery.
 
+The relay unit hides all homes with a private tmpfs and binds back only the
+selected canonical managed home as writable. `ProtectSystem=strict`, an empty
+capability bounding set, private devices, kernel/control-group protections, and
+the address-family allowlist remain active. `MemoryDenyWriteExecute` is not used
+because supported Node/V8 MCPs require JIT memory. A managed user with Docker
+socket access, including a root managed user, is equivalent to host control;
+this is an accepted operational trust boundary, not strong process isolation.
+
 Each managed mcpm registry entry carries its Library content hash plus a runtime
 integrity hash. Relay scans project the Library hash only while the actual entry,
 including its ephemeral secret values, still matches that integrity hash;

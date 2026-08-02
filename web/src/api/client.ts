@@ -89,6 +89,43 @@ export interface Target {
   lastReconciledAt?: string
   errorCode?: string
   errorReason?: string
+  relayFailureCount: number
+  relayNextRetryAt?: string
+  relaySuspended: boolean
+  relayLastMemberCheckAt?: string
+  relayMemberStatuses: RelayMemberStatus[]
+}
+
+export interface RelayCapabilityCounts {
+  tools: number
+  resources: number
+  resourceTemplates: number
+  prompts: number
+}
+
+export interface RelayMemberStatus {
+  memberId: string
+  name: string
+  status: 'ready' | 'unavailable'
+  capabilityKinds: Array<'tools' | 'resources' | 'resourceTemplates' | 'prompts'>
+  capabilities: RelayCapabilityCounts
+  checkedAt: string
+  errorCode?: string
+  errorReason?: string
+}
+
+export interface RelayStatus {
+  state: string
+  healthy: boolean
+  intentionalPaused: boolean
+  endpoint: string
+  fixedPort: number
+  systemdEnabled: boolean
+  version?: string
+  contract?: 'verified' | 'incompatible' | 'unavailable'
+  memberStatuses?: RelayMemberStatus[]
+  errorCode?: string
+  errorReason?: string
 }
 
 export interface InventoryMember {
@@ -116,7 +153,7 @@ export interface DesiredManifest {
 export interface TargetDetail {
   target: Target
   targetRevision: string
-  inventory: { members?: InventoryMember[]; relay?: { state: string; endpoint: string; healthy: boolean; intentionalPaused: boolean; errorCode?: string } }
+  inventory: { members?: InventoryMember[]; relay?: RelayStatus }
   desired?: { snapshot: { id: string; revision: number; sourceKind: string; profileRevision?: number; manifestHash: string; createdAt: string }; manifest: DesiredManifest }
 }
 

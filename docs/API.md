@@ -112,17 +112,24 @@ Only queued target work is cancellable. A destructive target step that reached
 operation of the original kind containing only failed targets.
 
 The five-minute scheduler creates reconcile operations for active desired
-snapshots. One target has at most one queued/running operation target; overlap is
-coalesced into one pending rerun. Update discovery follows the singleton cron and
-timezone in Settings. Backup GC is scheduled daily with fixed 30-day/10-per-target
-retention.
+snapshots. Shared-relay registry/config drift is still checked on that cadence,
+while full MCP capability discovery runs every 30 minutes. A blocked relay gets
+three durable retries after 5 minutes, 15 minutes, and 1 hour, then becomes
+suspended until an explicit Apply, Start, or Restart resets it. One target has at
+most one queued/running operation target; overlap is coalesced into one pending
+rerun. Update discovery follows the singleton cron and timezone in Settings.
+Backup GC is scheduled daily with fixed 30-day/10-per-target retention.
 
 ## Relay
 
 `POST /targets/{id}/relay/{start|stop|restart|health}` queues fixed controls for
 `local/shared-relay`. Stop persists `relayIntentionalPaused=true`; periodic
 reconcile still repairs registry/anchor drift but does not start the service.
-Start/restart clear the pause intent. Arbitrary unit names are impossible.
+Apply/start/restart clear the pause intent and reset suspended relay retries. Restart
+uses enable, stop, fixed-port release, and start so MCPM cannot silently fall
+back to another port. Target detail exposes only bounded protocol health,
+capability counts, stable error codes, and retry timing. Arbitrary unit names are
+impossible.
 
 ## Removed Routes
 

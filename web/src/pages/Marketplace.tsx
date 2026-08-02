@@ -1,5 +1,5 @@
 import { Download, ExternalLink, Import, Search, Star, User } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { api, type Dict } from '../api/client'
 import { Button, Empty, ErrorNotice, Loading, Modal, PageHeader, Status } from '../components/ui'
 import { useI18n } from '../i18n'
@@ -16,14 +16,22 @@ export default function Marketplace() {
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<MarketSkill | null>(null)
 
-  const search = (event: FormEvent) => {
-    event.preventDefault()
+  const performSearch = useCallback((src: string, q: string) => {
     setLoading(true)
     setError('')
-    api.get<{ items: MarketSkill[]; errors?: Record<string, string> }>(`/market/search?source=${source}&q=${encodeURIComponent(query)}&page=1&limit=24`)
+    api.get<{ items: MarketSkill[]; errors?: Record<string, string> }>(`/market/search?source=${src}&q=${encodeURIComponent(q)}&page=1&limit=24`)
       .then((result) => { setItems(result.items); setErrors(result.errors ?? {}) })
       .catch((reason: Error) => setError(reason.message))
       .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    performSearch(source, query)
+  }, [source, performSearch])
+
+  const search = (event: FormEvent) => {
+    event.preventDefault()
+    performSearch(source, query)
   }
 
   return <>
@@ -38,7 +46,7 @@ export default function Marketplace() {
         <Search size={16} />
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search marketplace')} />
       </div>
-      <Button disabled={query.trim().length < 2}>{t('Search')}</Button>
+      <Button disabled={query.trim().length === 1 || loading}>{t('Search')}</Button>
     </form>
     {error && <ErrorNotice message={error} />}
     {Object.keys(errors).length > 0 && <ErrorNotice message={Object.entries(errors).map(([name, value]) => `${name}: ${value}`).join(' / ')} />}

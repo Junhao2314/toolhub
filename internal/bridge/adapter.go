@@ -222,7 +222,7 @@ func (a *CompositeAdapter) Reconcile(ctx context.Context, request bridgeprotocol
 			return bridgeprotocol.TargetResult{}, err
 		}
 		if request.Target.Runtime == bridgeprotocol.RuntimeSharedRelay {
-			commit := bridgeprotocol.CommitRequest{OperationID: request.OperationID, OperationKind: "reconcile", Target: request.Target, Manifest: request.Manifest, Artifacts: request.Artifacts, SecretValues: request.SecretValues, IntentionalPaused: request.IntentionalPaused}
+			commit := bridgeprotocol.CommitRequest{OperationID: request.OperationID, OperationKind: "reconcile", Target: request.Target, Manifest: request.Manifest, Artifacts: request.Artifacts, SecretValues: request.SecretValues, IntentionalPaused: request.IntentionalPaused, FullRelayProbe: request.FullRelayProbe}
 			scan, scanErr := a.Local.Scan(user, request.Target.Runtime)
 			if scanErr != nil {
 				return bridgeprotocol.TargetResult{}, scanErr
@@ -651,14 +651,24 @@ func (a *CompositeAdapter) RemoveBackup(ctx context.Context, backup bridgeprotoc
 }
 
 func (a *CompositeAdapter) Relay(ctx context.Context, action string, input bridgeprotocol.RelayActionRequest) (bridgeprotocol.RelayStatus, error) {
-	if action == "health" || action == "status" {
-		return a.RelayManager.Status(ctx, input.Port, input.IntentionalPaused)
+	manifestArgs := []bridgeprotocol.DesiredManifest{}
+	if input.Manifest != nil {
+		manifestArgs = append(manifestArgs, *input.Manifest)
 	}
-	state, err := a.RelayManager.Controller.Action(ctx, action)
-	if err != nil {
+	if action == "health" || action == "status" {
+		return a.RelayManager.Status(ctx, input.Port, input.IntentionalPaused, manifestArgs...)
+	}
+	if action == "start" {
+		return a.RelayManager.StartAndCheck(ctx, input.Port, input.Manifest), nil
+	}
+	if action == "restart" {
+		return a.RelayManager.RestartAndCheck(ctx, input.Port, input.Manifest), nil
+	}
+	if action != "stop" {
+		return bridgeprotocol.RelayStatus{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrUnsupportedOperation, Message: "Unsupported relay action"}
+	}
+	if _, err := a.RelayManager.Controller.Action(ctx, "stop"); err != nil {
 		return bridgeprotocol.RelayStatus{}, err
 	}
-	status, statusErr := a.RelayManager.Status(ctx, input.Port, action == "stop")
-	status.State = state
-	return status, statusErr
+	return a.RelayManager.Status(ctx, input.Port, true)
 }

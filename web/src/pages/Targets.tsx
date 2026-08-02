@@ -57,6 +57,7 @@ function TargetInspector({ targetID, skills, servers, refreshTargets, operation 
   const [restoring, setRestoring] = useState<Backup | null>(null)
   const [mcpImport, setMCPImport] = useState(false)
   const [usernameEditor, setUsernameEditor] = useState(false)
+  const [relayQueueing, setRelayQueueing] = useState('')
   const queue = (request: Promise<Operation>, label: string) => request.then((op) => operation(`${label} · ${op.id.slice(0, 8)}`)).catch((reason: Error) => operation(reason.message))
   if (state.loading) return <Loading />
   if (state.error || !state.data) return <ErrorNotice message={state.error} retry={state.reload} />
@@ -69,6 +70,23 @@ function TargetInspector({ targetID, skills, servers, refreshTargets, operation 
     || (member.kind === 'skill' && managedSkills.has(member.name))
     || (member.kind === 'mcp' && managedMCP.has(member.name))
   const allowsLocalIntake = target.nodeKind === 'local' && ['claude', 'codex'].includes(target.runtime)
+  const relay = detail.inventory.relay
+  const relayStatuses = target.relayMemberStatuses?.length ? target.relayMemberStatuses : relay?.memberStatuses ?? []
+  const relayStatusByID = new Map(relayStatuses.map((item) => [item.memberId, item]))
+  const relayStatusByName = new Map(relayStatuses.map((item) => [item.name, item]))
+  const desiredRelayMembers = (detail.desired?.manifest.mcpServers ?? []).map((member) => relayStatusByID.get(member.memberId) ?? relayStatusByName.get(member.name) ?? {
+    memberId: member.memberId,
+    name: member.name,
+    status: 'unavailable' as const,
+    capabilityKinds: [],
+    capabilities: { tools: 0, resources: 0, resourceTemplates: 0, prompts: 0 },
+    checkedAt: '',
+    errorReason: t('Not checked'),
+  })
+  const queueRelay = (action: string, label: string) => {
+    setRelayQueueing(action)
+    queue(api.post(`/targets/${target.id}/relay/${action}`), label).finally(() => setRelayQueueing(''))
+  }
   return <div className="target-inspector">
     <section className="target-hero">
       <div className="hero-main">
@@ -85,9 +103,9 @@ function TargetInspector({ targetID, skills, servers, refreshTargets, operation 
         </div>
       </div>
       <div className="summary-actions">
-        {target.nodeKind === 'salt' && <Button variant="secondary" onClick={() => setUsernameEditor(true)}><UserRoundCog size={16} />{t('Edit username')}</Button>}
+        {target.nodeKind === 'salt' && <Button variant="secondary" onClick={() => setUsernameEditor(true)}><UserRoundCog size={16} />{t('Edit node username')}</Button>}
         <Button variant="secondary" onClick={() => queue(api.post(`/targets/${target.id}/scan`), t('Scan queued'))}><RefreshCw size={16} />{t('Scan')}</Button>
-        {allowsLocalIntake && <Button variant="secondary" onClick={() => setMCPImport(true)}><KeyRound size={16} />{t('Import MCP')}</Button>}
+        {allowsLocalIntake && <Button variant="secondary" onClick={() => setMCPImport(true)}><KeyRound size={16} />{t('Import MCP from runtime')}</Button>}
         {target.writable && <Button variant="primary" disabled={!detail.targetRevision} onClick={() => setEditor(true)}><Pencil size={16} />{t('Edit target')}</Button>}
       </div>
     </section>
@@ -96,27 +114,38 @@ function TargetInspector({ targetID, skills, servers, refreshTargets, operation 
       <div>
         <Activity size={20} />
         <span>
-          <strong>{detail.inventory.relay?.endpoint || `http://127.0.0.1:${detail.desired?.manifest.relayPort ?? 6276}/mcp`}</strong>
-          <small>{detail.inventory.relay?.state || 'unknown'}</small>
+          <strong>{relay?.endpoint || `http://127.0.0.1:${detail.desired?.manifest.relayPort ?? 6276}/mcp`}</strong>
+          <small>{relay?.state || 'unknown'} · {t('Port')} {relay?.fixedPort ?? detail.desired?.manifest.relayPort ?? 6276} · {t(relay?.systemdEnabled ? 'Enabled' : 'Disabled')}</small>
         </span>
-        <Status value={detail.inventory.relay?.intentionalPaused ? 'paused' : detail.inventory.relay?.healthy ? 'healthy' : 'blocked'} />
+        <Status value={relay?.intentionalPaused ? 'paused' : relay?.healthy ? 'healthy' : 'blocked'} />
       </div>
       <div className="relay-actions">
-        <IconButton label={t('Start')} onClick={() => queue(api.post(`/targets/${target.id}/relay/start`), t('Relay start queued'))}><Play size={16} /></IconButton>
-        <IconButton label={t('Stop')} onClick={() => queue(api.post(`/targets/${target.id}/relay/stop`), t('Relay stop queued'))}><Square size={16} /></IconButton>
-        <IconButton label={t('Restart')} onClick={() => queue(api.post(`/targets/${target.id}/relay/restart`), t('Relay restart queued'))}><RefreshCw size={16} /></IconButton>
-        <IconButton label={t('Health check')} onClick={() => queue(api.post(`/targets/${target.id}/relay/health`), t('Health check queued'))}><Activity size={16} /></IconButton>
+        <IconButton label={t('Start')} disabled={relayQueueing !== ''} onClick={() => queueRelay('start', t('Relay start queued'))}><Play size={16} /></IconButton>
+        <IconButton label={t('Stop')} disabled={relayQueueing !== ''} onClick={() => queueRelay('stop', t('Relay stop queued'))}><Square size={16} /></IconButton>
+        <IconButton label={t('Restart')} disabled={relayQueueing !== ''} onClick={() => queueRelay('restart', t('Relay restart queued'))}><RefreshCw className={relayQueueing === 'restart' ? 'spin' : ''} size={16} /></IconButton>
+        <IconButton label={t('Health check')} disabled={relayQueueing !== ''} onClick={() => queueRelay('health', t('Health check queued'))}><Activity size={16} /></IconButton>
       </div>
     </section>}
+    {target.runtime === 'shared-relay' && <dl className="relay-facts">
+      <div><dt>{t('Retry count')}</dt><dd>{target.relayFailureCount}</dd></div>
+      <div><dt>{t('Next retry')}</dt><dd>{target.relayNextRetryAt ? new Date(target.relayNextRetryAt).toLocaleString() : '—'}</dd></div>
+      <div><dt>{t('Retry state')}</dt><dd><Status value={target.relaySuspended ? 'suspended' : 'active'} /></dd></div>
+      <div><dt>{t('Last full check')}</dt><dd>{target.relayLastMemberCheckAt ? new Date(target.relayLastMemberCheckAt).toLocaleString() : '—'}</dd></div>
+      <div><dt>{t('Runtime contract')}</dt><dd>{relay?.contract ? t(relay.contract) : '—'}</dd></div>
+    </dl>}
     <dl className="target-facts">
       <div className="fact-card"><dt>{t('Desired revision')}</dt><dd><code>{target.desiredRevision || '—'}</code></dd></div>
       <div className="fact-card"><dt>{t('Snapshot source')}</dt><dd>{detail.desired?.snapshot.sourceKind || '—'}</dd></div>
       <div className="fact-card"><dt>{t('Last scan')}</dt><dd>{target.lastScannedAt ? new Date(target.lastScannedAt).toLocaleString() : '—'}</dd></div>
       <div className="fact-card"><dt>{t('Last reconcile')}</dt><dd>{target.lastReconciledAt ? new Date(target.lastReconciledAt).toLocaleString() : '—'}</dd></div>
     </dl>
+    {target.runtime === 'shared-relay' && <section className="target-band relay-members">
+      <header><h3>{t('Desired MCP health')}</h3><span>{desiredRelayMembers.length}</span></header>
+      {desiredRelayMembers.length === 0 ? <Empty title={t('No desired MCP members')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Member')}</th><th>{t('State')}</th><th>{t('Capabilities')}</th><th>{t('Checked')}</th><th>{t('Reason')}</th></tr></thead><tbody>{desiredRelayMembers.map((member) => { const counts = member.capabilities; const capabilities = [[t('Tools'), counts.tools], [t('Resources'), counts.resources], [t('Templates'), counts.resourceTemplates], [t('Prompts'), counts.prompts]].filter(([, count]) => Number(count) > 0); return <tr key={member.memberId}><td><strong>{member.name}</strong></td><td><Status value={member.status} /></td><td><span className="relay-capabilities">{capabilities.length ? capabilities.map(([kind, count]) => <span key={String(kind)}>{kind} {count}</span>) : '—'}</span></td><td>{member.checkedAt ? new Date(member.checkedAt).toLocaleString() : '—'}</td><td><span className="relay-reason">{member.errorCode && <code>{member.errorCode}</code>}{member.errorReason || '—'}</span></td></tr> })}</tbody></table></div>}
+    </section>}
     <section className="target-band">
       <header><h3>{t('Inventory')}</h3><span>{members.length}</span></header>
-      {members.length === 0 ? <Empty title={t('No inventory snapshot')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Member')}</th><th>{t('Kind')}</th><th>{t('Scope')}</th><th>{t('Hash')}</th><th>{t('State')}</th><th /></tr></thead><tbody>{members.map((member) => { const managed = isManaged(member); const importable = allowsLocalIntake && member.kind === 'skill' && !member.protected && !managed && !!member.contentHash && !!detail.targetRevision; return <tr key={member.id}><td><strong>{member.name}</strong></td><td><Status value={member.kind} /></td><td>{member.scope || '—'}</td><td><code>{member.contentHash?.slice(0, 12) || '—'}</code></td><td><Status value={member.protected ? 'protected' : managed ? 'managed' : 'unmanaged'} /></td><td><div className="row-actions">{importable && <Button variant="secondary" onClick={() => queue(api.post(`/targets/${target.id}/skill-import`, { name: member.name, expectedRevision: detail.targetRevision, contentHash: member.contentHash }), t('Skill import queued'))}><Download size={15} />{t('Import Skill')}</Button>}</div></td></tr> })}</tbody></table></div>}
+      {members.length === 0 ? <Empty title={t('No inventory snapshot')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Member')}</th><th>{t('Kind')}</th><th>{t('Scope')}</th><th>{t('Hash')}</th><th>{t('State')}</th><th /></tr></thead><tbody>{members.map((member) => { const managed = isManaged(member); const importable = allowsLocalIntake && member.kind === 'skill' && !member.protected && !managed && !!member.contentHash && !!detail.targetRevision; return <tr key={member.id}><td><strong>{member.name}</strong></td><td><Status value={member.kind} /></td><td>{member.scope || '—'}</td><td><code>{member.contentHash?.slice(0, 12) || '—'}</code></td><td><Status value={member.protected ? 'protected' : managed ? 'managed' : 'unmanaged'} /></td><td><div className="row-actions">{importable && <Button aria-label={`${t('Import Skill')} · ${member.name}`} variant="secondary" onClick={() => queue(api.post(`/targets/${target.id}/skill-import`, { name: member.name, expectedRevision: detail.targetRevision, contentHash: member.contentHash }), t('Skill import queued'))}><Download size={15} />{t('Import Skill')}</Button>}</div></td></tr> })}</tbody></table></div>}
     </section>
     <section className="target-band">
       <header><h3>{t('Backups')}</h3><span>{backups.length}</span></header>
@@ -200,5 +229,3 @@ function RestoreDialog({ target, revision, backup, close, queued }: { target: Ta
   const submit = () => api.post<Operation>(`/targets/${target.id}/restore`, { backupId: backup.id, expectedRevision: revision }).then(queued).catch((reason: Error) => setError(reason.message))
   return <Modal title={`${t('Restore')} · ${target.targetKey}`} close={close}>{error && <ErrorNotice message={error} />}<dl className="detail-list"><div><dt>{t('Backup')}</dt><dd><code>{backup.id}</code></dd></div><div><dt>{t('Created')}</dt><dd>{new Date(backup.createdAt).toLocaleString()}</dd></div><div><dt>{t('Target revision')}</dt><dd><code>{backup.targetRevision}</code></dd></div></dl><div className="modal-actions"><Button variant="secondary" onClick={close}>{t('Cancel')}</Button><Button variant="danger" onClick={submit}><RotateCcw size={16} />{t('Restore')}</Button></div></Modal>
 }
-
-

@@ -134,6 +134,178 @@ func TestGenerationTwoDatabaseInvariantsIntegration(t *testing.T) {
 	}
 }
 
+func TestRelayProjectionRetryAndProbeCadenceIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	target := integrationTarget(t, st, "local/shared-relay")
+	manifest := bridgeprotocol.DesiredManifest{SchemaVersion: bridgeprotocol.ManifestSchemaVersion, Target: bridgeTarget(target), Skills: []bridgeprotocol.SkillMember{}, MCPServers: []bridgeprotocol.MCPMember{}, ManagedMemberIDs: []string{}, RelayPort: 6276}
+	if _, err := st.PinDesiredSnapshot(ctx, target.ID, "target_edit", "", "", manifest); err != nil {
+		t.Fatal(err)
+	}
+	healthy := bridgeprotocol.RelayStatus{State: "active", Healthy: true, Endpoint: "http://127.0.0.1:6276/mcp", FixedPort: 6276, SystemdEnabled: true, Contract: "verified", MemberStatuses: []bridgeprotocol.RelayMemberStatus{}}
+	if _, err := st.UpdateRelayProjection(ctx, target.ID, healthy, bridgeprotocol.HealthHealthy, "", "", map[string]any{}, false, RelayProjectionReset); err != nil {
+		t.Fatal(err)
+	}
+	drift := bridgeprotocol.Diff{Add: []bridgeprotocol.DiffItem{{Kind: "mcp", Name: "missing", Reason: "missing"}}, Replace: []bridgeprotocol.DiffItem{}, Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{}}
+	if _, err := st.UpdateTargetHealth(ctx, target.ID, bridgeprotocol.HealthDrifted, "", "", drift, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpdateRelayProjection(ctx, target.ID, healthy, bridgeprotocol.HealthDrifted, "", "", nil, false, RelayProjectionObserve); err != nil {
+		t.Fatal(err)
+	}
+	projectedDrift, err := st.Target(ctx, target.ID)
+	if err != nil || !strings.Contains(string(projectedDrift.DriftSummary), `"name": "missing"`) && !strings.Contains(string(projectedDrift.DriftSummary), `"name":"missing"`) {
+		t.Fatalf("relay observation erased config drift: drift=%s err=%v", projectedDrift.DriftSummary, err)
+	}
+	created, err := st.EnqueueReconciles(ctx)
+	if err != nil || created != 1 {
+		t.Fatalf("five-minute config reconcile created=%d err=%v", created, err)
+	}
+	operationTargetID, fullProbe := relayScheduledRequest(t, st, target.ID)
+	if fullProbe {
+		t.Fatal("fresh member check unexpectedly requested another full probe")
+	}
+	finishScheduledTarget(t, st, operationTargetID)
+	if _, err := st.pool.Exec(ctx, `UPDATE target_desired_snapshots SET relay_last_member_check_at=now()-interval '31 minutes' WHERE target_id=$1`, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if created, err = st.EnqueueReconciles(ctx); err != nil || created != 1 {
+		t.Fatalf("30-minute member reconcile created=%d err=%v", created, err)
+	}
+	operationTargetID, fullProbe = relayScheduledRequest(t, st, target.ID)
+	if !fullProbe {
+		t.Fatal("stale member check did not request a full relay probe")
+	}
+	finishScheduledTarget(t, st, operationTargetID)
+
+	blocked := bridgeprotocol.RelayStatus{State: "blocked", Endpoint: "http://127.0.0.1:6276/mcp", FixedPort: 6276, SystemdEnabled: true, Contract: "unavailable", ErrorCode: bridgeprotocol.ErrRelayUnhealthy, ErrorReason: "relay unit is not active", MemberStatuses: []bridgeprotocol.RelayMemberStatus{}}
+	if _, err := st.UpdateRelayProjection(ctx, target.ID, blocked, bridgeprotocol.HealthBlocked, blocked.ErrorCode, blocked.ErrorReason, map[string]any{}, false, RelayProjectionReset); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := st.Target(ctx, target.ID)
+	if err != nil || projected.RelayFailureCount != 0 || projected.RelayNextRetryAt == nil || projected.RelaySuspended {
+		t.Fatalf("initial blocked projection=%+v err=%v", projected, err)
+	}
+	if created, err = st.EnqueueReconciles(ctx); err != nil || created != 0 {
+		t.Fatalf("future retry was not deferred: created=%d err=%v", created, err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE target_desired_snapshots SET relay_next_retry_at=now()-interval '1 second' WHERE target_id=$1`, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if created, err = st.EnqueueReconciles(ctx); err != nil || created != 1 {
+		t.Fatalf("due retry created=%d err=%v", created, err)
+	}
+	operationTargetID, fullProbe = relayScheduledRequest(t, st, target.ID)
+	if !fullProbe {
+		t.Fatal("due retry did not request full member health")
+	}
+	finishScheduledTarget(t, st, operationTargetID)
+	for retry := 1; retry <= 3; retry++ {
+		if _, err := st.UpdateRelayProjection(ctx, target.ID, blocked, bridgeprotocol.HealthBlocked, blocked.ErrorCode, blocked.ErrorReason, map[string]any{}, false, RelayProjectionRetry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projected, err = st.Target(ctx, target.ID)
+	if err != nil || projected.RelayFailureCount != 3 || !projected.RelaySuspended || projected.RelayNextRetryAt != nil {
+		t.Fatalf("suspended projection=%+v err=%v", projected, err)
+	}
+	if created, err = st.EnqueueReconciles(ctx); err != nil || created != 0 {
+		t.Fatalf("suspended relay was scheduled: created=%d err=%v", created, err)
+	}
+	if _, err := st.UpdateRelayProjection(ctx, target.ID, healthy, bridgeprotocol.HealthHealthy, "", "", map[string]any{}, false, RelayProjectionReset); err != nil {
+		t.Fatal(err)
+	}
+	projected, err = st.Target(ctx, target.ID)
+	if err != nil || projected.RelayFailureCount != 0 || projected.RelaySuspended || projected.RelayNextRetryAt != nil || projected.RelayLastMemberCheckAt == nil {
+		t.Fatalf("healthy reset projection=%+v err=%v", projected, err)
+	}
+}
+
+func TestRuntimeRelayStatusBootstrapsMissingSnapshotIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	target := integrationTarget(t, st, "local/shared-relay")
+	status := bridgeprotocol.RelayStatus{State: "active", Healthy: true, Endpoint: "http://127.0.0.1:6276/mcp", FixedPort: 6276, SystemdEnabled: true, Contract: "verified", MemberStatuses: []bridgeprotocol.RelayMemberStatus{}}
+	revision := strings.Repeat("a", 64)
+	if err := st.UpdateRuntimeRelayStatus(ctx, target.ID, revision, status); err != nil {
+		t.Fatal(err)
+	}
+	raw, storedRevision, err := st.RuntimeSnapshot(ctx, target.ID)
+	if err != nil || storedRevision != revision {
+		t.Fatalf("runtime snapshot revision=%q err=%v", storedRevision, err)
+	}
+	var inventory struct {
+		Members []bridgeprotocol.InventoryMember `json:"members"`
+		Relay   bridgeprotocol.RelayStatus       `json:"relay"`
+	}
+	if err := json.Unmarshal(raw, &inventory); err != nil {
+		t.Fatal(err)
+	}
+	if inventory.Members == nil || inventory.Relay.FixedPort != 6276 || inventory.Relay.Contract != "verified" {
+		t.Fatalf("runtime relay inventory=%s", raw)
+	}
+}
+
+func TestRelayProjectionMigrationUpgradesGenerationTwoDatabaseIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, false)
+	body, err := migrationFS.ReadFile("migrations/001_initial.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `CREATE TABLE schema_migrations (version bigint PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, string(body)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES(1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var versions, relayColumns int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='target_desired_snapshots' AND column_name LIKE 'relay_%'`).Scan(&relayColumns); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 2 || relayColumns != 5 {
+		t.Fatalf("migration versions=%d relayColumns=%d", versions, relayColumns)
+	}
+}
+
+func relayScheduledRequest(t *testing.T, st *Store, targetID string) (string, bool) {
+	t.Helper()
+	var operationTargetID string
+	var request json.RawMessage
+	if err := st.pool.QueryRow(context.Background(), `SELECT id::text,request FROM operation_targets WHERE target_id=$1 AND status='queued' ORDER BY created_at DESC LIMIT 1`, targetID).Scan(&operationTargetID, &request); err != nil {
+		t.Fatal(err)
+	}
+	var options struct {
+		FullRelayProbe bool `json:"fullRelayProbe"`
+	}
+	if err := json.Unmarshal(request, &options); err != nil {
+		t.Fatal(err)
+	}
+	return operationTargetID, options.FullRelayProbe
+}
+
+func finishScheduledTarget(t *testing.T, st *Store, operationTargetID string) {
+	t.Helper()
+	if _, err := st.pool.Exec(context.Background(), `WITH finished AS (UPDATE operation_targets SET status='succeeded',finished_at=now(),updated_at=now() WHERE id=$1 RETURNING operation_id) UPDATE operations SET status='succeeded',finished_at=now(),updated_at=now() WHERE id=(SELECT operation_id FROM finished)`, operationTargetID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLegacyDatabaseIsRefusedIntegration(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, false)

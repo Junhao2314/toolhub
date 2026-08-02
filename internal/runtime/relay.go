@@ -36,7 +36,7 @@ const (
 	relayIntegrityField    = "toolhub_runtime_integrity"
 )
 
-var mcpmVersionPattern = regexp.MustCompile(`(?i)\b(?:v)?([0-9]+)\.([0-9]+)(?:\.[0-9]+)?\b`)
+var mcpmVersionPattern = regexp.MustCompile(`(?i)\b(?:v)?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?\b`)
 
 type RelayController interface {
 	Action(context.Context, string) (string, error)
@@ -46,10 +46,13 @@ type SystemdRelayController struct{}
 
 func (SystemdRelayController) Action(ctx context.Context, action string) (string, error) {
 	allowed := map[string][]string{
-		"status":  {"is-active", RelayUnitName},
-		"start":   {"start", RelayUnitName},
-		"stop":    {"stop", RelayUnitName},
-		"restart": {"restart", RelayUnitName},
+		"status":     {"is-active", RelayUnitName},
+		"is-enabled": {"is-enabled", RelayUnitName},
+		"enable":     {"enable", RelayUnitName},
+		"start":      {"enable", "--now", RelayUnitName},
+		"start-unit": {"start", RelayUnitName},
+		"stop":       {"disable", "--now", RelayUnitName},
+		"stop-unit":  {"stop", RelayUnitName},
 	}
 	args, ok := allowed[action]
 	if !ok {
@@ -78,7 +81,7 @@ type RelayManager struct {
 func NewRelayManager(controller RelayController, backupRoot string) *RelayManager {
 	return &RelayManager{
 		Controller:        controller,
-		HTTPClient:        &http.Client{Timeout: 3 * time.Second},
+		HTTPClient:        &http.Client{Timeout: relayProbePerRequestTimeout},
 		BackupRoot:        backupRoot,
 		EnvironmentFile:   "/var/lib/toolhub-bridge/mcpm-relay.env",
 		MCPMPath:          MCPMExecutable,
@@ -110,6 +113,10 @@ func (r *RelayManager) ValidateMCPM(ctx context.Context) (string, error) {
 	}
 	if major < 1 {
 		return "", &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm version is incompatible"}
+	}
+	version = match[1] + "." + match[2]
+	if match[3] != "" {
+		version += "." + match[3]
 	}
 	return version, nil
 }
@@ -155,10 +162,6 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 	if current.Revision != request.ExpectedRevision {
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Relay configuration changed after preflight"}
 	}
-	_, err = r.ValidateMCPM(ctx)
-	if err != nil {
-		return bridgeprotocol.TargetResult{}, err
-	}
 	preserveUnmanaged := request.OperationKind == "reconcile"
 	matches, err := relayConfigurationMatches(paths, r.EnvironmentFile, request.Manifest, request.SecretValues, preserveUnmanaged)
 	if err != nil {
@@ -166,25 +169,24 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 	}
 	if preserveUnmanaged && matches {
 		if request.IntentionalPaused {
-			return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: current.Revision, Repaired: false}, nil
+			status, repaired := r.EnsurePaused(ctx, request.Manifest.RelayPort, &request.Manifest)
+			health := relayProjectedHealth(status)
+			return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: current.Revision, Repaired: repaired, Relay: &status, Error: relayStatusError(status)}, nil
 		}
-		status, _ := r.Status(ctx, request.Manifest.RelayPort, false)
+		var status bridgeprotocol.RelayStatus
+		if request.FullRelayProbe {
+			status, _ = r.Status(ctx, request.Manifest.RelayPort, false, request.Manifest)
+		} else {
+			status, _ = r.Status(ctx, request.Manifest.RelayPort, false)
+		}
 		if status.Healthy {
-			return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: current.Revision, Repaired: false}, nil
+			return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: current.Revision, Repaired: false, Relay: &status}, nil
 		}
-		if err := r.restartAndCheck(ctx, request.Manifest.RelayPort, status.State); err != nil {
-			return bridgeprotocol.TargetResult{}, err
+		relayStatus := r.RestartAndCheck(ctx, request.Manifest.RelayPort, &request.Manifest)
+		if !relayStatus.Healthy {
+			return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthBlocked, TargetRevision: current.Revision, Repaired: true, Relay: &relayStatus, Error: relayStatusError(relayStatus)}, nil
 		}
-		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: current.Revision, Repaired: true}, nil
-	}
-	status := bridgeprotocol.RelayStatus{}
-	if !(preserveUnmanaged && request.IntentionalPaused) {
-		status, _ = r.Status(ctx, request.Manifest.RelayPort, false)
-	}
-	if !status.Healthy && status.State != "active" && !(preserveUnmanaged && request.IntentionalPaused) {
-		if err := r.checkPortAvailable(request.Manifest.RelayPort); err != nil {
-			return bridgeprotocol.TargetResult{}, err
-		}
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: current.Revision, Repaired: true, Relay: &relayStatus}, nil
 	}
 	backup, err := r.backup(user, request.Target, paths, request.OperationID, current.Revision)
 	if err != nil {
@@ -202,42 +204,101 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 		_ = restoreRelayFiles(rollback)
 		return bridgeprotocol.TargetResult{}, err
 	}
+	if matches, err := relayConfigurationMatches(paths, r.EnvironmentFile, request.Manifest, request.SecretValues, preserveUnmanaged); err != nil || !matches {
+		_ = restoreRelayFiles(rollback)
+		if err != nil {
+			return bridgeprotocol.TargetResult{}, err
+		}
+		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrAtomicWrite, Message: "Relay configuration integrity validation failed"}
+	}
 	if preserveUnmanaged && request.IntentionalPaused {
 		after, scanErr := (&Manager{}).scanRelay(paths)
 		if scanErr != nil {
 			_ = restoreRelayFiles(rollback)
 			return bridgeprotocol.TargetResult{}, scanErr
 		}
-		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: true}, nil
-	}
-	if err := r.restartAndCheck(ctx, request.Manifest.RelayPort, status.State); err != nil {
-		_ = restoreRelayFiles(rollback)
-		_, _ = r.Controller.Action(ctx, "restart")
-		return bridgeprotocol.TargetResult{}, err
+		relayStatus, _ := r.EnsurePaused(ctx, request.Manifest.RelayPort, &request.Manifest)
+		health := relayProjectedHealth(relayStatus)
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: true, Relay: &relayStatus, Error: relayStatusError(relayStatus)}, nil
 	}
 	after, err := (&Manager{}).scanRelay(paths)
 	if err != nil {
+		_ = restoreRelayFiles(rollback)
 		return bridgeprotocol.TargetResult{}, err
 	}
-	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: preserveUnmanaged || !matches, Error: nil}, nil
+	relayStatus := r.RestartAndCheck(ctx, request.Manifest.RelayPort, &request.Manifest)
+	health := bridgeprotocol.HealthHealthy
+	if !relayStatus.Healthy {
+		health = bridgeprotocol.HealthBlocked
+	}
+	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: preserveUnmanaged || !matches, Relay: &relayStatus, Error: relayStatusError(relayStatus)}, nil
 }
 
-func (r *RelayManager) restartAndCheck(ctx context.Context, port int, currentState string) error {
-	if currentState != "active" {
-		if err := r.checkPortAvailable(port); err != nil {
-			return err
+func (r *RelayManager) RestartAndCheck(ctx context.Context, port int, manifest *bridgeprotocol.DesiredManifest) bridgeprotocol.RelayStatus {
+	_, contractErr := r.ValidateMCPM(ctx)
+	if err := r.RestartFixed(ctx, port); err != nil {
+		if contractErr != nil {
+			return r.relayBlockedFromError(ctx, port, contractErr, manifest)
 		}
+		var apiErr *bridgeprotocol.APIError
+		if errors.As(err, &apiErr) {
+			return r.relayBlockedStatus(ctx, port, apiErr.Code, apiErr.Message, manifest)
+		}
+		return r.relayBlockedStatus(ctx, port, bridgeprotocol.ErrRelayUnhealthy, "relay could not be restarted", manifest)
 	}
-	if _, err := r.Controller.Action(ctx, "restart"); err != nil {
-		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay could not be restarted"}
+	if contractErr != nil {
+		return r.relayBlockedFromError(ctx, port, contractErr, manifest)
 	}
-	if err := r.waitUntilHealthy(ctx, port); err != nil {
-		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay failed its health check after restart"}
+	if manifest == nil {
+		status, _ := r.Status(ctx, port, false)
+		return status
+	}
+	status, _ := r.waitUntilHealthy(ctx, port, *manifest)
+	return status
+}
+
+func (r *RelayManager) RestartFixed(ctx context.Context, port int) error {
+	if _, err := r.Controller.Action(ctx, "enable"); err != nil {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "relay unit could not be enabled"}
+	}
+	if _, err := r.Controller.Action(ctx, "stop-unit"); err != nil {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "relay unit could not be stopped before restart"}
+	}
+	if err := r.waitUntilPortAvailable(ctx, port); err != nil {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayPortConflict, Message: "fixed relay port did not become available after stop"}
+	}
+	if _, err := r.Controller.Action(ctx, "start-unit"); err != nil {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "relay unit could not be started"}
 	}
 	return nil
 }
 
-func (r *RelayManager) waitUntilHealthy(ctx context.Context, port int) error {
+func (r *RelayManager) StartAndCheck(ctx context.Context, port int, manifest *bridgeprotocol.DesiredManifest) bridgeprotocol.RelayStatus {
+	_, contractErr := r.ValidateMCPM(ctx)
+	state, _ := r.Controller.Action(ctx, "status")
+	if strings.TrimSpace(state) != "active" {
+		if err := r.checkPortAvailable(port); err != nil {
+			return r.relayBlockedStatus(ctx, port, bridgeprotocol.ErrRelayPortConflict, "fixed relay port is already in use", manifest)
+		}
+	}
+	if _, err := r.Controller.Action(ctx, "start"); err != nil {
+		if contractErr != nil {
+			return r.relayBlockedFromError(ctx, port, contractErr, manifest)
+		}
+		return r.relayBlockedStatus(ctx, port, bridgeprotocol.ErrRelayUnhealthy, "relay unit could not be enabled and started", manifest)
+	}
+	if contractErr != nil {
+		return r.relayBlockedFromError(ctx, port, contractErr, manifest)
+	}
+	if manifest == nil {
+		status, _ := r.Status(ctx, port, false)
+		return status
+	}
+	status, _ := r.waitUntilHealthy(ctx, port, *manifest)
+	return status
+}
+
+func (r *RelayManager) waitUntilHealthy(ctx context.Context, port int, manifest bridgeprotocol.DesiredManifest) (bridgeprotocol.RelayStatus, error) {
 	interval := r.readinessInterval
 	if interval <= 0 {
 		interval = relayReadinessInterval
@@ -247,17 +308,39 @@ func (r *RelayManager) waitUntilHealthy(ctx context.Context, port int) error {
 		timeout = relayReadinessTimeout
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		status, _ := r.Status(waitCtx, port, false)
 		if status.Healthy {
-			return nil
+			cancel()
+			return r.Status(ctx, port, false, manifest)
 		}
 		select {
 		case <-waitCtx.Done():
-			return waitCtx.Err()
+			cancel()
+			if status.ErrorCode == "" {
+				status.ErrorCode = bridgeprotocol.ErrRelayUnhealthy
+				status.ErrorReason = "Relay failed its health check before the readiness timeout"
+			}
+			return status, waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (r *RelayManager) waitUntilPortAvailable(ctx context.Context, port int) error {
+	deadline, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := r.checkPortAvailable(port); err == nil {
+			return nil
+		}
+		select {
+		case <-deadline.Done():
+			return deadline.Err()
 		case <-ticker.C:
 		}
 	}
@@ -268,6 +351,20 @@ func (r *RelayManager) checkPortAvailable(port int) error {
 		return ensureRelayPortAvailable(port)
 	}
 	return r.portAvailable(port)
+}
+
+func (r *RelayManager) EnsurePaused(ctx context.Context, port int, manifest *bridgeprotocol.DesiredManifest) (bridgeprotocol.RelayStatus, bool) {
+	status, _ := r.Status(ctx, port, true)
+	if status.Healthy {
+		return status, false
+	}
+	if _, err := r.Controller.Action(ctx, "stop"); err != nil {
+		blocked := r.relayBlockedStatus(ctx, port, bridgeprotocol.ErrRelayUnhealthy, "relay unit could not be disabled and stopped", manifest)
+		blocked.IntentionalPaused = true
+		return blocked, false
+	}
+	status, _ = r.Status(ctx, port, true)
+	return status, true
 }
 
 func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request bridgeprotocol.CommitRequest) (bridgeprotocol.TargetResult, error) {
@@ -281,13 +378,6 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 	}
 	if request.ExpectedRevision != "" && current.Revision != request.ExpectedRevision {
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Relay changed before restore"}
-	}
-	if _, err := r.ValidateMCPM(ctx); err != nil {
-		return bridgeprotocol.TargetResult{}, err
-	}
-	currentState := ""
-	if !request.IntentionalPaused {
-		currentState, _ = r.Controller.Action(ctx, "status")
 	}
 	recovery, err := r.backup(user, request.Target, paths, request.OperationID, current.Revision)
 	if err != nil {
@@ -310,45 +400,116 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 		_ = restoreRelayFiles(rollback)
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrBackup, Message: "Restored relay configuration does not match the pinned backup manifest"}
 	}
-	if !request.IntentionalPaused {
-		if err := r.restartAndCheck(ctx, request.Manifest.RelayPort, currentState); err != nil {
-			_ = restoreRelayFiles(rollback)
-			_, _ = r.Controller.Action(ctx, "restart")
-			return bridgeprotocol.TargetResult{}, err
-		}
-	}
 	after, err := (&Manager{}).scanRelay(paths)
 	if err != nil {
 		_ = restoreRelayFiles(rollback)
-		if !request.IntentionalPaused {
-			_, _ = r.Controller.Action(ctx, "restart")
+		if request.IntentionalPaused {
+			_, _ = r.EnsurePaused(ctx, request.Manifest.RelayPort, &request.Manifest)
+		} else {
+			_ = r.RestartFixed(ctx, request.Manifest.RelayPort)
 		}
 		return bridgeprotocol.TargetResult{}, err
 	}
-	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: after.Revision, BackupID: recovery.Backup.ID, Manifest: &request.Manifest}, nil
+	var relayStatus bridgeprotocol.RelayStatus
+	if request.IntentionalPaused {
+		relayStatus, _ = r.EnsurePaused(ctx, request.Manifest.RelayPort, &request.Manifest)
+	} else {
+		relayStatus = r.RestartAndCheck(ctx, request.Manifest.RelayPort, &request.Manifest)
+	}
+	health := relayProjectedHealth(relayStatus)
+	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: after.Revision, BackupID: recovery.Backup.ID, Manifest: &request.Manifest, Relay: &relayStatus, Error: relayStatusError(relayStatus)}, nil
 }
 
-func (r *RelayManager) Status(ctx context.Context, port int, intentionalPaused bool) (bridgeprotocol.RelayStatus, error) {
+func (r *RelayManager) Status(ctx context.Context, port int, intentionalPaused bool, manifests ...bridgeprotocol.DesiredManifest) (bridgeprotocol.RelayStatus, error) {
 	state, err := r.Controller.Action(ctx, "status")
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
-	status := bridgeprotocol.RelayStatus{State: state, Endpoint: endpoint, IntentionalPaused: intentionalPaused}
+	enabledState, _ := r.Controller.Action(ctx, "is-enabled")
+	status := bridgeprotocol.RelayStatus{State: state, Endpoint: endpoint, FixedPort: port, IntentionalPaused: intentionalPaused, SystemdEnabled: strings.TrimSpace(enabledState) == "enabled"}
 	if intentionalPaused {
+		status.Healthy = !relayStateRunning(state) && !status.SystemdEnabled
+		if !status.Healthy {
+			status.ErrorCode = bridgeprotocol.ErrRelayUnhealthy
+			status.ErrorReason = "intentional relay pause is not enforced"
+		}
 		return status, nil
 	}
 	if err != nil || state != "active" {
 		status.ErrorCode = bridgeprotocol.ErrRelayUnhealthy
+		status.ErrorReason = "relay unit is not active"
+		if len(manifests) > 0 {
+			status.Contract = "unavailable"
+			status.MemberStatuses = unavailableRelayMembers(manifests[0], status.ErrorCode, status.ErrorReason, r.relayNow().UTC())
+		}
 		return status, nil
 	}
+	if len(manifests) > 0 {
+		probed, probeErr := r.ProbeMembers(ctx, port, manifests[0])
+		probed.State = status.State
+		probed.SystemdEnabled = status.SystemdEnabled
+		probed.IntentionalPaused = status.IntentionalPaused
+		if probeErr != nil && probed.ErrorCode == "" {
+			probed.ErrorCode = bridgeprotocol.ErrRelayUnhealthy
+			probed.ErrorReason = safeRelayReason(probeErr)
+		}
+		return probed, nil
+	}
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	response, err := r.HTTPClient.Do(request)
+	client := r.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
 	if err == nil {
-		response.Body.Close()
+		_ = response.Body.Close()
 		status.Healthy = response.StatusCode >= 200 && response.StatusCode < 500
 	}
 	if !status.Healthy {
 		status.ErrorCode = bridgeprotocol.ErrRelayUnhealthy
+		status.ErrorReason = "relay endpoint did not pass HTTP health"
 	}
 	return status, nil
+}
+
+func relayStateRunning(state string) bool {
+	switch strings.TrimSpace(state) {
+	case "active", "activating", "reloading", "deactivating":
+		return true
+	default:
+		return false
+	}
+}
+
+func relayProjectedHealth(status bridgeprotocol.RelayStatus) string {
+	if status.Healthy {
+		return bridgeprotocol.HealthHealthy
+	}
+	return bridgeprotocol.HealthBlocked
+}
+
+func (r *RelayManager) relayBlockedFromError(ctx context.Context, port int, err error, manifest *bridgeprotocol.DesiredManifest) bridgeprotocol.RelayStatus {
+	code := relayProbeErrorCode(err, bridgeprotocol.ErrRelayUnhealthy)
+	reason := relayProbeSafeMessage(err, "relay runtime contract could not be verified")
+	return r.relayBlockedStatus(ctx, port, code, reason, manifest)
+}
+
+func (r *RelayManager) relayBlockedStatus(ctx context.Context, port int, code, reason string, manifest *bridgeprotocol.DesiredManifest) bridgeprotocol.RelayStatus {
+	enabledState, _ := r.Controller.Action(ctx, "is-enabled")
+	status := bridgeprotocol.RelayStatus{State: "blocked", Endpoint: fmt.Sprintf("http://127.0.0.1:%d/mcp", port), FixedPort: port, SystemdEnabled: strings.TrimSpace(enabledState) == "enabled", Contract: "unavailable", ErrorCode: code, ErrorReason: safeRelayReason(errors.New(reason))}
+	if manifest != nil {
+		status.MemberStatuses = unavailableRelayMembers(*manifest, code, status.ErrorReason, r.relayNow().UTC())
+	}
+	return status
+}
+
+func relayStatusError(status bridgeprotocol.RelayStatus) *bridgeprotocol.APIError {
+	if status.Healthy || status.ErrorCode == "" {
+		return nil
+	}
+	message := status.ErrorReason
+	if message == "" {
+		message = "Relay runtime is blocked"
+	}
+	return &bridgeprotocol.APIError{Code: status.ErrorCode, Message: message, Retryable: true}
 }
 
 func ensureRelayPortAvailable(port int) error {

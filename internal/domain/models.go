@@ -43,23 +43,28 @@ type Node struct {
 }
 
 type Target struct {
-	ID               string          `json:"id"`
-	TargetKey        string          `json:"targetKey"`
-	NodeID           string          `json:"nodeId"`
-	NodeName         string          `json:"nodeName"`
-	NodeKind         string          `json:"nodeKind"`
-	SaltMinionID     string          `json:"saltMinionId,omitempty"`
-	Runtime          string          `json:"runtime"`
-	ManagedUsername  string          `json:"managedUsername"`
-	Writable         bool            `json:"writable"`
-	Health           string          `json:"health"`
-	DesiredRevision  int64           `json:"desiredRevision"`
-	TargetRevision   string          `json:"targetRevision,omitempty"`
-	DriftSummary     json.RawMessage `json:"driftSummary,omitempty"`
-	LastScannedAt    *time.Time      `json:"lastScannedAt,omitempty"`
-	LastReconciledAt *time.Time      `json:"lastReconciledAt,omitempty"`
-	ErrorCode        string          `json:"errorCode,omitempty"`
-	ErrorReason      string          `json:"errorReason,omitempty"`
+	ID                     string          `json:"id"`
+	TargetKey              string          `json:"targetKey"`
+	NodeID                 string          `json:"nodeId"`
+	NodeName               string          `json:"nodeName"`
+	NodeKind               string          `json:"nodeKind"`
+	SaltMinionID           string          `json:"saltMinionId,omitempty"`
+	Runtime                string          `json:"runtime"`
+	ManagedUsername        string          `json:"managedUsername"`
+	Writable               bool            `json:"writable"`
+	Health                 string          `json:"health"`
+	DesiredRevision        int64           `json:"desiredRevision"`
+	TargetRevision         string          `json:"targetRevision,omitempty"`
+	DriftSummary           json.RawMessage `json:"driftSummary,omitempty"`
+	LastScannedAt          *time.Time      `json:"lastScannedAt,omitempty"`
+	LastReconciledAt       *time.Time      `json:"lastReconciledAt,omitempty"`
+	ErrorCode              string          `json:"errorCode,omitempty"`
+	ErrorReason            string          `json:"errorReason,omitempty"`
+	RelayFailureCount      int             `json:"relayFailureCount"`
+	RelayNextRetryAt       *time.Time      `json:"relayNextRetryAt,omitempty"`
+	RelaySuspended         bool            `json:"relaySuspended"`
+	RelayLastMemberCheckAt *time.Time      `json:"relayLastMemberCheckAt,omitempty"`
+	RelayMemberStatuses    json.RawMessage `json:"relayMemberStatuses"`
 }
 
 type Skill struct {

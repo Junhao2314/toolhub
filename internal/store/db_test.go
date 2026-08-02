@@ -38,6 +38,19 @@ func TestGenerationTwoMigrationContainsFreshOnlyBoundaries(t *testing.T) {
 	}
 }
 
+func TestRelayProjectionUsesAdditiveMigration(t *testing.T) {
+	body, err := migrationFS.ReadFile("migrations/002_relay_projection.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{"ALTER TABLE target_desired_snapshots", "relay_failure_count", "relay_next_retry_at", "relay_suspended", "relay_last_member_check_at", "relay_member_status", "jsonb_typeof(relay_member_status) = 'array'"} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("relay projection migration is missing %q", required)
+		}
+	}
+}
+
 func TestLegacySchemaErrorIsActionable(t *testing.T) {
 	err := legacySchemaError()
 	if !strings.Contains(err.Error(), "fresh PostgreSQL volume") || !strings.Contains(err.Error(), "generation 2") {

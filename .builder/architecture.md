@@ -69,12 +69,17 @@ targets cancelled. A running destructive step completes atomically.
 ## Reconcile
 
 Every five minutes the scheduler queues targets with an active desired
-snapshot. An overlapping tick marks one pending rerun instead of dispatching a
-second target operation. Reconcile verifies/repairs pinned managed members and
-preserves content added after Apply. No drift means no backup and no write.
+snapshot. Shared-relay registry/config drift uses the same cadence, while a
+healthy relay gets full MCP capability discovery every 30 minutes. Runtime
+failures use durable 5-minute, 15-minute, and 1-hour retries, then suspend until
+manual recovery. An overlapping tick marks one pending rerun instead of
+dispatching a second target operation. Reconcile verifies/repairs pinned managed
+members and preserves content added after Apply. No drift means no backup and no
+write.
 
 Health is `healthy`, `drifted`, `repairing`, `blocked`, or `unavailable`.
-Offline/failed targets are checked again on the next tick. Alerts/audit are
+Non-relay offline/failed targets are checked again on the next tick; relay
+runtime failures follow the bounded retry schedule above. Alerts/audit are
 written only for meaningful state/error changes.
 
 ## Trust Boundaries
@@ -92,7 +97,8 @@ written only for meaningful state/error changes.
 
 ## Fresh Schema
 
-`internal/store/migrations/001_initial.sql` is the generation-2 initial schema.
+`internal/store/migrations/001_initial.sql` is the generation-2 initial schema;
+released schema changes use additive numbered migrations such as `002`.
 `Store.Migrate` rejects every non-empty database that does not already contain
 `app_meta.schema_generation=2` before applying SQL. Old data is not migrated.
 

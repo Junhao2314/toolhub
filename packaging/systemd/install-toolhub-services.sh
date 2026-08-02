@@ -18,6 +18,10 @@ case "$managed_home" in
     *) printf '%s\n' 'managed user home must be absolute' >&2; exit 1 ;;
 esac
 [ "$managed_home" != "/" ] || { printf '%s\n' 'managed user home cannot be /' >&2; exit 1; }
+[ -d "$managed_home" ] || { printf '%s\n' 'managed user home must be an existing directory' >&2; exit 1; }
+canonical_home="$(readlink -f -- "$managed_home")"
+[ -n "$canonical_home" ] && [ "$canonical_home" = "$managed_home" ] || { printf '%s\n' 'managed user home must be canonical and must not be a symlink' >&2; exit 1; }
+managed_home="$canonical_home"
 [ -x /usr/local/sbin/toolhub-bridge ] || { printf '%s\n' '/usr/local/sbin/toolhub-bridge is missing' >&2; exit 1; }
 
 install -d -m 0700 /etc/toolhub-bridge /var/lib/toolhub-bridge
@@ -38,6 +42,7 @@ sed -e "s|@TOOLHUB_MANAGED_HOME@|$managed_home|g" \
     "$source_dir/toolhub-bridge.service" > /etc/systemd/system/toolhub-bridge.service
 sed -e "s|@TOOLHUB_MANAGED_USER@|$managed_user|g" \
     -e "s|@TOOLHUB_MANAGED_GROUP@|$managed_group|g" \
+    -e "s|@TOOLHUB_MANAGED_HOME@|$managed_home|g" \
     "$source_dir/toolhub-mcpm-relay.service" > /etc/systemd/system/toolhub-mcpm-relay.service
 chmod 0644 /etc/systemd/system/toolhub-bridge.service /etc/systemd/system/toolhub-mcpm-relay.service
 systemctl daemon-reload

@@ -108,7 +108,7 @@ func (m *Multi) selectSources(selector string) ([]Source, error) {
 // items alongside per-source error messages.
 func (m *Multi) Search(ctx context.Context, selector, query string, page, limit int) (SearchResponse, error) {
 	query = strings.TrimSpace(query)
-	if len(query) < 2 || len(query) > 200 {
+	if (len(query) > 0 && len(query) < 2) || len(query) > 200 {
 		return SearchResponse{}, ErrInvalidQuery
 	}
 	if page < 1 {
@@ -253,7 +253,7 @@ func safeExternalURL(rawURL string) string {
 // SearchRaw returns the unmodified SkillsMP response body, using a 10 minute cache.
 func (c *Client) SearchRaw(ctx context.Context, query string, page, limit int) (json.RawMessage, error) {
 	query = strings.TrimSpace(query)
-	if len(query) < 2 || len(query) > 200 {
+	if (len(query) > 0 && len(query) < 2) || len(query) > 200 {
 		return nil, ErrInvalidQuery
 	}
 	if page < 1 {
@@ -262,7 +262,11 @@ func (c *Client) SearchRaw(ctx context.Context, query string, page, limit int) (
 	if limit < 1 || limit > 100 {
 		limit = 24
 	}
-	key := fmt.Sprintf("%s:%d:%d", strings.ToLower(query), page, limit)
+	searchQ := query
+	if searchQ == "" {
+		searchQ = "tool"
+	}
+	key := fmt.Sprintf("%s:%d:%d", strings.ToLower(searchQ), page, limit)
 	c.mu.Lock()
 	if cached, ok := c.cache[key]; ok && time.Now().Before(cached.expiresAt) {
 		body := append(json.RawMessage(nil), cached.body...)
@@ -276,7 +280,7 @@ func (c *Client) SearchRaw(ctx context.Context, query string, page, limit int) (
 		return nil, err
 	}
 	values := endpoint.Query()
-	values.Set("q", query)
+	values.Set("q", searchQ)
 	values.Set("page", strconv.Itoa(page))
 	values.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = values.Encode()

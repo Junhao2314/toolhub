@@ -104,11 +104,11 @@ func (s *Store) ListTargets(ctx context.Context) (json.RawMessage, error) {
 	return s.JSONList(ctx, targetSelect+` WHERE n.archived_at IS NULL ORDER BY n.kind,n.name,t.runtime`)
 }
 
-const targetSelect = `SELECT t.id::text,t.target_key AS "targetKey",t.node_id::text AS "nodeId",n.name AS "nodeName",n.kind AS "nodeKind",coalesce(n.salt_minion_id,'') AS "saltMinionId",t.runtime,t.managed_username AS "managedUsername",t.writable,CASE WHEN EXISTS(SELECT 1 FROM operation_targets active_ot JOIN operations active_o ON active_o.id=active_ot.operation_id WHERE active_ot.target_id=t.id AND active_ot.status='running' AND active_o.kind='reconcile') THEN 'repairing' ELSE coalesce(ds.health,'drifted') END AS health,coalesce(ds.desired_revision,0) AS "desiredRevision",coalesce(rs.revision,'') AS "targetRevision",coalesce(ds.drift_summary,'{}'::jsonb) AS "driftSummary",rs.scanned_at AS "lastScannedAt",ds.last_reconciled_at AS "lastReconciledAt",coalesce(ds.error_code,'') AS "errorCode",coalesce(ds.error_reason,'') AS "errorReason" FROM targets t JOIN nodes n ON n.id=t.node_id LEFT JOIN runtime_snapshots rs ON rs.target_id=t.id LEFT JOIN target_desired_snapshots ds ON ds.target_id=t.id`
+const targetSelect = `SELECT t.id::text,t.target_key AS "targetKey",t.node_id::text AS "nodeId",n.name AS "nodeName",n.kind AS "nodeKind",coalesce(n.salt_minion_id,'') AS "saltMinionId",t.runtime,t.managed_username AS "managedUsername",t.writable,CASE WHEN EXISTS(SELECT 1 FROM operation_targets active_ot JOIN operations active_o ON active_o.id=active_ot.operation_id WHERE active_ot.target_id=t.id AND active_ot.status='running' AND active_o.kind='reconcile') THEN 'repairing' ELSE coalesce(ds.health,'drifted') END AS health,coalesce(ds.desired_revision,0) AS "desiredRevision",coalesce(rs.revision,'') AS "targetRevision",coalesce(ds.drift_summary,'{}'::jsonb) AS "driftSummary",rs.scanned_at AS "lastScannedAt",ds.last_reconciled_at AS "lastReconciledAt",coalesce(ds.error_code,'') AS "errorCode",coalesce(ds.error_reason,'') AS "errorReason",coalesce(ds.relay_failure_count,0) AS "relayFailureCount",ds.relay_next_retry_at AS "relayNextRetryAt",coalesce(ds.relay_suspended,false) AS "relaySuspended",ds.relay_last_member_check_at AS "relayLastMemberCheckAt",coalesce(ds.relay_member_status,'[]'::jsonb) AS "relayMemberStatuses" FROM targets t JOIN nodes n ON n.id=t.node_id LEFT JOIN runtime_snapshots rs ON rs.target_id=t.id LEFT JOIN target_desired_snapshots ds ON ds.target_id=t.id`
 
 func (s *Store) Target(ctx context.Context, id string) (domain.Target, error) {
 	var target domain.Target
-	err := s.pool.QueryRow(ctx, targetSelect+` WHERE t.id=$1`, id).Scan(&target.ID, &target.TargetKey, &target.NodeID, &target.NodeName, &target.NodeKind, &target.SaltMinionID, &target.Runtime, &target.ManagedUsername, &target.Writable, &target.Health, &target.DesiredRevision, &target.TargetRevision, &target.DriftSummary, &target.LastScannedAt, &target.LastReconciledAt, &target.ErrorCode, &target.ErrorReason)
+	err := s.pool.QueryRow(ctx, targetSelect+` WHERE t.id=$1`, id).Scan(&target.ID, &target.TargetKey, &target.NodeID, &target.NodeName, &target.NodeKind, &target.SaltMinionID, &target.Runtime, &target.ManagedUsername, &target.Writable, &target.Health, &target.DesiredRevision, &target.TargetRevision, &target.DriftSummary, &target.LastScannedAt, &target.LastReconciledAt, &target.ErrorCode, &target.ErrorReason, &target.RelayFailureCount, &target.RelayNextRetryAt, &target.RelaySuspended, &target.RelayLastMemberCheckAt, &target.RelayMemberStatuses)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Target{}, ErrNotFound
 	}
@@ -135,6 +135,19 @@ func (s *Store) RuntimeSnapshot(ctx context.Context, targetID string) (json.RawM
 		return nil, "", ErrNotFound
 	}
 	return json.RawMessage(body), revision, err
+}
+
+func (s *Store) UpdateRuntimeRelayStatus(ctx context.Context, targetID, revision string, status bridgeprotocol.RelayStatus) error {
+	body, err := json.Marshal(status)
+	if err != nil {
+		return err
+	}
+	if bridgeprotocol.IsSHA256(revision) {
+		_, err = s.pool.Exec(ctx, `INSERT INTO runtime_snapshots(target_id,revision,inventory) VALUES($1,$2,jsonb_build_object('members','[]'::jsonb,'relay',$3::jsonb)) ON CONFLICT(target_id) DO UPDATE SET inventory=jsonb_set(runtime_snapshots.inventory,'{relay}',$3::jsonb,true)`, targetID, revision, jsonText(body))
+		return err
+	}
+	_, err = s.pool.Exec(ctx, `UPDATE runtime_snapshots SET inventory=jsonb_set(inventory,'{relay}',$2::jsonb,true) WHERE target_id=$1`, targetID, jsonText(body))
+	return err
 }
 
 func (s *Store) UpdateNodeManagedUsername(ctx context.Context, nodeID, username string) error {

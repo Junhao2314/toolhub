@@ -128,7 +128,12 @@ test('shared relay inventory, controls, and write-only MCP secrets use generatio
   const targetID = '11111111-1111-4111-8111-111111111111'
   const nodeID = '22222222-2222-4222-8222-222222222222'
   const serverID = '33333333-3333-4333-8333-333333333333'
-  const target = { id: targetID, targetKey: 'local/shared-relay', nodeId: nodeID, nodeName: 'local', nodeKind: 'local', runtime: 'shared-relay', managedUsername: 'runner', writable: true, health: 'healthy', desiredRevision: 3, targetRevision: 'relay-revision', lastScannedAt: now }
+  const unavailableMemberID = '99999999-9999-4999-8999-999999999999'
+  const relayMemberStatuses = [
+    { memberId: '66666666-6666-4666-8666-666666666666', name: 'search', status: 'ready', capabilityKinds: ['tools'], capabilities: { tools: 3, resources: 0, resourceTemplates: 0, prompts: 0 }, checkedAt: now },
+    { memberId: unavailableMemberID, name: 'secondary', status: 'unavailable', capabilityKinds: [], capabilities: { tools: 0, resources: 0, resourceTemplates: 0, prompts: 0 }, checkedAt: now, errorCode: 'mcpm_incompatible', errorReason: 'no attributed capability was discovered' },
+  ]
+  const target = { id: targetID, targetKey: 'local/shared-relay', nodeId: nodeID, nodeName: 'local', nodeKind: 'local', runtime: 'shared-relay', managedUsername: 'runner', writable: true, health: 'blocked', desiredRevision: 3, targetRevision: 'relay-revision', lastScannedAt: now, errorCode: 'mcpm_incompatible', errorReason: 'relay namespace contract is incomplete', relayFailureCount: 3, relaySuspended: true, relayLastMemberCheckAt: now, relayMemberStatuses }
   const server = { id: serverID, name: 'search', description: 'Shared search server', revision: 2, transport: 'http', args: [], url: 'https://example.invalid/mcp', envKeys: ['API_TOKEN'], headerKeys: [], contentHash: 'b'.repeat(64), createdAt: now, updatedAt: now }
   let relayAction = ''
   let secretUpdate: { env?: Record<string, string> } | null = null
@@ -142,7 +147,7 @@ test('shared relay inventory, controls, and write-only MCP secrets use generatio
     if (path === '/api/v1/skills') return route.fulfill({ json: { items: [] } })
     if (path === '/api/v1/mcp/servers' && request.method() === 'GET') return route.fulfill({ json: { items: [server] } })
     if (path === `/api/v1/targets/${targetID}`) {
-      return route.fulfill({ json: { target, targetRevision: 'relay-revision', inventory: { relay: { state: 'active', endpoint: 'http://127.0.0.1:6276/mcp', healthy: true, intentionalPaused: false }, members: [{ id: 'mcp:search', kind: 'mcp', name: 'search', contentHash: 'c'.repeat(64), protected: false, scope: 'user' }, { id: 'anchor:claude', kind: 'anchor', name: 'toolhub-relay', contentHash: 'd'.repeat(64), protected: false, scope: 'user' }, { id: 'anchor:codex', kind: 'anchor', name: 'toolhub-relay', contentHash: 'e'.repeat(64), protected: false, scope: 'user' }, { id: 'mcp:user-extra', kind: 'mcp', name: 'user-extra', contentHash: 'f'.repeat(64), protected: false, scope: 'user' }] }, desired: { snapshot: { id: '44444444-4444-4444-8444-444444444444', revision: 3, sourceKind: 'profile_apply', profileRevision: 7, manifestHash: 'a'.repeat(64), createdAt: now }, manifest: { schemaVersion: 1, target: { id: targetID, nodeId: nodeID, nodeKind: 'local', runtime: 'shared-relay', managedUsername: 'runner' }, profileId: '55555555-5555-4555-8555-555555555555', profileRevision: 7, skills: [], mcpServers: [{ memberId: '66666666-6666-4666-8666-666666666666', serverId: serverID, revision: 2, name: 'search', transport: 'http', url: server.url, contentHash: server.contentHash }], managedMemberIds: ['66666666-6666-4666-8666-666666666666'], relayPort: 6276 } } } })
+      return route.fulfill({ json: { target, targetRevision: 'relay-revision', inventory: { relay: { state: 'active', endpoint: 'http://127.0.0.1:6276/mcp', fixedPort: 6276, systemdEnabled: true, healthy: false, intentionalPaused: false, version: '1.2.3', contract: 'incompatible', memberStatuses: relayMemberStatuses, errorCode: 'mcpm_incompatible', errorReason: 'relay namespace contract is incomplete' }, members: [{ id: 'mcp:search', kind: 'mcp', name: 'search', contentHash: 'c'.repeat(64), protected: false, scope: 'user' }, { id: 'anchor:claude', kind: 'anchor', name: 'toolhub-relay', contentHash: 'd'.repeat(64), protected: false, scope: 'user' }, { id: 'anchor:codex', kind: 'anchor', name: 'toolhub-relay', contentHash: 'e'.repeat(64), protected: false, scope: 'user' }, { id: 'mcp:user-extra', kind: 'mcp', name: 'user-extra', contentHash: 'f'.repeat(64), protected: false, scope: 'user' }] }, desired: { snapshot: { id: '44444444-4444-4444-8444-444444444444', revision: 3, sourceKind: 'profile_apply', profileRevision: 7, manifestHash: 'a'.repeat(64), createdAt: now }, manifest: { schemaVersion: 1, target: { id: targetID, nodeId: nodeID, nodeKind: 'local', runtime: 'shared-relay', managedUsername: 'runner' }, profileId: '55555555-5555-4555-8555-555555555555', profileRevision: 7, skills: [], mcpServers: [{ memberId: '66666666-6666-4666-8666-666666666666', serverId: serverID, revision: 2, name: 'search', transport: 'http', url: server.url, contentHash: server.contentHash }, { memberId: unavailableMemberID, serverId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', revision: 1, name: 'secondary', transport: 'http', url: 'https://secondary.invalid/mcp', contentHash: '9'.repeat(64) }], managedMemberIds: ['66666666-6666-4666-8666-666666666666', unavailableMemberID], relayPort: 6276 } } } })
     }
     if (path === `/api/v1/targets/${targetID}/backups`) return route.fulfill({ json: { items: [] } })
     if (path.startsWith(`/api/v1/targets/${targetID}/relay/`)) {
@@ -162,10 +167,17 @@ test('shared relay inventory, controls, and write-only MCP secrets use generatio
   await expect(page.getByRole('row').filter({ hasText: 'search' }).getByText('managed', { exact: true })).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: 'user-extra' }).getByText('unmanaged', { exact: true })).toBeVisible()
   await expect(page.getByRole('row').filter({ hasText: 'toolhub-relay' }).getByText('managed', { exact: true })).toHaveCount(2)
+  await expect(page.getByText('suspended', { exact: true })).toBeVisible()
+  await expect(page.getByText('incompatible', { exact: true })).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'search' }).getByText('ready', { exact: true })).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'secondary' }).getByText('unavailable', { exact: true })).toBeVisible()
+  await expect(page.getByRole('row').filter({ hasText: 'secondary' })).toContainText('mcpm_incompatible')
   for (const label of ['Start', 'Stop', 'Restart', 'Health check']) await expect(page.getByRole('button', { name: label, exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Health check', exact: true }).click()
-  await expect(page.getByText(/Health check queued/)).toBeVisible()
-  expect(relayAction).toBe('health')
+  await page.getByRole('button', { name: 'Restart', exact: true }).click()
+  await expect(page.getByText(/Relay restart queued/)).toBeVisible()
+  expect(relayAction).toBe('restart')
+  await expectNoViewportOverflow(page)
+  await page.screenshot({ path: `../test-results/${testInfo.project.name}-relay-target.png`, fullPage: true })
 
   await navigate(page, testInfo.project.name, 'MCP')
   await page.getByRole('button', { name: 'Edit' }).click()

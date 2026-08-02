@@ -517,23 +517,122 @@ func (s *Store) ActiveDesiredManifest(ctx context.Context, targetID string) (dom
 }
 
 func (s *Store) UpdateTargetHealth(ctx context.Context, targetID, health, errorCode, errorReason string, drift any, repaired bool) (bool, error) {
-	errorReason = truncate(errorReason, 500)
-	driftJSON, err := json.Marshal(drift)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	changed, err := updateTargetHealthTx(ctx, tx, targetID, health, errorCode, errorReason, drift, repaired)
+	if err != nil {
+		return false, err
+	}
+	return changed, tx.Commit(ctx)
+}
+
+type RelayProjectionPolicy string
+
+const (
+	RelayProjectionObserve RelayProjectionPolicy = "observe"
+	RelayProjectionReset   RelayProjectionPolicy = "reset"
+	RelayProjectionRetry   RelayProjectionPolicy = "retry"
+)
+
+func (s *Store) UpdateRelayProjection(ctx context.Context, targetID string, status bridgeprotocol.RelayStatus, health, errorCode, errorReason string, drift any, repaired bool, policy RelayProjectionPolicy) (bool, error) {
+	if policy != RelayProjectionObserve && policy != RelayProjectionReset && policy != RelayProjectionRetry {
+		return false, errors.New("relay projection policy is invalid")
+	}
+	if errorCode == "" {
+		errorCode = status.ErrorCode
+	}
+	if errorReason == "" {
+		errorReason = status.ErrorReason
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	changed, err := updateTargetHealthTx(ctx, tx, targetID, health, errorCode, errorReason, drift, repaired)
+	if err != nil {
+		return false, err
+	}
+	var failureCount int
+	var nextRetryAt *time.Time
+	var suspended bool
+	if err := tx.QueryRow(ctx, `SELECT relay_failure_count,relay_next_retry_at,relay_suspended FROM target_desired_snapshots WHERE target_id=$1 FOR UPDATE`, targetID).Scan(&failureCount, &nextRetryAt, &suspended); err != nil {
+		return false, err
+	}
+	now := time.Now().UTC()
+	if status.Healthy || health == bridgeprotocol.HealthHealthy {
+		failureCount = 0
+		nextRetryAt = nil
+		suspended = false
+	} else {
+		switch policy {
+		case RelayProjectionReset:
+			failureCount = 0
+			next := now.Add(5 * time.Minute)
+			nextRetryAt = &next
+			suspended = false
+		case RelayProjectionRetry:
+			failureCount++
+			switch failureCount {
+			case 1:
+				next := now.Add(15 * time.Minute)
+				nextRetryAt = &next
+				suspended = false
+			case 2:
+				next := now.Add(time.Hour)
+				nextRetryAt = &next
+				suspended = false
+			default:
+				nextRetryAt = nil
+				suspended = true
+			}
+		case RelayProjectionObserve:
+			if nextRetryAt == nil && !suspended {
+				next := now.Add(5 * time.Minute)
+				nextRetryAt = &next
+			}
+		}
+	}
+	fullMemberCheck := status.Contract != ""
+	memberJSON := []byte(`[]`)
+	if fullMemberCheck {
+		memberJSON, err = json.Marshal(status.MemberStatuses)
+		if err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE target_desired_snapshots SET relay_failure_count=$2,relay_next_retry_at=$3,relay_suspended=$4,relay_last_member_check_at=CASE WHEN $5 THEN $6 ELSE relay_last_member_check_at END,relay_member_status=CASE WHEN $5 THEN $7::jsonb ELSE relay_member_status END,updated_at=now() WHERE target_id=$1`, targetID, failureCount, nextRetryAt, suspended, fullMemberCheck, now, jsonText(memberJSON)); err != nil {
+		return false, err
+	}
+	return changed, tx.Commit(ctx)
+}
+
+func updateTargetHealthTx(ctx context.Context, tx pgx.Tx, targetID, health, errorCode, errorReason string, drift any, repaired bool) (bool, error) {
+	errorReason = truncate(errorReason, 500)
+	var driftJSON []byte
+	if drift != nil {
+		var err error
+		driftJSON, err = json.Marshal(drift)
+		if err != nil {
+			return false, err
+		}
+	}
 	var oldHealth, oldCode, oldReason string
 	if err := tx.QueryRow(ctx, `SELECT health,error_code,error_reason FROM target_desired_snapshots WHERE target_id=$1 FOR UPDATE`, targetID).Scan(&oldHealth, &oldCode, &oldReason); err != nil {
 		return false, err
 	}
 	changed := oldHealth != health || oldCode != errorCode || oldReason != errorReason
-	if _, err := tx.Exec(ctx, `UPDATE target_desired_snapshots SET health=$2,error_code=$3,error_reason=$4,drift_summary=$5,last_reconciled_at=now(),last_repair_at=CASE WHEN $6 THEN now() ELSE last_repair_at END,updated_at=now() WHERE target_id=$1`, targetID, health, errorCode, truncate(errorReason, 500), jsonText(driftJSON), repaired); err != nil {
-		return false, err
+	if drift == nil {
+		if _, err := tx.Exec(ctx, `UPDATE target_desired_snapshots SET health=$2,error_code=$3,error_reason=$4,last_reconciled_at=now(),last_repair_at=CASE WHEN $5 THEN now() ELSE last_repair_at END,updated_at=now() WHERE target_id=$1`, targetID, health, errorCode, truncate(errorReason, 500), repaired); err != nil {
+			return false, err
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `UPDATE target_desired_snapshots SET health=$2,error_code=$3,error_reason=$4,drift_summary=$5,last_reconciled_at=now(),last_repair_at=CASE WHEN $6 THEN now() ELSE last_repair_at END,updated_at=now() WHERE target_id=$1`, targetID, health, errorCode, truncate(errorReason, 500), jsonText(driftJSON), repaired); err != nil {
+			return false, err
+		}
 	}
 	if changed {
 		if _, err := tx.Exec(ctx, `UPDATE alerts SET acknowledged_at=now() WHERE target_id=$1 AND acknowledged_at IS NULL`, targetID); err != nil {
@@ -560,7 +659,7 @@ func (s *Store) UpdateTargetHealth(ctx context.Context, targetID, health, errorC
 			return false, err
 		}
 	}
-	return changed, tx.Commit(ctx)
+	return changed, nil
 }
 
 func (s *Store) RecordBackup(ctx context.Context, backup bridgeprotocol.Backup, operationID string, desiredManifest *bridgeprotocol.DesiredManifest) (domain.Backup, error) {
