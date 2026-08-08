@@ -1193,6 +1193,25 @@ td small {
 .diff-summary .add { color: var(--green); }
 .diff-summary .replace { color: var(--amber); }
 .diff-summary .delete { color: var(--red); }
+.preflight-diff-items {
+  border-top: 1px solid var(--border-subtle);
+}
+.preflight-diff-group {
+  padding: 7px 11px 0;
+}
+.preflight-diff-group > strong {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.preflight-diff-group.add > strong { color: var(--green); }
+.preflight-diff-group.replace > strong { color: var(--amber); }
+.preflight-diff-group.delete > strong { color: var(--red); }
+.preflight-diff-group ul {
+  border-top: 0;
+  padding-top: 4px;
+}
 .preflight-list ul {
   max-height: 160px;
   overflow-y: auto;

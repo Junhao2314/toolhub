@@ -950,6 +950,29 @@ function ProfileApply({
                     {diff.excluded.length} {t("excluded")}
                   </span>
                 </div>
+                <div className="preflight-diff-items">
+                  {[
+                    { label: t("Add"), marker: "+", items: diff.add, className: "add" },
+                    { label: t("Replace"), marker: "~", items: diff.replace, className: "replace" },
+                    { label: t("Delete"), marker: "−", items: diff.delete, className: "delete" },
+                    { label: t("Excluded"), marker: "!", items: diff.excluded, className: "excluded" },
+                  ].map((group) =>
+                    group.items.length > 0 ? (
+                      <div className={`preflight-diff-group ${group.className}`} key={group.label}>
+                        <strong>{group.label}</strong>
+                        <ul>
+                          {group.items.map((entry, index) => (
+                            <li key={`${entry.kind}:${entry.name}:${index}`}>
+                              <b>{group.marker}</b>
+                              {entry.kind} / {entry.name}
+                              {entry.reason ? ` (${entry.reason})` : ""}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null,
+                  )}
+                </div>
               </section>
             );
           })}
