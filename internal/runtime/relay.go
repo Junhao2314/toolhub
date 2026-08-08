@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pelletier/go-toml/v2"
+	"gopkg.in/yaml.v3"
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 )
@@ -538,7 +539,7 @@ func backupRelayFiles(paths TargetPaths, extra ...string) (relayFileBackup, erro
 		return nil, err
 	}
 	result := relayFileBackup{}
-	files := append([]string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig}, extra...)
+	files := append([]string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig}, extra...)
 	for _, path := range files {
 		if path == "" {
 			continue
@@ -565,9 +566,11 @@ func backupRelayFiles(paths TargetPaths, extra ...string) (relayFileBackup, erro
 }
 
 type relayBackupState struct {
+	Version           int  `json:"version"`
 	RegistryExists    bool `json:"registryExists"`
 	ClaudeExists      bool `json:"claudeExists"`
 	CodexExists       bool `json:"codexExists"`
+	HermesExists      bool `json:"hermesExists"`
 	EnvironmentExists bool `json:"environmentExists"`
 }
 
@@ -589,12 +592,12 @@ func (r *RelayManager) backup(user ManagedUser, target bridgeprotocol.Target, pa
 	if err := os.MkdirAll(destination, 0700); err != nil {
 		return backupRecord{}, err
 	}
-	state := relayBackupState{}
+	state := relayBackupState{Version: 2}
 	items := []struct {
 		path string
 		name string
 		has  *bool
-	}{{paths.MCPMRegistry, "registry", &state.RegistryExists}, {paths.ClaudeConfig, "claude", &state.ClaudeExists}, {paths.CodexConfig, "codex", &state.CodexExists}, {r.EnvironmentFile, "environment", &state.EnvironmentExists}}
+	}{{paths.MCPMRegistry, "registry", &state.RegistryExists}, {paths.ClaudeConfig, "claude", &state.ClaudeExists}, {paths.CodexConfig, "codex", &state.CodexExists}, {paths.HermesConfig, "hermes", &state.HermesExists}, {r.EnvironmentFile, "environment", &state.EnvironmentExists}}
 	for _, item := range items {
 		body, err := readSafeConfig(item.path)
 		if errors.Is(err, os.ErrNotExist) {
@@ -634,7 +637,15 @@ func restoreRelayBackup(source string, paths TargetPaths, environmentFile string
 		name        string
 		exists      bool
 		chown       bool
-	}{{paths.MCPMRegistry, "registry", state.RegistryExists, true}, {paths.ClaudeConfig, "claude", state.ClaudeExists, true}, {paths.CodexConfig, "codex", state.CodexExists, true}, {environmentFile, "environment", state.EnvironmentExists, false}}
+	}{{paths.MCPMRegistry, "registry", state.RegistryExists, true}, {paths.ClaudeConfig, "claude", state.ClaudeExists, true}, {paths.CodexConfig, "codex", state.CodexExists, true}, {paths.HermesConfig, "hermes", state.HermesExists, true}, {environmentFile, "environment", state.EnvironmentExists, false}}
+	if state.Version < 2 {
+		items = []struct {
+			destination string
+			name        string
+			exists      bool
+			chown       bool
+		}{{paths.MCPMRegistry, "registry", state.RegistryExists, true}, {paths.ClaudeConfig, "claude", state.ClaudeExists, true}, {paths.CodexConfig, "codex", state.CodexExists, true}, {environmentFile, "environment", state.EnvironmentExists, false}}
+	}
 	for _, item := range items {
 		if !item.exists {
 			if err := os.Remove(item.destination); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -709,7 +720,10 @@ func writeRelayConfiguration(paths TargetPaths, manifest bridgeprotocol.DesiredM
 	if err := writeCodexRelayAnchor(paths.CodexConfig, manifest.RelayPort); err != nil {
 		return err
 	}
-	for _, path := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig} {
+	if err := writeHermesRelayAnchor(paths.HermesConfig, manifest.RelayPort, preserveUnmanaged); err != nil {
+		return err
+	}
+	for _, path := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig} {
 		if err := os.Chown(path, user.UID, user.GID); err != nil && os.Geteuid() == 0 {
 			return err
 		}
@@ -771,7 +785,7 @@ func relayConfigurationMatches(paths TargetPaths, environmentFile string, manife
 		return false, err
 	}
 	wantURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", manifest.RelayPort)
-	if len(anchors) != 2 {
+	if len(anchors) != 3 {
 		return false, nil
 	}
 	claude, err := readJSONMap(paths.ClaudeConfig)
@@ -795,6 +809,25 @@ func relayConfigurationMatches(paths TargetPaths, environmentFile string, manife
 	codexAnchor, _ := codexServers[RelayAnchor].(map[string]any)
 	if codexAnchor["url"] != wantURL {
 		return false, nil
+	}
+	hermes, err := readYAMLMap(paths.HermesConfig)
+	if err != nil {
+		return false, err
+	}
+	hermesServers, err := yamlStringMap(hermes["mcp_servers"])
+	if err != nil {
+		return false, err
+	}
+	hermesAnchor, _ := hermesServers[RelayAnchor].(map[string]any)
+	if hermesAnchor["url"] != wantURL || hermesAnchor["enabled"] != true {
+		return false, nil
+	}
+	if !preserveUnmanaged {
+		for name := range hermesServers {
+			if name != RelayAnchor {
+				return false, nil
+			}
+		}
 	}
 	environment, err := readSafeConfig(environmentFile)
 	if errors.Is(err, os.ErrNotExist) {
@@ -870,6 +903,37 @@ func writeCodexRelayAnchor(path string, port int) error {
 	return atomicWrite(path, body, 0600)
 }
 
+func writeHermesRelayAnchor(path string, port int, preserveUnmanaged bool) error {
+	root, err := readYAMLMap(path)
+	if err != nil {
+		return err
+	}
+	if root["mcp_servers"] != nil {
+		if _, err := yamlStringMap(root["mcp_servers"]); err != nil {
+			return err
+		}
+	}
+	servers := map[string]any{}
+	if preserveUnmanaged {
+		current, err := yamlStringMap(root["mcp_servers"])
+		if err != nil {
+			return err
+		}
+		for name, value := range current {
+			if name != RelayAnchor {
+				servers[name] = value
+			}
+		}
+	}
+	servers[RelayAnchor] = map[string]any{"url": fmt.Sprintf("http://127.0.0.1:%d/mcp", port), "enabled": true}
+	root["mcp_servers"] = servers
+	body, err := yaml.Marshal(root)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(path, body, 0600)
+}
+
 func scanRelayAnchors(paths TargetPaths) ([]bridgeprotocol.InventoryMember, error) {
 	result := []bridgeprotocol.InventoryMember{}
 	claude, err := readJSONMap(paths.ClaudeConfig)
@@ -898,6 +962,17 @@ func scanRelayAnchors(paths TargetPaths) ([]bridgeprotocol.InventoryMember, erro
 			result = append(result, bridgeprotocol.InventoryMember{ID: "anchor:codex", Kind: "anchor", Name: RelayAnchor, Scope: "user", ContentHash: hex.EncodeToString(sum[:])})
 		}
 	}
+	hermes, err := readYAMLMap(paths.HermesConfig)
+	if err != nil {
+		return nil, err
+	}
+	if servers, err := yamlStringMap(hermes["mcp_servers"]); err != nil {
+		return nil, err
+	} else if anchor, ok := servers[RelayAnchor]; ok {
+		body, _ := json.Marshal(anchor)
+		sum := sha256.Sum256(body)
+		result = append(result, bridgeprotocol.InventoryMember{ID: "anchor:hermes", Kind: "anchor", Name: RelayAnchor, Scope: "user", ContentHash: hex.EncodeToString(sum[:])})
+	}
 	return result, nil
 }
 
@@ -917,6 +992,34 @@ func readJSONMap(path string) (map[string]any, error) {
 		return nil, err
 	}
 	return root, nil
+}
+
+func readYAMLMap(path string) (map[string]any, error) {
+	body, err := readSafeConfig(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]any{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	root := map[string]any{}
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return root, nil
+	}
+	if err := yaml.Unmarshal(body, &root); err != nil {
+		return nil, err
+	}
+	return root, nil
+}
+
+func yamlStringMap(value any) (map[string]any, error) {
+	if value == nil {
+		return map[string]any{}, nil
+	}
+	if typed, ok := value.(map[string]any); ok {
+		return typed, nil
+	}
+	return nil, errors.New("Hermes mcp_servers is not a mapping")
 }
 
 func readSafeConfig(path string) ([]byte, error) {
@@ -993,7 +1096,7 @@ func atomicWrite(path string, body []byte, mode os.FileMode) error {
 }
 
 func guardRelayPaths(paths TargetPaths) error {
-	for _, candidate := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig} {
+	for _, candidate := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig} {
 		if err := rejectSymlinkComponents(paths.Home, candidate); err != nil {
 			return err
 		}

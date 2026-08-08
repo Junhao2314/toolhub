@@ -10,68 +10,407 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/profilebundle"
 )
 
+const maxProfileMembers = 500
+
 type ProfileInput struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	SkillIDs     []string `json:"skillIds"`
-	MCPServerIDs []string `json:"mcpServerIds"`
-	Revision     int64    `json:"revision,omitempty"`
+	Name            string            `json:"name"`
+	Description     string            `json:"description"`
+	SkillIDs        []string          `json:"skillIds"`
+	MCPServerIDs    []string          `json:"mcpServerIds"`
+	SkillVersionIDs map[string]string `json:"skillVersionIds,omitempty"`
+	MCPRevisionIDs  map[string]string `json:"mcpRevisionIds,omitempty"`
+	Revision        int64             `json:"revision,omitempty"`
+	ArchivedRestore bool              `json:"-"`
+	PendingBindings bool              `json:"-"`
+}
+
+type profilePins struct {
+	Skills []domain.ProfileSkillPin
+	MCP    []domain.ProfileMCPPin
 }
 
 func (s *Store) SaveProfile(ctx context.Context, id string, input ProfileInput) (domain.Profile, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	profileID, _, err := s.saveProfileTx(ctx, tx, id, input)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Profile{}, err
+	}
+	return s.Profile(ctx, profileID)
+}
+
+func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input ProfileInput) (string, string, error) {
 	input.Name = strings.TrimSpace(input.Name)
+	input.Description = strings.TrimSpace(input.Description)
 	if input.Name == "" || len(input.Name) > 120 {
-		return domain.Profile{}, errors.New("Profile name must contain 1-120 characters")
+		return "", "", errors.New("Profile name must contain 1-120 characters")
+	}
+	input.SkillIDs = uniqueIDs(input.SkillIDs)
+	input.MCPServerIDs = uniqueIDs(input.MCPServerIDs)
+	if len(input.SkillIDs) > maxProfileMembers || len(input.MCPServerIDs) > maxProfileMembers {
+		return "", "", errors.New("Profile membership exceeds safety limit")
 	}
 	if id == "" {
 		id = uuid.NewString()
+	}
+	if uuid.Validate(id) != nil {
+		return "", "", ErrNotFound
+	}
+
+	var current int64
+	var archived bool
+	err := tx.QueryRow(ctx, `SELECT revision,archived_at IS NOT NULL FROM profiles WHERE id=$1 FOR UPDATE`, id).Scan(&current, &archived)
+	if errors.Is(err, pgx.ErrNoRows) {
+		current = 0
+		archived = false
+	} else if err != nil {
+		return "", "", err
+	}
+	if current > 0 && input.Revision != current {
+		return "", "", ErrConflict
+	}
+	if archived && !input.ArchivedRestore {
+		return "", "", ErrConflict
+	}
+
+	pins, err := resolveProfilePinsTx(ctx, tx, input)
+	if err != nil {
+		return "", "", err
+	}
+	canonicalHash, err := CanonicalProfileHash(input.Name, input.Description, pins.Skills, pins.MCP)
+	if err != nil {
+		return "", "", err
+	}
+
+	revision := current + 1
+	revisionID := uuid.NewString()
+	if current == 0 {
+		_, err = tx.Exec(ctx, `INSERT INTO profiles(id,name,description,revision,current_revision_id) VALUES($1,$2,$3,$4,$5)`, id, input.Name, input.Description, revision, revisionID)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE profiles SET name=$2,description=$3,revision=$4,current_revision_id=$5,archived_at=NULL,updated_at=now() WHERE id=$1`, id, input.Name, input.Description, revision, revisionID)
+	}
+	if err != nil {
+		if isUniqueViolation(err) {
+			return "", "", ErrConflict
+		}
+		return "", "", err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO profile_revisions(id,profile_id,revision,name,description,canonical_hash,pending_bindings,archived_restore) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, revisionID, id, revision, input.Name, input.Description, canonicalHash, input.PendingBindings, input.ArchivedRestore); err != nil {
+		return "", "", err
+	}
+	for position, pin := range pins.Skills {
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_skills(profile_revision_id,skill_id,skill_version_id,position) VALUES($1,$2,$3,$4)`, revisionID, pin.SkillID, pin.VersionID, position); err != nil {
+			return "", "", err
+		}
+	}
+	for position, pin := range pins.MCP {
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_mcp_servers(profile_revision_id,server_id,mcp_revision_id,position) VALUES($1,$2,$3,$4)`, revisionID, pin.ServerID, pin.RevisionID, position); err != nil {
+			return "", "", err
+		}
+	}
+	if err := replaceProfileHeadProjection(ctx, tx, id, pins); err != nil {
+		return "", "", err
+	}
+	return id, revisionID, nil
+}
+
+func resolveProfilePinsTx(ctx context.Context, tx pgx.Tx, input ProfileInput) (profilePins, error) {
+	result := profilePins{Skills: []domain.ProfileSkillPin{}, MCP: []domain.ProfileMCPPin{}}
+	for _, skillID := range input.SkillIDs {
+		if uuid.Validate(skillID) != nil {
+			return profilePins{}, ErrNotFound
+		}
+		versionID := strings.TrimSpace(input.SkillVersionIDs[skillID])
+		var pin domain.ProfileSkillPin
+		err := tx.QueryRow(ctx, `SELECT sk.id::text,v.id::text,sk.slug,sk.name,a.canonical_sha256,a.content_hash,v.id=sk.current_version_id FROM skills sk JOIN skill_versions v ON v.skill_id=sk.id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND v.id=coalesce(nullif($2,''),sk.current_version_id) AND sk.archived_at IS NULL`, skillID, versionID).Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.SHA256, &pin.ContentHash, &pin.Current)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return profilePins{}, ErrNotFound
+		}
+		if err != nil {
+			return profilePins{}, err
+		}
+		result.Skills = append(result.Skills, pin)
+	}
+	for _, serverID := range input.MCPServerIDs {
+		if uuid.Validate(serverID) != nil {
+			return profilePins{}, ErrNotFound
+		}
+		revisionID := strings.TrimSpace(input.MCPRevisionIDs[serverID])
+		var pin domain.ProfileMCPPin
+		err := tx.QueryRow(ctx, `SELECT mr.server_id::text,mr.id::text,mr.revision,mr.name,mr.description,mr.transport,mr.command,mr.args,mr.url,mr.env_slots,mr.header_slots,mr.content_hash,mr.id=ms.current_revision_id FROM mcp_revisions mr JOIN mcp_servers ms ON ms.id=mr.server_id WHERE mr.server_id=$1 AND mr.id=coalesce(nullif($2,'')::uuid,ms.current_revision_id)`, serverID, revisionID).Scan(&pin.ServerID, &pin.RevisionID, &pin.Revision, &pin.Name, &pin.Description, &pin.Transport, &pin.Command, &pin.Args, &pin.URL, &pin.EnvKeys, &pin.HeaderKeys, &pin.ContentHash, &pin.Current)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return profilePins{}, ErrNotFound
+		}
+		if err != nil {
+			return profilePins{}, err
+		}
+		result.MCP = append(result.MCP, pin)
+	}
+	return result, nil
+}
+
+func replaceProfileHeadProjection(ctx context.Context, tx pgx.Tx, profileID string, pins profilePins) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM profile_skills WHERE profile_id=$1`, profileID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM profile_mcp_servers WHERE profile_id=$1`, profileID); err != nil {
+		return err
+	}
+	for _, pin := range pins.Skills {
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_skills(profile_id,skill_id) VALUES($1,$2)`, profileID, pin.SkillID); err != nil {
+			return err
+		}
+	}
+	for _, pin := range pins.MCP {
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_mcp_servers(profile_id,server_id) VALUES($1,$2)`, profileID, pin.ServerID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func CanonicalProfileHash(name, description string, skills []domain.ProfileSkillPin, servers []domain.ProfileMCPPin) (string, error) {
+	manifest := profilebundle.Manifest{Profile: profilebundle.Profile{Name: strings.TrimSpace(name), Description: strings.TrimSpace(description)}}
+	for _, pin := range skills {
+		manifest.Skills = append(manifest.Skills, profilebundle.Skill{Slug: pin.Slug, SHA256: pin.SHA256, ContentHash: pin.ContentHash})
+	}
+	for _, pin := range servers {
+		item := profilebundle.MCP{Name: pin.Name, Description: pin.Description, Transport: pin.Transport, Command: pin.Command, Args: pin.Args, URL: pin.URL, EnvSlots: pin.EnvKeys, HeaderSlots: pin.HeaderKeys}
+		key, err := profilebundle.MCPKey(item)
+		if err != nil {
+			return "", err
+		}
+		item.Key = key
+		manifest.MCPServers = append(manifest.MCPServers, item)
+	}
+	return profilebundle.CanonicalProfileHash(manifest)
+}
+
+func (s *Store) ListProfiles(ctx context.Context, includeArchived bool) (json.RawMessage, error) {
+	query := `SELECT id::text FROM profiles WHERE archived_at IS NULL ORDER BY lower(name),id`
+	if includeArchived {
+		query = `SELECT id::text FROM profiles ORDER BY (archived_at IS NOT NULL), lower(name), id`
+	}
+	rows, err := s.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	profiles := []domain.Profile{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		profile, err := s.Profile(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		profiles = append(profiles, profile)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return json.Marshal(profiles)
+}
+
+func (s *Store) Profile(ctx context.Context, id string) (domain.Profile, error) {
+	var profile domain.Profile
+	err := s.pool.QueryRow(ctx, `SELECT p.id::text,p.current_revision_id::text,p.name,p.description,p.revision,pr.canonical_hash,pr.pending_bindings,p.archived_at,p.created_at,p.updated_at FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1`, id).Scan(&profile.ID, &profile.CurrentRevisionID, &profile.Name, &profile.Description, &profile.Revision, &profile.CanonicalHash, &profile.PendingBindings, &profile.ArchivedAt, &profile.CreatedAt, &profile.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Profile{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	revision, err := s.ProfileRevision(ctx, profile.CurrentRevisionID)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	profile.Skills, profile.MCPServers = revision.Skills, revision.MCPServers
+	profile.SkillIDs = make([]string, 0, len(profile.Skills))
+	profile.MCPServerIDs = make([]string, 0, len(profile.MCPServers))
+	for _, pin := range profile.Skills {
+		profile.SkillIDs = append(profile.SkillIDs, pin.SkillID)
+	}
+	for _, pin := range profile.MCPServers {
+		profile.MCPServerIDs = append(profile.MCPServerIDs, pin.ServerID)
+	}
+	return profile, nil
+}
+
+func (s *Store) ProfileRevision(ctx context.Context, id string) (domain.ProfileRevision, error) {
+	var revision domain.ProfileRevision
+	err := s.pool.QueryRow(ctx, `SELECT id::text,profile_id::text,revision,name,description,canonical_hash,pending_bindings,archived_restore,created_at FROM profile_revisions WHERE id=$1`, id).Scan(&revision.ID, &revision.ProfileID, &revision.Revision, &revision.Name, &revision.Description, &revision.CanonicalHash, &revision.PendingBindings, &revision.ArchivedRestore, &revision.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ProfileRevision{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.ProfileRevision{}, err
+	}
+	revision.Skills = []domain.ProfileSkillPin{}
+	rows, err := s.pool.Query(ctx, `SELECT prs.skill_id::text,prs.skill_version_id::text,sk.slug,sk.name,a.canonical_sha256,a.content_hash,prs.skill_version_id=sk.current_version_id FROM profile_revision_skills prs JOIN skills sk ON sk.id=prs.skill_id JOIN skill_versions sv ON sv.id=prs.skill_version_id JOIN skill_artifacts a ON a.id=sv.artifact_id WHERE prs.profile_revision_id=$1 ORDER BY prs.position`, id)
+	if err != nil {
+		return domain.ProfileRevision{}, err
+	}
+	for rows.Next() {
+		var pin domain.ProfileSkillPin
+		if err := rows.Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.SHA256, &pin.ContentHash, &pin.Current); err != nil {
+			rows.Close()
+			return domain.ProfileRevision{}, err
+		}
+		revision.Skills = append(revision.Skills, pin)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.ProfileRevision{}, err
+	}
+	rows.Close()
+	revision.MCPServers = []domain.ProfileMCPPin{}
+	rows, err = s.pool.Query(ctx, `SELECT prms.server_id::text,prms.mcp_revision_id::text,mr.revision,mr.name,mr.description,mr.transport,mr.command,mr.args,mr.url,mr.env_slots,mr.header_slots,mr.content_hash,prms.mcp_revision_id=ms.current_revision_id FROM profile_revision_mcp_servers prms JOIN mcp_revisions mr ON mr.id=prms.mcp_revision_id JOIN mcp_servers ms ON ms.id=prms.server_id WHERE prms.profile_revision_id=$1 ORDER BY prms.position`, id)
+	if err != nil {
+		return domain.ProfileRevision{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pin domain.ProfileMCPPin
+		if err := rows.Scan(&pin.ServerID, &pin.RevisionID, &pin.Revision, &pin.Name, &pin.Description, &pin.Transport, &pin.Command, &pin.Args, &pin.URL, &pin.EnvKeys, &pin.HeaderKeys, &pin.ContentHash, &pin.Current); err != nil {
+			return domain.ProfileRevision{}, err
+		}
+		revision.MCPServers = append(revision.MCPServers, pin)
+	}
+	return revision, rows.Err()
+}
+
+func (s *Store) ProfileHistory(ctx context.Context, profileID string) ([]domain.ProfileRevision, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id::text FROM profile_revisions WHERE profile_id=$1 ORDER BY revision DESC`, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]domain.ProfileRevision, 0, len(ids))
+	for _, id := range ids {
+		revision, err := s.ProfileRevision(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, revision)
+	}
+	return result, nil
+}
+
+func (s *Store) RefreshProfile(ctx context.Context, id string, expectedRevision int64) (domain.Profile, error) {
+	profile, err := s.Profile(ctx, id)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	if profile.PendingBindings {
+		return domain.Profile{}, ErrConflict
+	}
+	return s.SaveProfile(ctx, id, ProfileInput{Name: profile.Name, Description: profile.Description, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, Revision: expectedRevision})
+}
+
+func (s *Store) CloneProfile(ctx context.Context, id, name string) (domain.Profile, error) {
+	profile, err := s.Profile(ctx, id)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	if profile.PendingBindings {
+		return domain.Profile{}, ErrConflict
+	}
+	input := ProfileInput{Name: name, Description: profile.Description, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, SkillVersionIDs: map[string]string{}, MCPRevisionIDs: map[string]string{}}
+	for _, pin := range profile.Skills {
+		input.SkillVersionIDs[pin.SkillID] = pin.VersionID
+	}
+	for _, pin := range profile.MCPServers {
+		input.MCPRevisionIDs[pin.ServerID] = pin.RevisionID
+	}
+	return s.SaveProfile(ctx, uuid.NewString(), input)
+}
+
+func (s *Store) ArchiveProfile(ctx context.Context, id string, expectedRevision int64) error {
+	command, err := s.pool.Exec(ctx, `UPDATE profiles SET archived_at=now(),updated_at=now() WHERE id=$1 AND revision=$2 AND archived_at IS NULL`, id, expectedRevision)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
+// DeleteProfile is retained for the existing Browser route and now performs
+// the reversible archive transition. Irreversible removal uses PurgeProfile.
+func (s *Store) DeleteProfile(ctx context.Context, id string) error {
+	profile, err := s.Profile(ctx, id)
+	if err != nil {
+		return err
+	}
+	return s.ArchiveProfile(ctx, id, profile.Revision)
+}
+
+func (s *Store) RestoreArchivedProfile(ctx context.Context, id string, expectedRevision int64) (domain.Profile, error) {
+	profile, err := s.Profile(ctx, id)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	input := ProfileInput{Name: profile.Name, Description: profile.Description, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, SkillVersionIDs: map[string]string{}, MCPRevisionIDs: map[string]string{}, Revision: expectedRevision, ArchivedRestore: true, PendingBindings: profile.PendingBindings}
+	for _, pin := range profile.Skills {
+		input.SkillVersionIDs[pin.SkillID] = pin.VersionID
+	}
+	for _, pin := range profile.MCPServers {
+		input.MCPRevisionIDs[pin.ServerID] = pin.RevisionID
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.Profile{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var current int64
-	err = tx.QueryRow(ctx, `SELECT revision FROM profiles WHERE id=$1 FOR UPDATE`, id).Scan(&current)
-	if errors.Is(err, pgx.ErrNoRows) {
-		current = 0
-	} else if err != nil {
+	_, revisionID, err := s.saveProfileTx(ctx, tx, id, input)
+	if err != nil {
 		return domain.Profile{}, err
 	}
-	if current > 0 && input.Revision != current {
-		return domain.Profile{}, ErrConflict
-	}
-	current++
-	if _, err := tx.Exec(ctx, `INSERT INTO profiles(id,name,description,revision) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,revision=EXCLUDED.revision,updated_at=now()`, id, input.Name, strings.TrimSpace(input.Description), current); err != nil {
-		if isUniqueViolation(err) {
-			return domain.Profile{}, ErrConflict
+	if profile.PendingBindings {
+		rows, queryErr := tx.Query(ctx, `SELECT mcp_revision_id::text,namespace,key,slot_hash FROM pending_secret_bindings WHERE profile_revision_id=$1`, profile.CurrentRevisionID)
+		if queryErr != nil {
+			return domain.Profile{}, queryErr
 		}
-		return domain.Profile{}, err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM profile_skills WHERE profile_id=$1`, id); err != nil {
-		return domain.Profile{}, err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM profile_mcp_servers WHERE profile_id=$1`, id); err != nil {
-		return domain.Profile{}, err
-	}
-	for _, skillID := range uniqueIDs(input.SkillIDs) {
-		if _, err := tx.Exec(ctx, `INSERT INTO profile_skills(profile_id,skill_id) SELECT $1,id FROM skills WHERE id=$2 AND archived_at IS NULL`, id, skillID); err != nil {
-			return domain.Profile{}, err
+		for rows.Next() {
+			var mcpRevisionID, namespace, key, slotHash string
+			if scanErr := rows.Scan(&mcpRevisionID, &namespace, &key, &slotHash); scanErr != nil {
+				rows.Close()
+				return domain.Profile{}, scanErr
+			}
+			if _, insertErr := tx.Exec(ctx, `INSERT INTO pending_secret_bindings(profile_revision_id,mcp_revision_id,namespace,key,slot_hash) VALUES($1,$2,$3,$4,$5)`, revisionID, mcpRevisionID, namespace, key, slotHash); insertErr != nil {
+				rows.Close()
+				return domain.Profile{}, insertErr
+			}
 		}
-	}
-	for _, serverID := range uniqueIDs(input.MCPServerIDs) {
-		if _, err := tx.Exec(ctx, `INSERT INTO profile_mcp_servers(profile_id,server_id) SELECT $1,id FROM mcp_servers WHERE id=$2`, id, serverID); err != nil {
-			return domain.Profile{}, err
+		if rowsErr := rows.Err(); rowsErr != nil {
+			rows.Close()
+			return domain.Profile{}, rowsErr
 		}
-	}
-	var skillCount, serverCount int
-	if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM profile_skills WHERE profile_id=$1),(SELECT count(*) FROM profile_mcp_servers WHERE profile_id=$1)`, id).Scan(&skillCount, &serverCount); err != nil {
-		return domain.Profile{}, err
-	}
-	if skillCount != len(uniqueIDs(input.SkillIDs)) || serverCount != len(uniqueIDs(input.MCPServerIDs)) {
-		return domain.Profile{}, ErrNotFound
+		rows.Close()
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return domain.Profile{}, err
@@ -79,30 +418,42 @@ func (s *Store) SaveProfile(ctx context.Context, id string, input ProfileInput) 
 	return s.Profile(ctx, id)
 }
 
-func (s *Store) ListProfiles(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, profileSelect+` ORDER BY lower(p.name),p.id`)
-}
-
-const profileSelect = `SELECT p.id::text,p.name,p.description,p.revision,coalesce((SELECT jsonb_agg(skill_id::text ORDER BY skill_id::text) FROM profile_skills WHERE profile_id=p.id),'[]'::jsonb) AS "skillIds",coalesce((SELECT jsonb_agg(server_id::text ORDER BY server_id::text) FROM profile_mcp_servers WHERE profile_id=p.id),'[]'::jsonb) AS "mcpServerIds",p.created_at AS "createdAt",p.updated_at AS "updatedAt" FROM profiles p`
-
-func (s *Store) Profile(ctx context.Context, id string) (domain.Profile, error) {
-	var profile domain.Profile
-	err := s.pool.QueryRow(ctx, `SELECT p.id::text,p.name,p.description,p.revision,ARRAY(SELECT skill_id::text FROM profile_skills WHERE profile_id=p.id ORDER BY skill_id::text),ARRAY(SELECT server_id::text FROM profile_mcp_servers WHERE profile_id=p.id ORDER BY server_id::text),p.created_at,p.updated_at FROM profiles p WHERE p.id=$1`, id).Scan(&profile.ID, &profile.Name, &profile.Description, &profile.Revision, &profile.SkillIDs, &profile.MCPServerIDs, &profile.CreatedAt, &profile.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.Profile{}, ErrNotFound
-	}
-	return profile, err
-}
-
-func (s *Store) DeleteProfile(ctx context.Context, id string) error {
-	command, err := s.pool.Exec(ctx, `DELETE FROM profiles WHERE id=$1`, id)
+func (s *Store) PurgeProfile(ctx context.Context, id string) error {
+	command, err := s.pool.Exec(ctx, `DELETE FROM profiles p WHERE p.id=$1 AND p.archived_at IS NOT NULL AND NOT EXISTS(SELECT 1 FROM desired_snapshots ds WHERE ds.source_kind='profile_apply' AND ds.source_id=p.id) AND NOT EXISTS(SELECT 1 FROM preflight_confirmations pc WHERE pc.profile_id=p.id AND (pc.consumed_at IS NULL OR pc.expires_at>now())) AND NOT EXISTS(SELECT 1 FROM bundle_import_fingerprints bf WHERE bf.profile_id=p.id) AND NOT EXISTS(SELECT 1 FROM operations o WHERE o.source_id=p.id AND o.status IN ('queued','running'))`, id)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
-		return ErrNotFound
+		return ErrConflict
 	}
 	return nil
+}
+
+func (s *Store) AdoptRestoredTarget(ctx context.Context, targetID, name string) (domain.Profile, error) {
+	snapshot, manifest, err := s.ActiveDesiredManifest(ctx, targetID)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	if snapshot.SourceKind != "restore" {
+		return domain.Profile{}, ErrConflict
+	}
+	input := ProfileInput{Name: name, Description: "Adopted restored desired state", SkillVersionIDs: map[string]string{}, MCPRevisionIDs: map[string]string{}}
+	for _, member := range manifest.Skills {
+		input.SkillIDs = append(input.SkillIDs, member.SkillID)
+		input.SkillVersionIDs[member.SkillID] = member.VersionID
+	}
+	for _, member := range manifest.MCPServers {
+		var revisionID string
+		if err := s.pool.QueryRow(ctx, `SELECT id::text FROM mcp_revisions WHERE server_id=$1 AND revision=$2`, member.ServerID, member.Revision).Scan(&revisionID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.Profile{}, ErrConflict
+			}
+			return domain.Profile{}, err
+		}
+		input.MCPServerIDs = append(input.MCPServerIDs, member.ServerID)
+		input.MCPRevisionIDs[member.ServerID] = revisionID
+	}
+	return s.SaveProfile(ctx, uuid.NewString(), input)
 }
 
 func uniqueIDs(ids []string) []string {

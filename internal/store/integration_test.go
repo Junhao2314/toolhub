@@ -278,8 +278,15 @@ func TestRelayProjectionMigrationUpgradesGenerationTwoDatabaseIntegration(t *tes
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='target_desired_snapshots' AND column_name LIKE 'relay_%'`).Scan(&relayColumns); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 2 || relayColumns != 5 {
+	if versions != 3 || relayColumns != 5 {
 		t.Fatalf("migration versions=%d relayColumns=%d", versions, relayColumns)
+	}
+	var partialAllowed bool
+	if err := st.pool.QueryRow(ctx, `SELECT pg_get_constraintdef(oid) LIKE '%partial%' FROM pg_constraint WHERE conrelid='operation_targets'::regclass AND conname='operation_targets_status_check'`).Scan(&partialAllowed); err != nil {
+		t.Fatal(err)
+	}
+	if !partialAllowed {
+		t.Fatal("operation target status constraint does not allow partial")
 	}
 }
 

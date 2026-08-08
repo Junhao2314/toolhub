@@ -140,9 +140,9 @@ func Prepare(snapshot Snapshot, legacyCipher *security.Cipher) (Prepared, error)
 	codexSkills := sortedUnique(snapshot.SkillDesired["codex"])
 	sharedMCP := sortedUnique(append(append([]string(nil), snapshot.MCPDesired["claude"]...), snapshot.MCPDesired["codex"]...))
 	input.Profiles = []store.ConfigImportProfile{
-		{Name: "migrated-claude", Description: "Legacy Claude Skill selection imported for review", LegacySkillIDs: claudeSkills},
-		{Name: "migrated-codex", Description: "Legacy Codex Skill selection imported for review", LegacySkillIDs: codexSkills},
-		{Name: "migrated-shared-mcp", Description: "Legacy Claude and Codex MCP union imported for review", LegacyMCPServerIDs: sharedMCP},
+		{Name: "claude-skills", Description: "Claude Skill selection", LegacySkillIDs: claudeSkills},
+		{Name: "codex-skills", Description: "Codex Skill selection", LegacySkillIDs: codexSkills},
+		{Name: "shared-mcp", Description: "Claude and Codex MCP servers", LegacyMCPServerIDs: sharedMCP},
 	}
 	input.SourceFingerprint = sourceFingerprint(snapshot.Migrations, input)
 
@@ -159,9 +159,9 @@ func Prepare(snapshot Snapshot, legacyCipher *security.Cipher) (Prepared, error)
 		Renames:           input.MCPRenameCount,
 		MCPNormalizations: normalizations,
 		ProfileMemberships: []ProfileMembershipReport{
-			{Name: "migrated-claude", Skills: len(claudeSkills)},
-			{Name: "migrated-codex", Skills: len(codexSkills)},
-			{Name: "migrated-shared-mcp", MCPServers: len(sharedMCP)},
+			{Name: "claude-skills", Skills: len(claudeSkills)},
+			{Name: "codex-skills", Skills: len(codexSkills)},
+			{Name: "shared-mcp", MCPServers: len(sharedMCP)},
 		},
 		UpdateCron: input.UpdateCron,
 		Timezone:   input.Timezone,
@@ -203,12 +203,11 @@ func transformSkill(legacy LegacySkill) (store.ConfigImportSkill, error) {
 		Source:           source,
 		Package:          pkg,
 		Provenance: map[string]any{
-			"migration":        "legacy-v11",
-			"legacySkillId":    legacy.ID,
-			"legacySourceId":   legacy.SourceID,
-			"legacyVersionId":  legacy.VersionID,
-			"legacyArtifactId": legacy.ArtifactID,
-			"legacySHA256":     legacy.ArtifactSHA256,
+			"originalSkillId":    legacy.ID,
+			"originalSourceId":   legacy.SourceID,
+			"originalVersionId":  legacy.VersionID,
+			"originalArtifactId": legacy.ArtifactID,
+			"originalSHA256":     legacy.ArtifactSHA256,
 		},
 	}, nil
 }
@@ -229,9 +228,8 @@ func mapSkillSource(legacy LegacySkill, fallbackName string) (store.SourceInput,
 		Name:   name,
 		Commit: commit,
 		Metadata: map[string]any{
-			"migration":        "legacy-v11",
-			"legacySourceId":   legacy.SourceID,
-			"legacySourceKind": legacy.SourceKind,
+			"originalSourceId":   legacy.SourceID,
+			"originalSourceKind": legacy.SourceKind,
 		},
 	}
 	switch legacy.SourceKind {
@@ -283,7 +281,7 @@ func normalizeMCPDefinition(legacy LegacyMCPServer) (store.MCPInput, bool, error
 	}
 	input := store.MCPInput{
 		Name:        strings.ToLower(strings.TrimSpace(legacy.Name)),
-		Description: "Migrated from ToolHub generation 1",
+		Description: mcpServerDescription(legacy, transport),
 		Transport:   transport,
 		Command:     strings.TrimSpace(legacy.Command),
 		Args:        append([]string(nil), legacy.Args...),
@@ -294,6 +292,19 @@ func normalizeMCPDefinition(legacy LegacyMCPServer) (store.MCPInput, bool, error
 		return store.MCPInput{}, false, migrationError("mcp_definition_invalid", fmt.Sprintf("legacy MCP definition %s is incompatible with generation 2", legacy.ID), err)
 	}
 	return normalized, converted, nil
+}
+
+// mcpServerDescription derives a neutral per-server description from the
+// legacy definition instead of a fixed import notice.
+func mcpServerDescription(legacy LegacyMCPServer, transport string) string {
+	if transport == "http" || transport == "sse" {
+		return "Remote " + strings.ToUpper(transport) + " MCP server at " + strings.TrimSpace(legacy.URL)
+	}
+	command := strings.TrimSpace(legacy.Command)
+	if len(legacy.Args) > 0 {
+		command += " " + strings.Join(legacy.Args, " ")
+	}
+	return "Local MCP server run via " + command
 }
 
 func validateMCPReferences(serverID string, refs map[string]string, wantKind string, secrets map[string]LegacySecret, used map[string]string) error {

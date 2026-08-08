@@ -55,6 +55,7 @@ type TargetPaths struct {
 	SkillsRoot   string
 	ClaudeConfig string
 	CodexConfig  string
+	HermesConfig string
 	MCPMRegistry string
 }
 
@@ -66,6 +67,7 @@ func PathsFor(user ManagedUser, runtime string) (TargetPaths, error) {
 		Home:         user.Home,
 		ClaudeConfig: filepath.Join(user.Home, ".claude.json"),
 		CodexConfig:  filepath.Join(user.Home, ".codex", "config.toml"),
+		HermesConfig: filepath.Join(user.Home, ".hermes", "config.yaml"),
 		MCPMRegistry: filepath.Join(user.Home, ".config", "mcpm", "servers.json"),
 	}
 	switch runtime {
@@ -79,7 +81,7 @@ func PathsFor(user ManagedUser, runtime string) (TargetPaths, error) {
 	default:
 		return TargetPaths{}, errors.New("unsupported target runtime")
 	}
-	for _, candidate := range []string{paths.SkillsRoot, paths.ClaudeConfig, paths.CodexConfig, paths.MCPMRegistry} {
+	for _, candidate := range []string{paths.SkillsRoot, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.MCPMRegistry} {
 		if candidate == "" {
 			continue
 		}

@@ -38,6 +38,9 @@ func (f *fakeAdapter) Scan(context.Context, bridgeprotocol.ScanRequest) (bridgep
 func (f *fakeAdapter) ExportLocalSkill(context.Context, bridgeprotocol.LocalSkillExportRequest) (bridgeprotocol.LocalSkillExportResponse, error) {
 	return bridgeprotocol.LocalSkillExportResponse{}, nil
 }
+func (f *fakeAdapter) ExportLocalSkillBatch(context.Context, bridgeprotocol.LocalSkillBatchExportRequest) (bridgeprotocol.LocalSkillBatchExportResponse, error) {
+	return bridgeprotocol.LocalSkillBatchExportResponse{}, nil
+}
 func (f *fakeAdapter) PreviewLocalMCP(context.Context, bridgeprotocol.LocalMCPPreviewRequest) (bridgeprotocol.LocalMCPPreviewResponse, error) {
 	return bridgeprotocol.LocalMCPPreviewResponse{}, nil
 }

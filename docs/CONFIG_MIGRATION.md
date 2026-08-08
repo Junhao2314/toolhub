@@ -70,9 +70,9 @@ leaves the initialized destination baseline retryable.
 
 The generated Profiles are:
 
-- `migrated-claude`: legacy Claude Skill selection;
-- `migrated-codex`: legacy Codex Skill selection;
-- `migrated-shared-mcp`: union of legacy Claude and Codex MCP selections.
+- `claude-skills`: Claude Skill selection;
+- `codex-skills`: Codex Skill selection;
+- `shared-mcp`: Claude and Codex MCP servers.
 
 Review these Profiles in the generation-2 UI. Applying them is a separate,
 explicit post-cutover operation requiring normal target scan and preflight.

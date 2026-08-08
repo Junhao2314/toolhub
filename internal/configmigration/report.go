@@ -42,10 +42,10 @@ type Report struct {
 
 func (r Report) Human() []byte {
 	var output bytes.Buffer
-	fmt.Fprintln(&output, "ToolHub generation 2 configuration migration")
+	fmt.Fprintln(&output, "ToolHub configuration import")
 	fmt.Fprintf(&output, "status: %s\n", r.Status)
 	fmt.Fprintf(&output, "source fingerprint: %s\n", r.SourceFingerprint)
-	fmt.Fprintf(&output, "legacy migrations: 1..%d\n", len(r.LegacyMigrations))
+	fmt.Fprintf(&output, "source schema versions: 1..%d\n", len(r.LegacyMigrations))
 	fmt.Fprintf(&output, "Library Skills: %d\n", r.Skills)
 	fmt.Fprintf(&output, "MCP definitions: %d\n", r.MCPServers)
 	fmt.Fprintf(&output, "MCP Secret records: %d (values redacted)\n", r.MCPSecrets)

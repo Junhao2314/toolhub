@@ -241,7 +241,7 @@ func (s *Store) ClaimOperationTarget(ctx context.Context) (WorkItem, error) {
 }
 
 func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, status string, result any, apiErr *bridgeprotocol.APIError) error {
-	if status != bridgeprotocol.OperationSucceeded && status != bridgeprotocol.OperationFailed && status != bridgeprotocol.OperationCancelled {
+	if status != bridgeprotocol.OperationSucceeded && status != bridgeprotocol.OperationPartial && status != bridgeprotocol.OperationFailed && status != bridgeprotocol.OperationCancelled {
 		return errors.New("operation target terminal status is invalid")
 	}
 	resultJSON, err := json.Marshal(result)
@@ -268,8 +268,8 @@ func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, st
 }
 
 func recalculateOperation(ctx context.Context, tx pgx.Tx, operationID string) error {
-	var queued, running, succeeded, failed, cancelled int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE status='queued'),count(*) FILTER(WHERE status='running'),count(*) FILTER(WHERE status='succeeded'),count(*) FILTER(WHERE status='failed'),count(*) FILTER(WHERE status='cancelled') FROM operation_targets WHERE operation_id=$1`, operationID).Scan(&queued, &running, &succeeded, &failed, &cancelled); err != nil {
+	var queued, running, succeeded, partial, failed, cancelled int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE status='queued'),count(*) FILTER(WHERE status='running'),count(*) FILTER(WHERE status='succeeded'),count(*) FILTER(WHERE status='partial'),count(*) FILTER(WHERE status='failed'),count(*) FILTER(WHERE status='cancelled') FROM operation_targets WHERE operation_id=$1`, operationID).Scan(&queued, &running, &succeeded, &partial, &failed, &cancelled); err != nil {
 		return err
 	}
 	if queued > 0 || running > 0 {
@@ -280,10 +280,9 @@ func recalculateOperation(ctx context.Context, tx pgx.Tx, operationID string) er
 		return err
 	}
 	status := bridgeprotocol.OperationSucceeded
-	if queued+running+succeeded+failed+cancelled == 0 && cancelRequested {
+	if queued+running+succeeded+partial+failed+cancelled == 0 && cancelRequested {
 		status = bridgeprotocol.OperationCancelled
-	}
-	if failed > 0 && succeeded > 0 {
+	} else if partial > 0 || (failed > 0 && succeeded > 0) || (cancelled > 0 && succeeded > 0) {
 		status = bridgeprotocol.OperationPartial
 	} else if failed > 0 {
 		status = bridgeprotocol.OperationFailed
@@ -294,6 +293,24 @@ func recalculateOperation(ctx context.Context, tx pgx.Tx, operationID string) er
 	}
 	_, err := tx.Exec(ctx, `UPDATE operations SET status=$2,finished_at=now(),updated_at=now() WHERE id=$1`, operationID, status)
 	return err
+}
+
+// UpdateOperationTargetRequest narrows a retry payload after a batch has
+// completed. The worker uses it to retain only failed/stale items so the
+// existing failed-target retry endpoint is also a failed-item retry.
+func (s *Store) UpdateOperationTargetRequest(ctx context.Context, operationTargetID string, request any) error {
+	body, err := marshalJSONObject(request)
+	if err != nil {
+		return err
+	}
+	command, err := s.pool.Exec(ctx, `UPDATE operation_targets SET request=$2,updated_at=now() WHERE id=$1 AND status='running'`, operationTargetID, jsonText(body))
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (s *Store) CancelOperation(ctx context.Context, operationID string) error {
@@ -477,7 +494,7 @@ func (s *Store) RetryFailedTargets(ctx context.Context, operationID, idempotency
 	} else if err != nil {
 		return domain.Operation{}, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT target_id::text FROM operation_targets WHERE operation_id=$1 AND status='failed' ORDER BY target_id`, operationID)
+	rows, err := s.pool.Query(ctx, `SELECT target_id::text FROM operation_targets WHERE operation_id=$1 AND status IN ('failed','partial') ORDER BY target_id`, operationID)
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -494,7 +511,7 @@ func (s *Store) RetryFailedTargets(ctx context.Context, operationID, idempotency
 		return domain.Operation{}, ErrNotFound
 	}
 	requests := map[string]any{}
-	requestRows, err := s.pool.Query(ctx, `SELECT target_id::text,request FROM operation_targets WHERE operation_id=$1 AND status='failed'`, operationID)
+	requestRows, err := s.pool.Query(ctx, `SELECT target_id::text,request FROM operation_targets WHERE operation_id=$1 AND status IN ('failed','partial')`, operationID)
 	if err != nil {
 		return domain.Operation{}, err
 	}

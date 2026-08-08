@@ -31,13 +31,16 @@ func (s *Store) ResolveProfileManifest(ctx context.Context, profileID, targetID 
 	if !target.Writable || target.Runtime == domain.RuntimeHermes {
 		return bridgeprotocol.DesiredManifest{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrHermesReadOnly, Message: "Hermes targets are read-only"}
 	}
+	if profile.ArchivedAt != nil || profile.PendingBindings {
+		return bridgeprotocol.DesiredManifest{}, ErrConflict
+	}
 	settings, err := s.Settings(ctx)
 	if err != nil {
 		return bridgeprotocol.DesiredManifest{}, err
 	}
 	manifest := bridgeprotocol.DesiredManifest{SchemaVersion: bridgeprotocol.ManifestSchemaVersion, Target: bridgeTarget(target), ProfileID: profile.ID, ProfileRevision: profile.Revision, Skills: []bridgeprotocol.SkillMember{}, MCPServers: []bridgeprotocol.MCPMember{}, ManagedMemberIDs: []string{}}
 	if target.Runtime != domain.RuntimeSharedRelay {
-		rows, err := s.pool.Query(ctx, `SELECT sk.id::text,v.id::text,sk.slug,a.canonical_sha256,a.content_hash FROM profile_skills ps JOIN skills sk ON sk.id=ps.skill_id JOIN skill_versions v ON v.id=sk.current_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE ps.profile_id=$1 AND sk.archived_at IS NULL ORDER BY sk.id`, profileID)
+		rows, err := s.pool.Query(ctx, `SELECT prs.skill_id::text,prs.skill_version_id::text,sk.slug,a.canonical_sha256,a.content_hash FROM profiles p JOIN profile_revision_skills prs ON prs.profile_revision_id=p.current_revision_id JOIN skills sk ON sk.id=prs.skill_id JOIN skill_versions v ON v.id=prs.skill_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE p.id=$1 ORDER BY prs.position`, profileID)
 		if err != nil {
 			return bridgeprotocol.DesiredManifest{}, err
 		}
@@ -58,7 +61,7 @@ func (s *Store) ResolveProfileManifest(ctx context.Context, profileID, targetID 
 		rows.Close()
 	}
 	if target.Runtime == domain.RuntimeSharedRelay || target.NodeKind == bridgeprotocol.NodeKindSalt {
-		rows, err := s.pool.Query(ctx, `SELECT ms.id::text,ms.revision,ms.name,ms.transport,ms.command,ms.args,ms.url,ms.env_refs,ms.header_refs,ms.content_hash FROM profile_mcp_servers pm JOIN mcp_servers ms ON ms.id=pm.server_id WHERE pm.profile_id=$1 ORDER BY ms.id`, profileID)
+		rows, err := s.pool.Query(ctx, `SELECT mr.server_id::text,mr.revision,mr.name,mr.transport,mr.command,mr.args,mr.url,mr.env_refs,mr.header_refs,mr.content_hash FROM profiles p JOIN profile_revision_mcp_servers prms ON prms.profile_revision_id=p.current_revision_id JOIN mcp_revisions mr ON mr.id=prms.mcp_revision_id WHERE p.id=$1 ORDER BY prms.position`, profileID)
 		if err != nil {
 			return bridgeprotocol.DesiredManifest{}, err
 		}
@@ -262,7 +265,7 @@ func (s *Store) ValidateManifestReferences(ctx context.Context, targetID string,
 	}
 	for _, member := range manifest.MCPServers {
 		var current bridgeprotocol.MCPMember
-		if err := s.pool.QueryRow(ctx, `SELECT id::text,revision,name,transport,command,args,url,env_refs,header_refs,content_hash FROM mcp_servers WHERE id=$1`, member.ServerID).Scan(&current.ServerID, &current.Revision, &current.Name, &current.Transport, &current.Command, &current.Args, &current.URL, &current.EnvRefs, &current.HeaderRefs, &current.ContentHash); errors.Is(err, pgx.ErrNoRows) {
+		if err := s.pool.QueryRow(ctx, `SELECT server_id::text,revision,name,transport,command,args,url,env_refs,header_refs,content_hash FROM mcp_revisions WHERE server_id=$1 AND revision=$2`, member.ServerID, member.Revision).Scan(&current.ServerID, &current.Revision, &current.Name, &current.Transport, &current.Command, &current.Args, &current.URL, &current.EnvRefs, &current.HeaderRefs, &current.ContentHash); errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		} else if err != nil {
 			return err
@@ -346,7 +349,7 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		}
 	}
 	var currentProfileRevision int64
-	if err := tx.QueryRow(ctx, `SELECT revision FROM profiles WHERE id=$1 FOR SHARE`, profileID).Scan(&currentProfileRevision); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT p.revision FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1 AND p.archived_at IS NULL AND NOT pr.pending_bindings FOR SHARE OF p`, profileID).Scan(&currentProfileRevision); errors.Is(err, pgx.ErrNoRows) {
 		return domain.Operation{}, ErrNotFound
 	} else if err != nil {
 		return domain.Operation{}, err
@@ -433,7 +436,7 @@ func (s *Store) ConsumePreflightConfirmation(ctx context.Context, token string) 
 		return ConfirmedPreflight{}, err
 	}
 	var currentRevision int64
-	if err := tx.QueryRow(ctx, `SELECT revision FROM profiles WHERE id=$1`, confirmed.ProfileID).Scan(&currentRevision); err != nil || currentRevision != confirmed.ProfileRevision {
+	if err := tx.QueryRow(ctx, `SELECT p.revision FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1 AND p.archived_at IS NULL AND NOT pr.pending_bindings`, confirmed.ProfileID).Scan(&currentRevision); err != nil || currentRevision != confirmed.ProfileRevision {
 		return ConfirmedPreflight{}, ErrConflict
 	}
 	if _, err := tx.Exec(ctx, `UPDATE preflight_confirmations SET consumed_at=now() WHERE token_hash=$1`, security.TokenHash(token)); err != nil {

@@ -107,6 +107,12 @@ func (c *Client) ExportLocalSkill(ctx context.Context, input bridgeprotocol.Loca
 	return result, err
 }
 
+func (c *Client) ExportLocalSkillBatch(ctx context.Context, input bridgeprotocol.LocalSkillBatchExportRequest) (bridgeprotocol.LocalSkillBatchExportResponse, error) {
+	var result bridgeprotocol.LocalSkillBatchExportResponse
+	err := c.call(ctx, http.MethodPost, "/v1/local/skills/export-batch", "", input, &result)
+	return result, err
+}
+
 func (c *Client) PreviewLocalMCP(ctx context.Context, input bridgeprotocol.LocalMCPPreviewRequest) (bridgeprotocol.LocalMCPPreviewResponse, error) {
 	var result bridgeprotocol.LocalMCPPreviewResponse
 	err := c.call(ctx, http.MethodPost, "/v1/local/mcp/preview", "", input, &result)

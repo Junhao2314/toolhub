@@ -50,6 +50,9 @@ func (m *Manager) Scan(user ManagedUser, runtimeKind string) (ScanResult, error)
 	if runtimeKind == bridgeprotocol.RuntimeSharedRelay {
 		return m.scanRelay(paths)
 	}
+	if runtimeKind == bridgeprotocol.RuntimeHermes {
+		return m.ScanHermes(user)
+	}
 	if err := rejectSymlinkComponents(user.Home, paths.SkillsRoot); err != nil {
 		return ScanResult{}, err
 	}

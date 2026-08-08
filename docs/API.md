@@ -36,8 +36,20 @@ Reusing a key with a different canonical request returns `409`.
   Library. Responses expose only `envKeys` and `headerKeys`, never values.
 - MCP input secret semantics are write-only: a non-empty value sets/replaces;
   an existing key with an empty value is retained; an omitted key is removed.
-- `/profiles` is the only Profile model. Membership contains Skill IDs and MCP
-  server IDs and does not pin versions.
+- `/profiles` is the only Profile model. Each immutable revision pins exact
+  Skill versions and MCP revisions; current Library pointers are used only for
+  new Profiles or explicit Refresh.
+- `GET /profiles?includeArchived=true` includes reversible archived Profiles
+  after active rows. `POST /profiles/{id}/archive` requires the current
+  revision; `POST /profiles/{id}/restore` creates an `archived_restore`
+  revision; `POST /profiles/{id}/purge` is irreversible and succeeds only when
+  no snapshot, pending operation, or bundle fingerprint still references the
+  archived Profile.
+- Bundle imports that contain MCP slots expose pending write-only bindings via
+  `GET /profiles/{id}/secret-bindings`. Complete them with
+  `POST /profiles/{id}/secret-bindings` using `{revision, values}` where
+  `values` is keyed by the returned `slotHash`; plaintext values are encrypted
+  immediately and never returned.
 
 Unmanaged Skills found in a scanned `local/claude` or `local/codex` target can
 be imported with `POST /targets/{id}/skill-import`. The request is bound to the
@@ -49,7 +61,15 @@ Local native MCP intake is a two-step flow. `POST
 names, and five-minute one-use confirmation tokens. It never returns values.
 After explicit browser confirmation, `POST /mcp/import` consumes one token; the
 worker captures the still-matching native entry once and encrypts its values
-immediately. Salt targets and Hermes cannot be Library intake sources.
+immediately. Salt targets and Hermes MCP intake cannot be Library sources.
+Local Hermes Skills use opaque IDs through the capped batch route
+`POST /targets/{id}/skill-imports`; items commit independently and a partial
+operation exposes failed-only retry data.
+
+Profile Bundles are ZIP uploads. Standard export/import carries no Secret
+values; `export-secrets` requires current-password reauthentication and sends
+an explicit plaintext backup with `Cache-Control: no-store`. Preview stores
+only a short-lived hash-bound token; import re-uploads the same bytes.
 
 `POST /profiles/{id}/preflight` accepts 1-100 target IDs. It resolves current
 Library revisions and returns a per-target destructive diff plus a five-minute,
@@ -68,19 +88,21 @@ then persists the discovery result; clients observe completion through
 empty `managedUsername` clears the override and makes every target on that node
 inherit the global Setting again. Local nodes cannot be overridden. Existing
 desired snapshots remain bound to their original username and require an
-explicit Apply or target edit before destructive work resumes.
+explicit Profile Apply before destructive work resumes.
 
 `GET /targets/{id}` returns the target projection, latest runtime inventory,
 target revision, and optional active immutable desired snapshot. The browser
-never submits a raw manifest to target edit: `POST /targets/{id}/edit` accepts
-Skill/MCP IDs and the observed target revision; the server resolves and validates
-the canonical manifest.
+Target Edit is no longer a Browser capability. Historical `target_edit` rows
+remain readable for audit, while new state must come from a Profile Apply or a
+verified Restore.
 
 Local targets are:
 
 - `local/claude` and `local/codex`: Skills only.
 - `local/shared-relay`: MCP only, including the shared mcpm registry and the
-  Claude/Codex relay anchors.
+  Claude/Codex/Hermes relay anchors. Its Apply mirrors Hermes' existing
+  `mcp_servers` map to the single `toolhub-relay` anchor; reconcile preserves
+  later unmanaged Hermes entries while repairing the anchor.
 - `local/hermes`: read-only inventory.
 
 Salt nodes expose Claude/Codex writable Skill+MCP targets and read-only Hermes.
@@ -90,18 +112,22 @@ entries, `.system`, and ToolHub-reserved names are outside writable scope.
 Restore accepts a catalog backup ID and expected target revision. It backs up
 current state, restores atomically, scans the restored content, and pins a new
 desired snapshot so the next reconcile does not reverse the restore.
+When the active snapshot has `sourceKind=restore`,
+`POST /targets/{id}/profile-adoption` can create a named Profile from that
+verified restored manifest. Hermes remains read-only throughout this flow.
 
 Desired snapshots bind the managed username and, for `local/shared-relay`, the
 fixed relay port used when the snapshot was created. Changing either Setting
 does not silently redirect an old snapshot into another home or port. Apply,
-edit, Restore, and reconcile report `revision_conflict` until an explicit
-Profile Apply or target edit creates a snapshot with the new binding.
+Restore, and reconcile report `revision_conflict` until an explicit Profile
+Apply creates a snapshot with the new binding.
 
 ## Operations
 
 All asynchronous work uses `/operations`; there is no separate jobs API.
 Operation states are `queued`, `running`, `succeeded`, `partial`, `failed`, and
-`cancelled`. Per-target states omit `partial`.
+`cancelled`. Batch intake may also mark its single target step `partial` so
+`retry-failed` can carry only failed/stale items.
 
 `GET /operations` is the compact history projection. `GET /operations/{id}`
 adds each target step's Bridge operation ID, Salt JID, redacted safe result, and

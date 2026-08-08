@@ -272,6 +272,8 @@ func (w *Worker) loop(ctx context.Context, index int) {
 		status := bridgeprotocol.OperationSucceeded
 		if apiErr != nil {
 			status = bridgeprotocol.OperationFailed
+		} else if result.Status == bridgeprotocol.OperationPartial {
+			status = bridgeprotocol.OperationPartial
 		}
 		if err := w.store.FinishOperationTarget(ctx, item.OperationTarget.ID, status, result, apiErr); err != nil {
 			w.logger.Error("finish operation target", "operationTargetId", item.OperationTarget.ID, "error", err)
@@ -328,6 +330,12 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 		}
 		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: response.TargetRevision, Relay: response.Relay}, nil
 	case "skill_import":
+		var batch struct {
+			Items []bridgeprotocol.LocalSkillBatchItem `json:"items"`
+		}
+		if err := json.Unmarshal(item.OperationTarget.Request, &batch); err == nil && len(batch.Items) > 0 {
+			return w.executeLocalSkillBatchImport(ctx, item, target, batch.Items)
+		}
 		return w.executeLocalSkillImport(ctx, item, target)
 	case "mcp_import":
 		return w.executeLocalMCPImport(ctx, item, target)
@@ -698,6 +706,104 @@ func (w *Worker) executeLocalSkillImport(ctx context.Context, item store.WorkIte
 	}
 	_ = w.store.Audit(ctx, domain.AuditEvent{Action: "skill_import", ResourceType: "skill", ResourceID: skill.ID, Outcome: "success", Metadata: map[string]any{"source": "local", "targetId": target.ID, "contentHash": request.ContentHash}})
 	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: item.Target.Health, Details: map[string]any{"skillId": skill.ID, "versionId": skill.CurrentVersionID, "created": created}}, nil
+}
+
+func (w *Worker) executeLocalSkillBatchImport(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target, requested []bridgeprotocol.LocalSkillBatchItem) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	if target.NodeKind != bridgeprotocol.NodeKindLocal || target.Runtime != bridgeprotocol.RuntimeHermes {
+		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrProtectedScope, Message: "Hermes Skill intake is available only from local Hermes"}
+	}
+	var request struct {
+		TargetRevision string `json:"targetRevision"`
+	}
+	if err := json.Unmarshal(item.OperationTarget.Request, &request); err != nil || !bridgeprotocol.IsSHA256(request.TargetRevision) {
+		return bridgeprotocol.TargetResult{}, publicError(errors.New("batch Skill import request is invalid"))
+	}
+	if len(requested) == 0 || len(requested) > 50 {
+		return bridgeprotocol.TargetResult{}, publicError(errors.New("batch Skill import item count is invalid"))
+	}
+	results := make([]map[string]any, 0, len(requested))
+	failed := make([]bridgeprotocol.LocalSkillBatchItem, 0)
+	succeeded := 0
+	// Keep each ephemeral response well below the Bridge ceiling. The Bridge
+	// rescans for every chunk, so a stale revision fails the whole chunk while
+	// individual archive/Library failures remain item-scoped below.
+	for start := 0; start < len(requested); start += 3 {
+		end := start + 3
+		if end > len(requested) {
+			end = len(requested)
+		}
+		response, err := w.bridge.ExportLocalSkillBatch(ctx, bridgeprotocol.LocalSkillBatchExportRequest{Target: target, ExpectedRevision: request.TargetRevision, Items: requested[start:end]})
+		if err != nil {
+			apiErr := publicError(err)
+			for _, candidate := range requested[start:end] {
+				failed = append(failed, candidate)
+				results = append(results, map[string]any{"id": candidate.ID, "status": "Failed", "error": map[string]any{"code": apiErr.Code, "message": apiErr.Message}})
+			}
+			continue
+		}
+		for _, exported := range response.Items {
+			itemResult := map[string]any{"id": exported.ID, "status": exported.Status}
+			if exported.Error != nil || exported.Status != "Exported" {
+				if exported.Error != nil {
+					itemResult["error"] = map[string]any{"code": exported.Error.Code, "message": exported.Error.Message}
+				}
+				for _, candidate := range requested[start:end] {
+					if candidate.ID == exported.ID {
+						failed = append(failed, candidate)
+						break
+					}
+				}
+				results = append(results, itemResult)
+				continue
+			}
+			pkg, scanErr := skills.ScanZIP(exported.Archive, skills.DefaultLimits)
+			clear(exported.Archive)
+			if scanErr != nil || pkg.SHA256 != exported.SHA256 || pkg.ContentHash != exported.ContentHash || pkg.Slug != exported.Slug {
+				itemResult["status"] = "Failed"
+				itemResult["error"] = map[string]any{"code": bridgeprotocol.ErrRevisionConflict, "message": "exported Skill package failed identity verification"}
+				for _, candidate := range requested[start:end] {
+					if candidate.ID == exported.ID {
+						failed = append(failed, candidate)
+						break
+					}
+				}
+				results = append(results, itemResult)
+				continue
+			}
+			source := store.SourceInput{Kind: "local", Name: "hermes/" + exported.Name, Commit: exported.ContentHash, Metadata: map[string]any{"source": "hermes", "targetId": target.ID, "provider": exported.Provider, "category": exported.Category}}
+			imported, created, importErr := w.store.ImportSkill(ctx, source, pkg, map[string]any{"source": "hermes", "targetId": target.ID, "provider": exported.Provider, "category": exported.Category, "contentHash": exported.ContentHash})
+			if importErr != nil {
+				itemResult["status"] = "Failed"
+				itemResult["error"] = map[string]any{"code": bridgeprotocol.ErrInvalidRequest, "message": "Skill could not be committed"}
+				for _, candidate := range requested[start:end] {
+					if candidate.ID == exported.ID {
+						failed = append(failed, candidate)
+						break
+					}
+				}
+			} else {
+				if created {
+					itemResult["status"] = "Imported"
+				} else {
+					itemResult["status"] = "Reused"
+				}
+				itemResult["skillId"], itemResult["versionId"] = imported.ID, imported.CurrentVersionID
+				succeeded++
+			}
+			results = append(results, itemResult)
+		}
+	}
+	if len(failed) > 0 {
+		_ = w.store.UpdateOperationTargetRequest(ctx, item.OperationTarget.ID, map[string]any{"targetRevision": request.TargetRevision, "items": failed})
+	}
+	details := map[string]any{"items": results, "failedItems": failed, "targetRevision": request.TargetRevision}
+	if succeeded == 0 {
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationFailed, Health: item.Target.Health, Details: details}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrTargetUnavailable, Message: "No Hermes Skills could be imported", Retryable: true}
+	}
+	if len(failed) > 0 {
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationPartial, Health: item.Target.Health, Details: details}, nil
+	}
+	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: item.Target.Health, Details: details}, nil
 }
 
 func (w *Worker) executeLocalMCPImport(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {

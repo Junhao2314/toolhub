@@ -114,6 +114,18 @@ func (s *Store) UpdatePassword(ctx context.Context, currentPassword, newPassword
 	})
 }
 
+func (s *Store) VerifyCurrentPassword(ctx context.Context, currentPassword string) error {
+	var hash string
+	if err := s.pool.QueryRow(ctx, "SELECT password_hash FROM account WHERE singleton").Scan(&hash); err != nil {
+		return err
+	}
+	valid, err := security.VerifyPassword(hash, currentPassword)
+	if err != nil || !valid {
+		return ErrInvalidCurrentPassword
+	}
+	return nil
+}
+
 func (s *Store) updateCredentials(ctx context.Context, currentPassword string, update func(pgx.Tx, string) error) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

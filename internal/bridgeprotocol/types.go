@@ -313,14 +313,24 @@ type RefreshNodesResponse struct {
 }
 
 type InventoryMember struct {
-	ID          string   `json:"id"`
-	Kind        string   `json:"kind"`
-	Name        string   `json:"name"`
-	ContentHash string   `json:"contentHash,omitempty"`
-	Protected   bool     `json:"protected"`
-	Scope       string   `json:"scope,omitempty"`
-	Revision    int64    `json:"revision,omitempty"`
-	SecretKeys  []string `json:"secretKeys,omitempty"`
+	ID                string   `json:"id"`
+	Kind              string   `json:"kind"`
+	Name              string   `json:"name"`
+	Slug              string   `json:"slug,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	ContentHash       string   `json:"contentHash,omitempty"`
+	Protected         bool     `json:"protected"`
+	Scope             string   `json:"scope,omitempty"`
+	Revision          int64    `json:"revision,omitempty"`
+	SecretKeys        []string `json:"secretKeys,omitempty"`
+	Source            string   `json:"source,omitempty"`
+	Provider          string   `json:"provider,omitempty"`
+	Category          string   `json:"category,omitempty"`
+	Trust             string   `json:"trust,omitempty"`
+	Importable        bool     `json:"importable,omitempty"`
+	EligibilityReason string   `json:"eligibilityReason,omitempty"`
+	Shadowed          bool     `json:"shadowed,omitempty"`
+	Builtin           bool     `json:"builtin,omitempty"`
 }
 
 type ScanRequest struct {
@@ -347,6 +357,36 @@ type LocalSkillExportResponse struct {
 	SHA256      string `json:"sha256"`
 	ContentHash string `json:"contentHash"`
 	Archive     []byte `json:"archive"`
+}
+
+type LocalSkillBatchItem struct {
+	ID          string `json:"id"`
+	ContentHash string `json:"contentHash"`
+}
+
+type LocalSkillBatchExportRequest struct {
+	Target           Target                `json:"target"`
+	ExpectedRevision string                `json:"expectedRevision"`
+	Items            []LocalSkillBatchItem `json:"items"`
+}
+
+type LocalSkillBatchExportItem struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name,omitempty"`
+	Slug        string    `json:"slug,omitempty"`
+	SHA256      string    `json:"sha256,omitempty"`
+	ContentHash string    `json:"contentHash,omitempty"`
+	Archive     []byte    `json:"archive,omitempty"`
+	Source      string    `json:"source,omitempty"`
+	Provider    string    `json:"provider,omitempty"`
+	Category    string    `json:"category,omitempty"`
+	Status      string    `json:"status"`
+	Error       *APIError `json:"error,omitempty"`
+}
+
+type LocalSkillBatchExportResponse struct {
+	TargetRevision string                      `json:"targetRevision"`
+	Items          []LocalSkillBatchExportItem `json:"items"`
 }
 
 // LocalMCPServerPreview contains only non-secret fields. ContentHash is bound

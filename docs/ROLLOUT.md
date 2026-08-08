@@ -22,7 +22,7 @@ Record image digests, binary versions, unit contents, volume names, and the
 current Salt state root. Take restorable backups of:
 
 1. the PostgreSQL volume;
-2. local Claude/Codex managed homes;
+2. local Claude/Codex/Hermes managed homes;
 3. mcpm registry/profile and native anchors;
 4. `/srv/salt/states`;
 5. generation-1 ToolHub/Agent packages and service configuration.
@@ -59,8 +59,9 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
 1. Verify `/usr/bin/mcpm --version` and that port `6276` (or the configured
    fixed port) is free.
 2. Apply a Profile to `local/shared-relay`.
-3. Connect at least one Claude and one Codex client to the same endpoint.
-4. Verify exactly one `toolhub-relay` user-scope anchor in each native config.
+3. Connect at least one Claude, Codex, and local Hermes client to the same endpoint.
+4. Verify exactly one `toolhub-relay` user-scope anchor in each native config;
+   confirm the previous Hermes `mcp_servers` entries were removed by Apply.
 5. Stop the relay through ToolHub, wait through reconcile, and verify
    `intentional_paused` prevents automatic start while config drift is still
    detected/repaired.

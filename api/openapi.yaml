@@ -241,6 +241,12 @@ paths:
     get:
       tags: [Profiles]
       operationId: listProfiles
+      parameters:
+        - name: includeArchived
+          in: query
+          required: false
+          description: Include archived Profiles after active Profiles.
+          schema: {type: boolean, default: false}
       responses:
         '200': {$ref: '#/components/responses/ProfileList'}
     post:
@@ -271,6 +277,115 @@ paths:
       responses:
         '204': {$ref: '#/components/responses/NoContent'}
         '409': {$ref: '#/components/responses/Error'}
+    get:
+      tags: [Profiles]
+      operationId: getProfile
+      responses:
+        '200': {$ref: '#/components/responses/Profile'}
+  /profiles/{profileID}/history:
+    get:
+      tags: [Profiles]
+      operationId: profileHistory
+      responses:
+        '200': {$ref: '#/components/responses/ProfileRevisionList'}
+  /profiles/{profileID}/refresh:
+    post:
+      tags: [Profiles]
+      operationId: refreshProfile
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [revision], properties: {revision: {type: integer, minimum: 1}}}}}
+      responses: {'200': {$ref: '#/components/responses/Profile'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{profileID}/clone:
+    post:
+      tags: [Profiles]
+      operationId: cloneProfile
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string, minLength: 1, maxLength: 120}}}}}
+      responses: {'201': {$ref: '#/components/responses/Profile'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{profileID}/archive:
+    post:
+      tags: [Profiles]
+      operationId: archiveProfile
+      parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false, required: [revision], properties: {revision: {type: integer, minimum: 1}}}}}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{profileID}/restore:
+    post:
+      tags: [Profiles]
+      operationId: restoreArchivedProfile
+      parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false, required: [revision], properties: {revision: {type: integer, minimum: 1}}}}}
+      responses: {'200': {$ref: '#/components/responses/Profile'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{profileID}/purge:
+    post:
+      tags: [Profiles]
+      operationId: purgeArchivedProfile
+      parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{profileID}/secret-bindings:
+    get:
+      tags: [Profiles]
+      operationId: listPendingSecretBindings
+      parameters: [{$ref: '#/components/parameters/ProfileID'}]
+      responses: {'200': {$ref: '#/components/responses/PendingSecretBindingList'}, '409': {$ref: '#/components/responses/Error'}}
+    post:
+      tags: [Profiles]
+      operationId: completePendingSecretBindings
+      parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [revision, values]
+              properties:
+                revision: {type: integer, minimum: 1}
+                values: {type: object, additionalProperties: {type: string, writeOnly: true}}
+      responses: {'200': {$ref: '#/components/responses/Profile'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{profileID}/bundle/export:
+    post:
+      tags: [Profiles]
+      operationId: exportProfileBundle
+      parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      responses: {'200': {description: Standard Profile Bundle, headers: {Content-Disposition: {schema: {type: string}}}, content: {application/octet-stream: {schema: {type: string, format: binary}}}}}
+  /profiles/{profileID}/bundle/export-secrets:
+    post:
+      tags: [Profiles]
+      operationId: exportSecretProfileBundle
+      description: Explicit plaintext Secret backup. Requires current-password reauthentication and Cache-Control no-store.
+      parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [currentPassword], properties: {currentPassword: {type: string, format: password, writeOnly: true}, originLabel: {type: string}}}}}
+      responses: {'200': {description: Plaintext Secret Bundle, headers: {Cache-Control: {schema: {type: string}, description: Must be no-store}, Pragma: {schema: {type: string}}, Content-Disposition: {schema: {type: string}}}, content: {application/octet-stream: {schema: {type: string, format: binary}}}}}
+  /profiles/bundles/preview:
+    post:
+      tags: [Profiles]
+      operationId: previewProfileBundle
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/octet-stream: {schema: {type: string, format: binary}}, multipart/form-data: {schema: {type: object, required: [bundle], properties: {bundle: {type: string, format: binary}}}}}
+      responses: {'200': {description: Bundle preview, content: {application/json: {schema: {$ref: '#/components/schemas/BundlePreview'}}}}, '400': {$ref: '#/components/responses/Error'}}
+  /profiles/bundles/import:
+    post:
+      tags: [Profiles]
+      operationId: importProfileBundle
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {multipart/form-data: {schema: {type: object, required: [bundle, confirmationToken], properties: {bundle: {type: string, format: binary}, confirmationToken: {type: string, writeOnly: true}, name: {type: string}, confirmDuplicate: {type: boolean}, importAsNew: {type: boolean}}}}}
+      responses: {'201': {$ref: '#/components/responses/Profile'}, '409': {$ref: '#/components/responses/Error'}}
   /profiles/{profileID}/preflight:
     post:
       tags: [Profiles]
@@ -399,6 +514,37 @@ paths:
       responses:
         '202': {$ref: '#/components/responses/Operation'}
         '409': {$ref: '#/components/responses/Error'}
+  /targets/{targetID}/skill-imports:
+    post:
+      tags: [Targets]
+      operationId: importLocalHermesSkills
+      description: Queues an independently committed, opaque-ID Hermes batch capped at 50 items.
+      parameters:
+        - {$ref: '#/components/parameters/TargetID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [targetRevision, items]
+              properties:
+                targetRevision: {$ref: '#/components/schemas/SHA256'}
+                confirmUpdates: {type: boolean}
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  uniqueItems: true
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [id, slug, contentHash]
+                    properties: {id: {type: string, minLength: 1}, slug: {type: string}, contentHash: {$ref: '#/components/schemas/SHA256'}}
+      responses: {'202': {$ref: '#/components/responses/Operation'}, '409': {$ref: '#/components/responses/Error'}}
   /targets/{targetID}/mcp-import/preflight:
     post:
       tags: [Targets]
@@ -415,28 +561,6 @@ paths:
           description: Five-minute, one-use confirmations bound to the current native configuration revision.
           content: {application/json: {schema: {$ref: '#/components/schemas/LocalMCPImportPreflight'}}}
         '409': {$ref: '#/components/responses/Error'}
-  /targets/{targetID}/edit:
-    post:
-      tags: [Targets]
-      operationId: editTarget
-      parameters:
-        - {$ref: '#/components/parameters/TargetID'}
-        - {$ref: '#/components/parameters/CSRFToken'}
-        - {$ref: '#/components/parameters/IdempotencyKey'}
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [expectedRevision, skillIds, mcpServerIds]
-              properties:
-                expectedRevision: {$ref: '#/components/schemas/SHA256'}
-                skillIds: {type: array, maxItems: 500, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
-                mcpServerIds: {type: array, maxItems: 500, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
-      responses:
-        '202': {$ref: '#/components/responses/Operation'}
   /targets/{targetID}/backups:
     get:
       tags: [Targets]
@@ -463,6 +587,16 @@ paths:
               properties: {backupId: {$ref: '#/components/schemas/UUID'}, expectedRevision: {$ref: '#/components/schemas/SHA256'}}
       responses:
         '202': {$ref: '#/components/responses/Operation'}
+  /targets/{targetID}/profile-adoption:
+    post:
+      tags: [Targets, Profiles]
+      operationId: adoptRestoredTargetProfile
+      description: Creates a new Profile from the active desired snapshot only when its source is restore.
+      parameters: [{$ref: '#/components/parameters/TargetID'}, {$ref: '#/components/parameters/CSRFToken'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, additionalProperties: false, required: [name], properties: {name: {type: string, minLength: 1, maxLength: 120}}}}}
+      responses: {'201': {$ref: '#/components/responses/Profile'}, '409': {$ref: '#/components/responses/Error'}}
   /targets/{targetID}/relay/{action}:
     post:
       tags: [Targets]
@@ -567,6 +701,8 @@ components:
     MCPServerList: {description: MCP servers, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/MCPServer'}}}}}}}
     Profile: {description: Unified Profile, content: {application/json: {schema: {$ref: '#/components/schemas/Profile'}}}}
     ProfileList: {description: Profiles, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Profile'}}}}}}}
+    ProfileRevisionList: {description: Immutable Profile revision history, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/ProfileRevision'}}}}}}}
+    PendingSecretBindingList: {description: Pending write-only secret slots, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/PendingSecretBinding'}}}}}}}
     NodeList: {description: Nodes, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Node'}}}}}}}
     TargetList: {description: Targets, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Target'}}}}}}}
     Operation: {description: Durable operation, content: {application/json: {schema: {$ref: '#/components/schemas/Operation'}}}}
@@ -745,6 +881,46 @@ components:
         revision: {type: integer, minimum: 0}
         skillIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
         mcpServerIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
+        skillVersionIds: {type: object, additionalProperties: {$ref: '#/components/schemas/UUID'}}
+        mcpRevisionIds: {type: object, additionalProperties: {$ref: '#/components/schemas/UUID'}}
+    ProfileSkillPin:
+      type: object
+      required: [skillId, versionId, slug, name, sha256, contentHash, current]
+      properties:
+        skillId: {$ref: '#/components/schemas/UUID'}
+        versionId: {$ref: '#/components/schemas/UUID'}
+        slug: {type: string}
+        name: {type: string}
+        sha256: {$ref: '#/components/schemas/SHA256'}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+        current: {type: boolean}
+    ProfileMCPPin:
+      type: object
+      required: [serverId, revisionId, revision, name, transport, envKeys, headerKeys, contentHash, current]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        revisionId: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, minimum: 1}
+        name: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        command: {type: string}
+        args: {type: array, items: {type: string}}
+        url: {type: string}
+        envKeys: {type: array, items: {type: string}}
+        headerKeys: {type: array, items: {type: string}}
+        contentHash: {$ref: '#/components/schemas/SHA256'}
+        current: {type: boolean}
+    PendingSecretBinding:
+      type: object
+      required: [profileRevisionId, mcpRevisionId, namespace, key, slotHash, bound]
+      properties:
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        mcpRevisionId: {$ref: '#/components/schemas/UUID'}
+        namespace: {type: string, enum: [env, header]}
+        key: {type: string}
+        slotHash: {$ref: '#/components/schemas/SHA256'}
+        bound: {type: boolean}
+        boundAt: {type: [string, 'null'], format: date-time}
     Profile:
       allOf:
         - {$ref: '#/components/schemas/ProfileInput'}
@@ -752,8 +928,45 @@ components:
           required: [id, createdAt, updatedAt]
           properties:
             id: {$ref: '#/components/schemas/UUID'}
+            currentRevisionId: {$ref: '#/components/schemas/UUID'}
+            canonicalHash: {$ref: '#/components/schemas/SHA256'}
+            pendingBindings: {type: boolean}
+            archivedAt: {type: [string, 'null'], format: date-time}
+            skills: {type: array, items: {$ref: '#/components/schemas/ProfileSkillPin'}}
+            mcpServers: {type: array, items: {$ref: '#/components/schemas/ProfileMCPPin'}}
             createdAt: {type: string, format: date-time}
             updatedAt: {type: string, format: date-time}
+    ProfileRevision:
+      type: object
+      required: [id, profileId, revision, name, canonicalHash, skills, mcpServers, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, minimum: 1}
+        name: {type: string}
+        description: {type: string}
+        canonicalHash: {$ref: '#/components/schemas/SHA256'}
+        pendingBindings: {type: boolean}
+        skills: {type: array, items: {$ref: '#/components/schemas/ProfileSkillPin'}}
+        mcpServers: {type: array, items: {$ref: '#/components/schemas/ProfileMCPPin'}}
+        createdAt: {type: string, format: date-time}
+    BundlePreview:
+      type: object
+      required: [bundleHash, kind, profileName, canonicalHash, components, duplicate, requiresRename, updateExisting, pendingBindings, confirmationToken, expiresAt]
+      properties:
+        bundleHash: {$ref: '#/components/schemas/SHA256'}
+        kind: {type: string, enum: [profile, profile-secrets]}
+        profileName: {type: string}
+        canonicalHash: {$ref: '#/components/schemas/SHA256'}
+        origin: {type: object}
+        components: {type: array, items: {type: object}}
+        duplicate: {type: boolean}
+        requiresRename: {type: boolean}
+        suggestedName: {type: string}
+        updateExisting: {type: boolean}
+        pendingBindings: {type: integer, minimum: 0}
+        confirmationToken: {type: string, writeOnly: true}
+        expiresAt: {type: string, format: date-time}
     Node:
       type: object
       additionalProperties: false
@@ -827,6 +1040,16 @@ components:
         scope: {type: string}
         revision: {type: integer, minimum: 1}
         secretKeys: {type: array, items: {type: string}}
+        slug: {type: string}
+        description: {type: string}
+        source: {type: string}
+        provider: {type: string}
+        category: {type: string}
+        trust: {type: string}
+        importable: {type: boolean}
+        eligibilityReason: {type: string}
+        shadowed: {type: boolean}
+        builtin: {type: boolean}
     DesiredManifest:
       type: object
       additionalProperties: false
@@ -947,7 +1170,7 @@ components:
         id: {$ref: '#/components/schemas/UUID'}
         targetId: {$ref: '#/components/schemas/UUID'}
         targetKey: {type: string}
-        status: {type: string, enum: [queued, running, succeeded, failed, cancelled]}
+        status: {type: string, enum: [queued, running, succeeded, partial, failed, cancelled]}
         attempt: {type: integer, minimum: 1}
         pendingRerun: {type: boolean}
         bridgeOperationId: {$ref: '#/components/schemas/UUID'}

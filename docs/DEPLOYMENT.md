@@ -25,7 +25,7 @@ Bridge over TCP.
 Before replacing anything, record the current image/version and back up:
 
 - the PostgreSQL volume;
-- local Claude/Codex homes and MCP configuration;
+- local Claude/Codex/Hermes homes and MCP configuration;
 - mcpm registry/profile data;
 - `/srv/salt/states`;
 - existing ToolHub/Agent packages and unit files.
@@ -129,7 +129,7 @@ credentials have no effect after the account exists.
 
 1. Refresh nodes and verify only accepted Salt keys are shown.
 2. Restore Salt connectivity until remote nodes report `3008.x`.
-3. Scan `local/claude`, `local/codex`, and `local/shared-relay`.
+3. Scan `local/claude`, `local/codex`, `local/hermes`, and `local/shared-relay`.
 4. For local MCP, verify `/usr/bin/mcpm`, configure a free fixed port, and Apply
    a Profile to `local/shared-relay`.
 5. Canary one non-critical Salt minion before a fleet Apply.

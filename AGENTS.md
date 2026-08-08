@@ -76,10 +76,10 @@ Use the matching project skills:
   exists; username/password changes revoke every session.
 - Update discovery can import and advance Library current versions, but never
   Apply. Imported Skill artifacts remain immutable/content-addressed.
-- A Profile references Skill/MCP IDs. Preflight resolves exact current
-  versions/revisions/secrets into a five-minute one-use token bound to Profile
-  revision, target revision, and canonical manifest.
-- Apply/edit/Restore create immutable desired snapshots. The active target
+- A Profile revision pins exact Skill versions, MCP revisions, and installation-
+  local Secret bindings. Library heads affect only new Profiles or explicit
+  Refresh; Preflight never silently advances a Profile.
+- Apply/Restore create immutable desired snapshots. The active target
   pointer and health projection are mutable; snapshot manifests are not.
 - Apply mirrors only manageable scope. Protected/built-in/hidden entries,
   `.system`, and non-user Claude MCP scopes are excluded.
@@ -90,7 +90,8 @@ Use the matching project skills:
 - Local MCP is the independent `local/shared-relay` target. Claude/Codex share
   one mcpm `toolhub` Profile and one HTTP relay; local Skill targets remain
   runtime-specific.
-- Remote Claude/Codex MCP writes native user scope. Hermes is always read-only.
+- Remote Claude/Codex MCP writes native user scope. Hermes is always read-only;
+  only guarded local Hermes Skill intake into the Library is permitted.
 - Secrets are encrypted at rest, referenced by UUID in manifests, write-only in
   the browser, and ephemeral in Bridge/Salt calls.
 - BoltDB must never store plaintext secrets, archives, editable config, or raw

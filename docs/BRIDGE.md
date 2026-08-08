@@ -67,14 +67,15 @@ character `Idempotency-Key`. Reusing a key with the same request returns the
 stored safe response; reusing it with a different request returns
 `idempotency_conflict`.
 
-Three authenticated worker-only intake routes are deliberately ephemeral:
-`/local/skills/export`, `/local/mcp/preview`, and `/local/mcp/capture`. They
+Four authenticated worker-only intake routes are deliberately ephemeral:
+`/local/skills/export`, `/local/skills/export-batch`, `/local/mcp/preview`, and
+`/local/mcp/capture`. They
 still require HMAC timestamp/nonce authentication, but bypass the idempotency
 response journal. Preview exposes only key names. Capture plaintext and Skill
 archives live only in the request/worker call chain and must be encrypted or
 imported immediately.
 
-The server derives Apply/edit/Restore semantics from the typed route. A caller
+The server derives Apply/Restore semantics from the typed route. A caller
 cannot change the operation kind by editing `operationKind` in the body.
 
 ## Durable Journal And Recovery

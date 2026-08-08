@@ -113,7 +113,7 @@ func TestRelayApplyRuntimeFailureKeepsValidatedConfiguration(t *testing.T) {
 	firstManifest := relayManifest(target, port, "https://example.invalid/one")
 	applyRelay(t, manager, user, firstManifest, "apply", false)
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
-	files := []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, manager.EnvironmentFile}
+	files := []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, manager.EnvironmentFile}
 	before := map[string][]byte{}
 	for _, path := range files {
 		before[path], _ = os.ReadFile(path)
@@ -163,7 +163,7 @@ func TestRelayApplyWriteFailureRollsBackConfiguration(t *testing.T) {
 	if _, err := manager.Apply(context.Background(), user, request); err == nil {
 		t.Fatal("Apply unexpectedly succeeded with an unwritable environment path")
 	}
-	for _, path := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig} {
+	for _, path := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig} {
 		body, readErr := os.ReadFile(path)
 		if readErr != nil || string(body) != string(before[path].Body) {
 			t.Fatalf("rollback mismatch for %s: err=%v", path, readErr)
@@ -225,6 +225,87 @@ func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	}
 	if readinessAttempts != 3 {
 		t.Fatalf("Restore health attempts=%d", readinessAttempts)
+	}
+}
+
+func TestRelayApplyReplacesHermesMCPWithSharedAnchor(t *testing.T) {
+	manager, _, user, target, port := relayFixture(t, false)
+	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, paths.HermesConfig, []byte("theme: dark\nmcp_servers:\n  old-server:\n    url: https://old.invalid/mcp\n  another-server:\n    command: old\n"))
+
+	manifest := relayManifest(target, port, "https://example.invalid/one")
+	result := applyRelay(t, manager, user, manifest, "apply", false)
+	if result.BackupID == "" {
+		t.Fatalf("Apply did not create a relay backup: %+v", result)
+	}
+	root, err := readYAMLMap(paths.HermesConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root["theme"] != "dark" {
+		t.Fatalf("Apply did not preserve unrelated Hermes config: %+v", root)
+	}
+	servers, err := yamlStringMap(root["mcp_servers"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers) != 1 {
+		t.Fatalf("Hermes MCP entries were not mirrored: %+v", servers)
+	}
+	anchor, ok := servers[RelayAnchor].(map[string]any)
+	wantURL := "http://127.0.0.1:" + strconv.Itoa(port) + "/mcp"
+	if !ok || anchor["url"] != wantURL || anchor["enabled"] != true {
+		t.Fatalf("unexpected Hermes relay anchor: %+v", servers[RelayAnchor])
+	}
+	members, err := ScanSharedRelay(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundHermes := false
+	for _, member := range members {
+		if member.ID == "anchor:hermes" {
+			foundHermes = true
+			break
+		}
+	}
+	if !foundHermes {
+		t.Fatalf("shared relay inventory omitted Hermes anchor: %+v", members)
+	}
+	backupBody, err := os.ReadFile(filepath.Join(manager.BackupRoot, target.ID, result.BackupID, "hermes"))
+	if err != nil || !strings.Contains(string(backupBody), "old-server") {
+		t.Fatalf("relay backup omitted prior Hermes config: err=%v body=%s", err, backupBody)
+	}
+}
+
+func TestRelayReconcileRepairsHermesAnchorAndPreservesUnmanaged(t *testing.T) {
+	manager, _, user, target, port := relayFixture(t, false)
+	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, paths.HermesConfig, []byte("mcp_servers:\n  local-only:\n    command: keep\n  toolhub-relay:\n    url: http://127.0.0.1:1/mcp\n    enabled: false\n"))
+	result := applyRelay(t, manager, user, relayManifest(target, port, "https://example.invalid/one"), "reconcile", false)
+	if !result.Repaired || result.BackupID == "" {
+		t.Fatalf("Hermes reconcile result=%+v", result)
+	}
+	root, err := readYAMLMap(paths.HermesConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers, err := yamlStringMap(root["mcp_servers"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := servers["local-only"]; !ok {
+		t.Fatalf("reconcile removed unmanaged Hermes MCP entry: %+v", servers)
+	}
+	anchor, _ := servers[RelayAnchor].(map[string]any)
+	wantURL := "http://127.0.0.1:" + strconv.Itoa(port) + "/mcp"
+	if anchor["url"] != wantURL || anchor["enabled"] != true {
+		t.Fatalf("reconcile did not repair Hermes anchor: %+v", anchor)
 	}
 }
 

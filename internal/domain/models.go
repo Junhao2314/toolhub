@@ -97,30 +97,104 @@ type SkillVersion struct {
 }
 
 type MCPServer struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	Revision    int64     `json:"revision"`
-	Transport   string    `json:"transport"`
-	Command     string    `json:"command,omitempty"`
-	Args        []string  `json:"args,omitempty"`
-	URL         string    `json:"url,omitempty"`
-	EnvKeys     []string  `json:"envKeys"`
-	HeaderKeys  []string  `json:"headerKeys"`
-	ContentHash string    `json:"contentHash"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID                string    `json:"id"`
+	CurrentRevisionID string    `json:"currentRevisionId"`
+	Name              string    `json:"name"`
+	Description       string    `json:"description,omitempty"`
+	Revision          int64     `json:"revision"`
+	Transport         string    `json:"transport"`
+	Command           string    `json:"command,omitempty"`
+	Args              []string  `json:"args,omitempty"`
+	URL               string    `json:"url,omitempty"`
+	EnvKeys           []string  `json:"envKeys"`
+	HeaderKeys        []string  `json:"headerKeys"`
+	ContentHash       string    `json:"contentHash"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
+}
+
+type MCPRevision struct {
+	ID          string          `json:"id"`
+	ServerID    string          `json:"serverId"`
+	Revision    int64           `json:"revision"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Transport   string          `json:"transport"`
+	Command     string          `json:"command,omitempty"`
+	Args        []string        `json:"args,omitempty"`
+	URL         string          `json:"url,omitempty"`
+	EnvKeys     []string        `json:"envKeys"`
+	HeaderKeys  []string        `json:"headerKeys"`
+	ContentHash string          `json:"contentHash"`
+	Provenance  json.RawMessage `json:"provenance"`
+	CreatedAt   time.Time       `json:"createdAt"`
+}
+
+type ProfileSkillPin struct {
+	SkillID     string `json:"skillId"`
+	VersionID   string `json:"versionId"`
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	SHA256      string `json:"sha256"`
+	ContentHash string `json:"contentHash"`
+	Current     bool   `json:"current"`
+}
+
+type ProfileMCPPin struct {
+	ServerID    string   `json:"serverId"`
+	RevisionID  string   `json:"revisionId"`
+	Revision    int64    `json:"revision"`
+	Name        string   `json:"name"`
+	Description string   `json:"description,omitempty"`
+	Transport   string   `json:"transport"`
+	Command     string   `json:"command,omitempty"`
+	Args        []string `json:"args,omitempty"`
+	URL         string   `json:"url,omitempty"`
+	EnvKeys     []string `json:"envKeys"`
+	HeaderKeys  []string `json:"headerKeys"`
+	ContentHash string   `json:"contentHash"`
+	Current     bool     `json:"current"`
 }
 
 type Profile struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Description  string    `json:"description,omitempty"`
-	Revision     int64     `json:"revision"`
-	SkillIDs     []string  `json:"skillIds"`
-	MCPServerIDs []string  `json:"mcpServerIds"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID                string            `json:"id"`
+	CurrentRevisionID string            `json:"currentRevisionId"`
+	Name              string            `json:"name"`
+	Description       string            `json:"description,omitempty"`
+	Revision          int64             `json:"revision"`
+	CanonicalHash     string            `json:"canonicalHash"`
+	PendingBindings   bool              `json:"pendingBindings"`
+	ArchivedAt        *time.Time        `json:"archivedAt,omitempty"`
+	SkillIDs          []string          `json:"skillIds"`
+	MCPServerIDs      []string          `json:"mcpServerIds"`
+	Skills            []ProfileSkillPin `json:"skills"`
+	MCPServers        []ProfileMCPPin   `json:"mcpServers"`
+	CreatedAt         time.Time         `json:"createdAt"`
+	UpdatedAt         time.Time         `json:"updatedAt"`
+}
+
+type ProfileRevision struct {
+	ID              string            `json:"id"`
+	ProfileID       string            `json:"profileId"`
+	Revision        int64             `json:"revision"`
+	Name            string            `json:"name"`
+	Description     string            `json:"description,omitempty"`
+	CanonicalHash   string            `json:"canonicalHash"`
+	PendingBindings bool              `json:"pendingBindings"`
+	ArchivedRestore bool              `json:"archivedRestore"`
+	Skills          []ProfileSkillPin `json:"skills"`
+	MCPServers      []ProfileMCPPin   `json:"mcpServers"`
+	CreatedAt       time.Time         `json:"createdAt"`
+}
+
+type PendingSecretBinding struct {
+	ProfileRevisionID string     `json:"profileRevisionId"`
+	MCPRevisionID     string     `json:"mcpRevisionId"`
+	Namespace         string     `json:"namespace"`
+	Key               string     `json:"key"`
+	SlotHash          string     `json:"slotHash"`
+	Bound             bool       `json:"bound"`
+	BoundAt           *time.Time `json:"boundAt,omitempty"`
 }
 
 type Operation struct {

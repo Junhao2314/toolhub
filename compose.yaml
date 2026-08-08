@@ -3,7 +3,13 @@ name: toolhub
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: toolhub-postgres
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
     environment:
       POSTGRES_DB: toolhub
       POSTGRES_USER: toolhub
@@ -21,6 +27,13 @@ services:
   toolhub:
     build:
       context: .
+    container_name: toolhub
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    init: true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "-T", "2", "http://127.0.0.1:18480/healthz"]

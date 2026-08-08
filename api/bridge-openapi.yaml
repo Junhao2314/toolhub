@@ -67,6 +67,16 @@ paths:
           description: Canonical immutable ZIP for immediate Library import
           content: {application/json: {schema: {$ref: '#/components/schemas/LocalSkillExportResponse'}}}
         '409': {$ref: '#/components/responses/Error'}
+  /local/skills/export-batch:
+    post:
+      operationId: exportLocalSkillBatch
+      description: Ephemeral local Hermes batch export. Archives bypass the response journal and are never exposed to browsers.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/LocalSkillBatchExportRequest'}}}
+      responses:
+        '200': {description: Canonical Hermes Skill archives, content: {application/json: {schema: {$ref: '#/components/schemas/LocalSkillBatchExportResponse'}}}}
+        '409': {$ref: '#/components/responses/Error'}
   /local/mcp/preview:
     post:
       operationId: previewLocalMCP
@@ -106,14 +116,6 @@ paths:
   /targets/apply:
     post:
       operationId: applyTarget
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
-      requestBody: {$ref: '#/components/requestBodies/Commit'}
-      responses:
-        '200': {$ref: '#/components/responses/TargetResult'}
-        '409': {$ref: '#/components/responses/Error'}
-  /targets/edit:
-    post:
-      operationId: editTarget
       parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {$ref: '#/components/requestBodies/Commit'}
       responses:
@@ -283,6 +285,16 @@ components:
         scope: {type: string}
         revision: {type: integer}
         secretKeys: {type: array, items: {type: string}}
+        slug: {type: string}
+        description: {type: string}
+        source: {type: string, enum: [hub, local]}
+        provider: {type: string}
+        category: {type: string}
+        trust: {type: string}
+        importable: {type: boolean}
+        eligibilityReason: {type: string}
+        shadowed: {type: boolean}
+        builtin: {type: boolean}
     ScanRequest:
       type: object
       additionalProperties: false
@@ -314,6 +326,21 @@ components:
         sha256: {$ref: '#/components/schemas/SHA256'}
         contentHash: {$ref: '#/components/schemas/SHA256'}
         archive: {type: string, format: byte, writeOnly: true, description: Ephemeral canonical ZIP; never persisted in the Bridge journal.}
+    LocalSkillBatchExportRequest:
+      type: object
+      additionalProperties: false
+      required: [target, expectedRevision, items]
+      properties:
+        target: {$ref: '#/components/schemas/Target'}
+        expectedRevision: {$ref: '#/components/schemas/SHA256'}
+        items: {type: array, minItems: 1, maxItems: 50, items: {type: object, required: [id, contentHash], properties: {id: {type: string}, contentHash: {$ref: '#/components/schemas/SHA256'}}}}
+    LocalSkillBatchExportResponse:
+      type: object
+      additionalProperties: false
+      required: [targetRevision, items]
+      properties:
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+        items: {type: array, items: {type: object, required: [id, status], properties: {id: {type: string}, name: {type: string}, slug: {type: string}, sha256: {$ref: '#/components/schemas/SHA256'}, contentHash: {$ref: '#/components/schemas/SHA256'}, archive: {type: string, format: byte, writeOnly: true}, source: {type: string}, provider: {type: string}, category: {type: string}, status: {type: string, enum: [Exported, Stale, Failed]}, error: {$ref: '#/components/schemas/APIError'}}}}
     LocalMCPServerPreview:
       type: object
       additionalProperties: false

@@ -106,6 +106,14 @@ func (a *CompositeAdapter) ExportLocalSkill(_ context.Context, input bridgeproto
 	return a.Local.ExportLocalSkill(user, input)
 }
 
+func (a *CompositeAdapter) ExportLocalSkillBatch(_ context.Context, input bridgeprotocol.LocalSkillBatchExportRequest) (bridgeprotocol.LocalSkillBatchExportResponse, error) {
+	user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
+	if err != nil {
+		return bridgeprotocol.LocalSkillBatchExportResponse{}, err
+	}
+	return a.Local.ExportLocalSkillBatch(user, input)
+}
+
 func (a *CompositeAdapter) PreviewLocalMCP(_ context.Context, input bridgeprotocol.LocalMCPPreviewRequest) (bridgeprotocol.LocalMCPPreviewResponse, error) {
 	user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
 	if err != nil {

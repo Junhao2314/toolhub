@@ -25,6 +25,13 @@ raw output. Audit metadata is redacted before persistence. There is no universal
 response redaction middleware, so every new response must be reviewed at its
 call site.
 
+The only browser download containing plaintext values is the separately named
+`.toolhub-profile-secrets` export. It requires current-password
+reauthentication, exports only Secrets referenced by one pinned Profile
+revision, sets `Cache-Control: no-store`, and never persists the Bundle bytes,
+values, or password in PostgreSQL, BoltDB, operations, audit, or logs. Standard
+`.toolhub-profile` Bundles contain slot names and no values.
+
 ## Bridge Boundary
 
 The Bridge listens only on `/run/toolhub-bridge/bridge.sock` at mode `0660` with
@@ -88,14 +95,19 @@ after terminal handling. Missing/expired async JIDs are never assumed successful
 the target is rescanned and must match the persisted pinned-member fingerprints.
 
 ToolHub writes only its namespace below `/srv/salt/states`; it never edits
-`/etc/salt/master` or Hermes-managed content.
+`/etc/salt/master` or remote Hermes-managed content. On the local node, the
+`local/shared-relay` operation atomically owns only the Hermes
+`mcp_servers.toolhub-relay` consumer anchor; the `local/hermes` target remains
+read-only for Skills and inventory.
 
 ## MCP Scope
 
 Local MCP requires a compatible preinstalled `mcpm`. ToolHub manages one profile
 named `toolhub`, one fixed relay unit, and one `toolhub-relay` user-scope anchor in
-`~/.claude.json` and `~/.codex/config.toml`. It does not auto-find, install,
-upgrade, or fall back to native per-server local delivery.
+`~/.claude.json`, `~/.codex/config.toml`, and `~/.hermes/config.yaml`. Local
+Hermes' existing `mcp_servers` map is collapsed on Apply; reconcile preserves
+later unmanaged entries. ToolHub does not auto-find, install, upgrade, or fall
+back to native per-server local delivery.
 
 The relay unit hides all homes with a private tmpfs and binds back only the
 selected canonical managed home as writable. `ProtectSystem=strict`, an empty

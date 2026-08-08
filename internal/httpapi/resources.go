@@ -18,6 +18,7 @@ import (
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/market"
+	"github.com/Junhao2314/toolhub/internal/profilebundle"
 	"github.com/Junhao2314/toolhub/internal/skills"
 	"github.com/Junhao2314/toolhub/internal/store"
 )
@@ -47,7 +48,7 @@ func (a *API) listMCPServers(w http.ResponseWriter, r *http.Request) {
 	writeItems(w, value)
 }
 func (a *API) listProfiles(w http.ResponseWriter, r *http.Request) {
-	value, err := a.store.ListProfiles(r.Context())
+	value, err := a.store.ListProfiles(r.Context(), r.URL.Query().Get("includeArchived") == "true")
 	if err != nil {
 		a.handleStoreError(w, r, err)
 		return
@@ -210,6 +211,223 @@ func (a *API) deleteProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) getProfile(w http.ResponseWriter, r *http.Request) {
+	profile, err := a.store.Profile(r.Context(), chi.URLParam(r, "profileID"))
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (a *API) profileHistory(w http.ResponseWriter, r *http.Request) {
+	history, err := a.store.ProfileHistory(r.Context(), chi.URLParam(r, "profileID"))
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": history})
+}
+
+func (a *API) profileSecretBindings(w http.ResponseWriter, r *http.Request) {
+	value, err := a.store.PendingSecretBindings(r.Context(), chi.URLParam(r, "profileID"))
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeItems(w, value)
+}
+
+func (a *API) refreshProfile(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	profile, err := a.store.RefreshProfile(r.Context(), chi.URLParam(r, "profileID"), input.Revision)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (a *API) cloneProfile(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	profile, err := a.store.CloneProfile(r.Context(), chi.URLParam(r, "profileID"), input.Name)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, profile)
+}
+
+func (a *API) archiveProfile(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	if err := a.store.ArchiveProfile(r.Context(), chi.URLParam(r, "profileID"), input.Revision); err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) restoreProfile(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	profile, err := a.store.RestoreArchivedProfile(r.Context(), chi.URLParam(r, "profileID"), input.Revision)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (a *API) purgeProfile(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.PurgeProfile(r.Context(), chi.URLParam(r, "profileID")); err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) completeProfileBindings(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Revision int64             `json:"revision"`
+		Values   map[string]string `json:"values"`
+	}
+	if err := decodeJSON(w, r, &input, 1<<20); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	profile, err := a.store.CompletePendingSecretBindings(r.Context(), chi.URLParam(r, "profileID"), input.Revision, input.Values)
+	for key := range input.Values {
+		input.Values[key] = ""
+	}
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (a *API) exportProfileBundle(w http.ResponseWriter, r *http.Request) {
+	a.streamProfileBundle(w, r, false)
+}
+
+func (a *API) exportSecretProfileBundle(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		OriginLabel     string `json:"originLabel"`
+		CurrentPassword string `json:"currentPassword"`
+	}
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	if err := a.store.VerifyCurrentPassword(r.Context(), input.CurrentPassword); err != nil {
+		if errors.Is(err, store.ErrInvalidCurrentPassword) {
+			writeError(w, r, http.StatusForbidden, "current_password_invalid", "Current password is incorrect")
+		} else {
+			a.handleStoreError(w, r, err)
+		}
+		return
+	}
+	a.streamProfileBundleWithLabel(w, r, input.OriginLabel, true)
+}
+
+func (a *API) streamProfileBundle(w http.ResponseWriter, r *http.Request, includeSecrets bool) {
+	a.streamProfileBundleWithLabel(w, r, "ToolHub", includeSecrets)
+}
+
+func (a *API) streamProfileBundleWithLabel(w http.ResponseWriter, r *http.Request, label string, includeSecrets bool) {
+	body, err := a.store.ExportProfileBundle(r.Context(), chi.URLParam(r, "profileID"), label, includeSecrets)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	if includeSecrets {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Content-Disposition", "attachment; filename=profile.toolhub-profile-secrets")
+	} else {
+		w.Header().Set("Content-Disposition", "attachment; filename=profile.toolhub-profile")
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+}
+
+func readBundleUpload(r *http.Request) ([]byte, error) {
+	contentType := r.Header.Get("Content-Type")
+	if strings.HasPrefix(contentType, "multipart/") {
+		if err := r.ParseMultipartForm(profilebundle.MaxBundleBytes); err != nil {
+			return nil, err
+		}
+		file, _, err := r.FormFile("bundle")
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		return io.ReadAll(io.LimitReader(file, profilebundle.MaxBundleBytes+1))
+	}
+	return io.ReadAll(io.LimitReader(r.Body, profilebundle.MaxBundleBytes+1))
+}
+
+func (a *API) previewProfileBundle(w http.ResponseWriter, r *http.Request) {
+	body, err := readBundleUpload(r)
+	if err != nil || len(body) == 0 || len(body) > profilebundle.MaxBundleBytes {
+		writeError(w, r, 400, "invalid_bundle", "Profile Bundle upload is invalid or too large")
+		return
+	}
+	preview, err := a.store.PreviewProfileBundle(r.Context(), body, 5*time.Minute)
+	if err != nil {
+		writeError(w, r, 400, "invalid_bundle", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (a *API) importProfileBundle(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		writeError(w, r, 400, "invalid_request", "Bundle import requires multipart form data")
+		return
+	}
+	if err := r.ParseMultipartForm(profilebundle.MaxBundleBytes + 1); err != nil {
+		writeError(w, r, 400, "invalid_bundle", err.Error())
+		return
+	}
+	body, err := readBundleUpload(r)
+	if err != nil || len(body) == 0 || len(body) > profilebundle.MaxBundleBytes {
+		writeError(w, r, 400, "invalid_bundle", "Profile Bundle upload is invalid or too large")
+		return
+	}
+	input := store.BundleImportInput{ConfirmationToken: strings.TrimSpace(r.FormValue("confirmationToken")), Name: strings.TrimSpace(r.FormValue("name")), ConfirmDuplicate: r.FormValue("confirmDuplicate") == "true", ImportAsNew: r.FormValue("importAsNew") == "true"}
+	profile, err := a.store.ImportProfileBundle(r.Context(), body, input)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, profile)
 }
 
 func (a *API) getTarget(w http.ResponseWriter, r *http.Request) {
@@ -500,38 +718,95 @@ func (a *API) applyProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 202, op)
 }
 
-func (a *API) editTarget(w http.ResponseWriter, r *http.Request) {
+func (a *API) importLocalSkillBatch(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		ExpectedRevision string   `json:"expectedRevision"`
-		SkillIDs         []string `json:"skillIds"`
-		MCPServerIDs     []string `json:"mcpServerIds"`
+		TargetRevision string `json:"targetRevision"`
+		ConfirmUpdates bool   `json:"confirmUpdates"`
+		Items          []struct {
+			ID          string `json:"id"`
+			Slug        string `json:"slug"`
+			ContentHash string `json:"contentHash"`
+		} `json:"items"`
 	}
-	if err := decodeJSON(w, r, &input, 4<<20); err != nil {
-		writeError(w, r, 400, "invalid_request", err.Error())
+	if err := decodeJSON(w, r, &input, 256<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if !bridgeprotocol.IsSHA256(input.ExpectedRevision) {
-		writeError(w, r, 400, "invalid_request", "A current target revision is required")
-		return
-	}
-	key, err := requestIdempotencyKey(r)
-	if err != nil {
-		writeError(w, r, 400, "invalid_request", err.Error())
+	if len(input.Items) == 0 || len(input.Items) > 50 || !bridgeprotocol.IsSHA256(input.TargetRevision) {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "up to 50 items and a current inventory revision are required")
 		return
 	}
 	targetID := chi.URLParam(r, "targetID")
-	manifest, err := a.store.ResolveTargetManifest(r.Context(), targetID, input.SkillIDs, input.MCPServerIDs)
-	if err != nil {
-		writeError(w, r, 400, "invalid_manifest", "Desired manifest is invalid")
-		return
-	}
-	request := map[string]any{"manifest": manifest, "targetRevision": input.ExpectedRevision, "sourceKind": "target_edit", "sourceId": targetID}
-	op, err := a.store.CreateOperation(r.Context(), store.CreateOperationInput{Kind: "edit", SourceID: targetID, IdempotencyKey: key, Request: request, TargetIDs: []string{targetID}, TargetRequests: map[string]any{targetID: request}})
+	target, err := a.store.Target(r.Context(), targetID)
 	if err != nil {
 		a.handleStoreError(w, r, err)
 		return
 	}
-	writeJSON(w, 202, op)
+	if target.NodeKind != bridgeprotocol.NodeKindLocal || target.Runtime != domain.RuntimeHermes {
+		writeError(w, r, http.StatusBadRequest, bridgeprotocol.ErrProtectedScope, "batch Skill intake requires local Hermes")
+		return
+	}
+	inventoryBody, revision, err := a.store.RuntimeSnapshot(r.Context(), targetID)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	if revision != input.TargetRevision {
+		writeError(w, r, http.StatusConflict, bridgeprotocol.ErrRevisionConflict, "Hermes inventory changed; scan again")
+		return
+	}
+	var inventory struct {
+		Members []bridgeprotocol.InventoryMember `json:"members"`
+	}
+	if err := json.Unmarshal(inventoryBody, &inventory); err != nil {
+		writeError(w, r, http.StatusConflict, bridgeprotocol.ErrRevisionConflict, "Hermes inventory is invalid; scan again")
+		return
+	}
+	byID := make(map[string]bridgeprotocol.InventoryMember, len(inventory.Members))
+	for _, member := range inventory.Members {
+		byID[member.ID] = member
+	}
+	seenIDs, seenSlugs := map[string]bool{}, map[string]bool{}
+	for _, item := range input.Items {
+		if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.Slug) == "" || !bridgeprotocol.IsSHA256(item.ContentHash) || seenIDs[item.ID] || seenSlugs[item.Slug] {
+			writeError(w, r, http.StatusBadRequest, "invalid_request", "batch IDs, slugs, and hashes must be unique and valid")
+			return
+		}
+		seenIDs[item.ID], seenSlugs[item.Slug] = true, true
+		member, ok := byID[item.ID]
+		if !ok || member.Kind != "skill" || !member.Importable || member.Shadowed || member.Builtin || member.ContentHash != item.ContentHash || member.Slug != item.Slug {
+			writeError(w, r, http.StatusConflict, bridgeprotocol.ErrRevisionConflict, "one or more Hermes Skills are stale or not importable")
+			return
+		}
+	}
+	var library []domain.Skill
+	if raw, err := a.store.ListSkills(r.Context()); err == nil {
+		_ = json.Unmarshal(raw, &library)
+	}
+	for _, item := range input.Items {
+		for _, skill := range library {
+			if skill.Slug == item.Slug && skill.CurrentContentHash != item.ContentHash && !input.ConfirmUpdates {
+				writeError(w, r, http.StatusConflict, "update_confirmation_required", "an existing Skill has different content; confirm the update")
+				return
+			}
+		}
+	}
+	key, err := requestIdempotencyKey(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	items := make([]bridgeprotocol.LocalSkillBatchItem, 0, len(input.Items))
+	for _, item := range input.Items {
+		items = append(items, bridgeprotocol.LocalSkillBatchItem{ID: item.ID, ContentHash: item.ContentHash})
+	}
+	request := map[string]any{"targetRevision": input.TargetRevision, "items": items, "confirmUpdates": input.ConfirmUpdates}
+	op, err := a.store.CreateOperation(r.Context(), store.CreateOperationInput{Kind: "skill_import", SourceID: targetID, IdempotencyKey: key, Request: request, Metadata: map[string]any{"source": "hermes", "targetId": targetID, "itemCount": len(items)}, TargetIDs: []string{targetID}, TargetRequests: map[string]any{targetID: request}})
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, op)
 }
 
 func (a *API) listBackups(w http.ResponseWriter, r *http.Request) {
@@ -565,6 +840,22 @@ func (a *API) restoreTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 202, op)
+}
+
+func (a *API) adoptTargetProfile(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(w, r, &input, 8<<10); err != nil {
+		writeError(w, r, 400, "invalid_request", err.Error())
+		return
+	}
+	profile, err := a.store.AdoptRestoredTarget(r.Context(), chi.URLParam(r, "targetID"), strings.TrimSpace(input.Name))
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, profile)
 }
 
 func (a *API) relayAction(w http.ResponseWriter, r *http.Request) {

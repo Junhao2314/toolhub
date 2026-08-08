@@ -37,6 +37,8 @@ fi
 chown root:root /var/lib/toolhub-bridge/mcpm-relay.env
 chmod 0600 /var/lib/toolhub-bridge/mcpm-relay.env
 
+install -m 0755 "$source_dir/toolhub-relay-port-check.sh" /usr/local/sbin/toolhub-relay-port-check
+
 sed -e "s|@TOOLHUB_MANAGED_HOME@|$managed_home|g" \
     -e "s|@TOOLHUB_BRIDGE_GROUP@|$bridge_group|g" \
     "$source_dir/toolhub-bridge.service" > /etc/systemd/system/toolhub-bridge.service

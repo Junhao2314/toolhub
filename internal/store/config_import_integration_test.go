@@ -169,9 +169,9 @@ func configImportFixture(t *testing.T) (ConfigImportInput, *security.Cipher) {
 			EnvRefs:  map[string]string{"TOKEN": legacySecretID}, HeaderRefs: map[string]string{},
 		}},
 		Profiles: []ConfigImportProfile{
-			{Name: "migrated-claude", LegacySkillIDs: []string{legacySkillID}},
-			{Name: "migrated-codex", LegacySkillIDs: []string{legacySkillID}},
-			{Name: "migrated-shared-mcp", LegacyMCPServerIDs: []string{legacyMCPID}},
+			{Name: "claude-skills", LegacySkillIDs: []string{legacySkillID}},
+			{Name: "codex-skills", LegacySkillIDs: []string{legacySkillID}},
+			{Name: "shared-mcp", LegacyMCPServerIDs: []string{legacyMCPID}},
 		},
 		UpdateCron: "15 4 * * *", Timezone: "UTC",
 	}, legacyCipher

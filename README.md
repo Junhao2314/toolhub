@@ -20,8 +20,9 @@ Licensed under the [MIT License](LICENSE).
 - Salt 3008.x: accepted-key discovery and remote Claude/Codex/Hermes inventory.
   Hermes is read-only. Claude/Codex are writable targets.
 - `mcpm`: one local `toolhub` profile served through one shared HTTP relay at
-  `http://127.0.0.1:6276/mcp` by default. Codex and Claude each contain one
-  native user-scope relay anchor.
+  `http://127.0.0.1:6276/mcp` by default. Codex, Claude, and local Hermes each
+  contain one native user-scope `toolhub-relay` anchor. The local Hermes MCP
+  map is collapsed to that anchor on Apply; remote Hermes remains read-only.
 
 There is no Agent, WebSocket enrollment, SSH fallback, RBAC, multi-user API,
 review/approval workflow, deployment table, or legacy job queue.

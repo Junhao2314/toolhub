@@ -131,7 +131,7 @@ func (s *Store) ConfigImportDestinationNeedsBootstrap(ctx context.Context) (bool
 		{"generation marker", "SELECT count(*) FROM app_meta WHERE key='schema_generation' AND value='2'", 1},
 		{"application metadata", "SELECT count(*) FROM app_meta", 1},
 		{"migration ledger", "SELECT count(*) FROM schema_migrations WHERE version=1", 1},
-		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", 2},
+		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", 3},
 		{"sessions", "SELECT count(*) FROM sessions", 0},
 		{"settings", "SELECT count(*) FROM settings", 0},
 		{"nodes", "SELECT count(*) FROM nodes", 0},
@@ -218,7 +218,7 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 	for _, item := range input.Skills {
 		skillID, err := insertConfigImportSkill(ctx, tx, item)
 		if err != nil {
-			return ConfigImportResult{}, fmt.Errorf("insert migrated Skill %s: %w", item.LegacyID, err)
+			return ConfigImportResult{}, fmt.Errorf("insert imported Skill %s: %w", item.LegacyID, err)
 		}
 		skillMap[item.LegacyID] = skillID
 	}
@@ -251,7 +251,7 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 
 	mcpMap := make(map[string]string, len(input.MCPServers))
 	for _, item := range input.MCPServers {
-		serverID := uuid.NewString()
+		serverID, revisionID := uuid.NewString(), uuid.NewString()
 		envRefs, err := remapConfigImportRefs(item.EnvRefs, secretMap)
 		if err != nil {
 			return ConfigImportResult{}, err
@@ -264,8 +264,13 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 		envJSON, _ := json.Marshal(envRefs)
 		headerJSON, _ := json.Marshal(headerRefs)
 		contentHash := MCPContentHash(item.Input, envRefs, headerRefs)
-		if _, err := tx.Exec(ctx, `INSERT INTO mcp_servers(id,name,description,revision,transport,command,args,url,env_refs,header_refs,content_hash)
-			VALUES($1,$2,$3,1,$4,$5,$6,$7,$8,$9,$10)`, serverID, item.Input.Name, item.Input.Description, item.Input.Transport, item.Input.Command, jsonText(argsJSON), item.Input.URL, jsonText(envJSON), jsonText(headerJSON), contentHash); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO mcp_servers(id,current_revision_id,name,description,revision,transport,command,args,url,env_refs,header_refs,content_hash)
+			VALUES($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11)`, serverID, revisionID, item.Input.Name, item.Input.Description, item.Input.Transport, item.Input.Command, jsonText(argsJSON), item.Input.URL, jsonText(envJSON), jsonText(headerJSON), contentHash); err != nil {
+			return ConfigImportResult{}, err
+		}
+		provenance, _ := json.Marshal(map[string]any{"source": "generation-1-config-import"})
+		if _, err := tx.Exec(ctx, `INSERT INTO mcp_revisions(id,server_id,revision,name,description,transport,command,args,url,env_slots,header_slots,env_refs,header_refs,content_hash,provenance)
+			VALUES($1,$2,1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, revisionID, serverID, item.Input.Name, item.Input.Description, item.Input.Transport, item.Input.Command, jsonText(argsJSON), item.Input.URL, sortedMapKeys(envRefs), sortedMapKeys(headerRefs), jsonText(envJSON), jsonText(headerJSON), contentHash, jsonText(provenance)); err != nil {
 			return ConfigImportResult{}, err
 		}
 		mcpMap[item.LegacyID] = serverID
@@ -276,26 +281,23 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 
 	for _, profile := range input.Profiles {
 		profileID := uuid.NewString()
-		if _, err := tx.Exec(ctx, "INSERT INTO profiles(id,name,description,revision) VALUES($1,$2,$3,1)", profileID, profile.Name, profile.Description); err != nil {
-			return ConfigImportResult{}, err
-		}
+		profileInput := ProfileInput{Name: profile.Name, Description: profile.Description}
 		for _, legacyID := range uniqueSortedStrings(profile.LegacySkillIDs) {
 			skillID := skillMap[legacyID]
 			if skillID == "" {
-				return ConfigImportResult{}, errors.New("migrated Profile references an unavailable Skill")
+				return ConfigImportResult{}, errors.New("imported Profile references an unavailable Skill")
 			}
-			if _, err := tx.Exec(ctx, "INSERT INTO profile_skills(profile_id,skill_id) VALUES($1,$2)", profileID, skillID); err != nil {
-				return ConfigImportResult{}, err
-			}
+			profileInput.SkillIDs = append(profileInput.SkillIDs, skillID)
 		}
 		for _, legacyID := range uniqueSortedStrings(profile.LegacyMCPServerIDs) {
 			serverID := mcpMap[legacyID]
 			if serverID == "" {
-				return ConfigImportResult{}, errors.New("migrated Profile references an unavailable MCP definition")
+				return ConfigImportResult{}, errors.New("imported Profile references an unavailable MCP definition")
 			}
-			if _, err := tx.Exec(ctx, "INSERT INTO profile_mcp_servers(profile_id,server_id) VALUES($1,$2)", profileID, serverID); err != nil {
-				return ConfigImportResult{}, err
-			}
+			profileInput.MCPServerIDs = append(profileInput.MCPServerIDs, serverID)
+		}
+		if _, _, err := s.saveProfileTx(ctx, tx, profileID, profileInput); err != nil {
+			return ConfigImportResult{}, err
 		}
 	}
 	if err := failConfigImportPhase(input, "profiles"); err != nil {
@@ -422,7 +424,7 @@ func validateConfigImportInput(input ConfigImportInput, legacyCipher *security.C
 			}
 		}
 	}
-	for _, required := range []string{"migrated-claude", "migrated-codex", "migrated-shared-mcp"} {
+	for _, required := range []string{"claude-skills", "codex-skills", "shared-mcp"} {
 		if !profileNames[required] {
 			return errors.New("configuration import generated Profile set is incomplete")
 		}
@@ -439,7 +441,7 @@ func validatePristineConfigImportDestination(ctx context.Context, tx pgx.Tx) err
 		{"generation marker", "SELECT count(*) FROM app_meta WHERE key='schema_generation' AND value='2'", 1},
 		{"application metadata", "SELECT count(*) FROM app_meta", 1},
 		{"migration ledger", "SELECT count(*) FROM schema_migrations WHERE version=1", 1},
-		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", 2},
+		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", 3},
 		{"singleton account", "SELECT count(*) FROM account", 1},
 		{"sessions", "SELECT count(*) FROM sessions", 0},
 		{"settings", "SELECT count(*) FROM settings", 1},
@@ -474,7 +476,7 @@ func validatePristineConfigImportDestination(ctx context.Context, tx pgx.Tx) err
 func configImportEmptyTables() []string {
 	return []string{
 		"encrypted_secrets", "runtime_snapshots", "skill_sources", "skills", "skill_artifacts", "skill_versions",
-		"mcp_servers", "profiles", "profile_skills", "profile_mcp_servers", "operations", "operation_targets",
+		"mcp_servers", "mcp_revisions", "profiles", "profile_revisions", "profile_revision_skills", "profile_revision_mcp_servers", "profile_skills", "profile_mcp_servers", "pending_secret_bindings", "bundle_import_confirmations", "bundle_import_fingerprints", "retention_runs", "operations", "operation_targets",
 		"desired_snapshots", "target_desired_snapshots", "preflight_confirmations", "local_mcp_import_confirmations",
 		"backups", "ai_providers", "alerts",
 	}
@@ -573,10 +575,14 @@ func verifyConfigImportCore(ctx context.Context, query interface {
 		{"skill_artifacts", marker.Counts.SkillArtifacts},
 		{"skill_versions", marker.Counts.SkillVersions},
 		{"mcp_servers", marker.Counts.MCPServers},
+		{"mcp_revisions", marker.Counts.MCPServers},
 		{"encrypted_secrets", marker.Counts.EncryptedRecords},
 		{"profiles", marker.Counts.Profiles},
+		{"profile_revisions", marker.Counts.Profiles},
 		{"profile_skills", marker.Counts.ProfileSkills},
+		{"profile_revision_skills", marker.Counts.ProfileSkills},
 		{"profile_mcp_servers", marker.Counts.ProfileMCPServers},
+		{"profile_revision_mcp_servers", marker.Counts.ProfileMCPServers},
 	}
 	for _, check := range counts {
 		var actual int
@@ -604,7 +610,7 @@ func verifyConfigImportCore(ctx context.Context, query interface {
 		return err
 	}
 	if cronValue != marker.UpdateCron || timezone != marker.Timezone {
-		return errors.New("migrated settings do not match the import marker")
+		return errors.New("imported settings do not match the import marker")
 	}
 	var audits int
 	if err := query.QueryRow(ctx, "SELECT count(*) FROM audit_events WHERE action='legacy_config_import' AND resource_id=$1 AND outcome='success'", marker.SourceFingerprint).Scan(&audits); err != nil || audits != 1 {
@@ -631,7 +637,7 @@ func (s *Store) VerifyConfigImportAcceptance(ctx context.Context, result ConfigI
 	}{
 		{s.ListSkills, marker.Counts.Skills},
 		{s.ListMCPServers, marker.Counts.MCPServers},
-		{s.ListProfiles, marker.Counts.Profiles},
+		{func(ctx context.Context) (json.RawMessage, error) { return s.ListProfiles(ctx, false) }, marker.Counts.Profiles},
 	}
 	for _, check := range normalReads {
 		body, err := check.read(ctx)

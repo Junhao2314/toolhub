@@ -6,12 +6,22 @@ StartLimitBurst=3
 
 [Service]
 Type=simple
+TimeoutStartSec=150s
 EnvironmentFile=/var/lib/toolhub-bridge/mcpm-relay.env
 Environment=HOME=@TOOLHUB_MANAGED_HOME@
 User=@TOOLHUB_MANAGED_USER@
 Group=@TOOLHUB_MANAGED_GROUP@
 WorkingDirectory=@TOOLHUB_MANAGED_HOME@
+# MCPM otherwise auto-selects the next free port when the requested port is
+# busy. The shared relay has a fixed-port contract, so fail the unit instead of
+# silently moving clients to a different endpoint.
+ExecStartPre=/usr/local/sbin/toolhub-relay-port-check
 ExecStart=/usr/bin/mcpm profile run --http --host 127.0.0.1 --port ${TOOLHUB_RELAY_PORT} toolhub
+ExecStartPost=/usr/bin/bash -c 'for i in $(/usr/bin/seq 1 600); do if (printf "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >/dev/tcp/127.0.0.1/${TOOLHUB_RELAY_PORT}) 2>/dev/null; then exit 0; fi; /usr/bin/sleep 0.1; done; exit 1'
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+FinalKillSignal=SIGKILL
 Restart=on-failure
 RestartSec=3s
 UMask=0077

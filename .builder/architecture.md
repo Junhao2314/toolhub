@@ -26,11 +26,12 @@ deployment table, review/approval state, legacy jobs, or Profile activation.
   all sessions.
 - Skill artifacts are immutable and content-addressed; Library current versions
   can advance without changing an active desired snapshot.
-- One Profile references Skill IDs and MCP server IDs. It does not pin versions.
-- Preflight resolves exact current versions/revisions/secrets and issues a
+- One Profile head points to an immutable revision that pins exact Skill
+  versions, MCP revisions, and installation-local Secret bindings.
+- Preflight resolves that pinned revision and issues a
   five-minute one-use token bound to Profile revision, target revision, and
   canonical manifest.
-- Apply/edit/Restore create immutable pinned desired snapshots. Only the target
+- Apply/Restore create immutable pinned desired snapshots. Only the target
   pointer and projected health are mutable.
 - All asynchronous work uses `operations` and `operation_targets`.
 
@@ -40,13 +41,15 @@ The local node has `local/claude` and `local/codex` Skill targets,
 `local/shared-relay` for MCP, and read-only `local/hermes`. Each Salt node has
 Claude/Codex writable Skill+MCP targets and a read-only Hermes inventory target.
 
-Apply and target edit perform a destructive mirror only inside manageable
+Apply performs a destructive mirror only inside manageable
 scope. Runtime built-ins, hidden/protected entries, `.system`, ToolHub-reserved
 members, and non-user Claude MCP scopes are always excluded.
 
 Local MCP uses one mcpm Profile named `toolhub`, one HTTP relay, and one
-`toolhub-relay` anchor in each Claude/Codex user config. Remote MCP writes the
-native Claude/Codex user scopes directly.
+`toolhub-relay` anchor in each Claude, Codex, and local Hermes user config.
+`local/shared-relay` owns the Hermes anchor; `local/hermes` remains a
+read-only Skill/inventory target. Remote MCP writes the native Claude/Codex
+user scopes directly and remote Hermes remains read-only.
 
 ## Operation Flow
 

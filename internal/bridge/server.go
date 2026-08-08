@@ -23,6 +23,7 @@ type Adapter interface {
 	RefreshNodes(context.Context) (bridgeprotocol.RefreshNodesResponse, error)
 	Scan(context.Context, bridgeprotocol.ScanRequest) (bridgeprotocol.ScanResponse, error)
 	ExportLocalSkill(context.Context, bridgeprotocol.LocalSkillExportRequest) (bridgeprotocol.LocalSkillExportResponse, error)
+	ExportLocalSkillBatch(context.Context, bridgeprotocol.LocalSkillBatchExportRequest) (bridgeprotocol.LocalSkillBatchExportResponse, error)
 	PreviewLocalMCP(context.Context, bridgeprotocol.LocalMCPPreviewRequest) (bridgeprotocol.LocalMCPPreviewResponse, error)
 	CaptureLocalMCP(context.Context, bridgeprotocol.LocalMCPCaptureRequest) (bridgeprotocol.LocalMCPCaptureResponse, error)
 	Preflight(context.Context, bridgeprotocol.PreflightRequest) (bridgeprotocol.PreflightResponse, error)
@@ -76,6 +77,7 @@ func (s *Server) Router() http.Handler {
 	// These are authenticated, typed, ephemeral reads. Archive and plaintext
 	// capture responses deliberately bypass the idempotency journal.
 	router.Post("/v1/local/skills/export", s.ephemeral(s.exportLocalSkill))
+	router.Post("/v1/local/skills/export-batch", s.ephemeral(s.exportLocalSkillBatch))
 	router.Post("/v1/local/mcp/preview", s.ephemeral(s.previewLocalMCP))
 	router.Post("/v1/local/mcp/capture", s.ephemeral(s.captureLocalMCP))
 	router.Post("/v1/targets/preflight", s.mutation(s.preflight))
@@ -217,6 +219,18 @@ func (s *Server) exportLocalSkill(ctx context.Context, body []byte) (int, any, e
 		return 0, nil, invalidRequest(err)
 	}
 	result, err := s.adapter.ExportLocalSkill(ctx, input)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) exportLocalSkillBatch(ctx context.Context, body []byte) (int, any, error) {
+	var input bridgeprotocol.LocalSkillBatchExportRequest
+	if err := decodeStrict(body, &input); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	if err := input.Target.Validate(false); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	result, err := s.adapter.ExportLocalSkillBatch(ctx, input)
 	return http.StatusOK, result, err
 }
 
