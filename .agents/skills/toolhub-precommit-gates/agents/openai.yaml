@@ -1,0 +1,4 @@
+interface:
+  display_name: "ToolHub Pre-commit Gates"
+  short_description: "Run complete ToolHub submission checks"
+  default_prompt: "Use $toolhub-precommit-gates to run every required ToolHub gate before committing."
