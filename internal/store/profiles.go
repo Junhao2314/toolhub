@@ -131,7 +131,7 @@ func resolveProfilePinsTx(ctx context.Context, tx pgx.Tx, input ProfileInput) (p
 		}
 		versionID := strings.TrimSpace(input.SkillVersionIDs[skillID])
 		var pin domain.ProfileSkillPin
-		err := tx.QueryRow(ctx, `SELECT sk.id::text,v.id::text,sk.slug,sk.name,a.canonical_sha256,a.content_hash,v.id=sk.current_version_id FROM skills sk JOIN skill_versions v ON v.skill_id=sk.id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND v.id=coalesce(nullif($2,''),sk.current_version_id) AND sk.archived_at IS NULL`, skillID, versionID).Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.SHA256, &pin.ContentHash, &pin.Current)
+		err := tx.QueryRow(ctx, `SELECT sk.id::text,v.id::text,sk.slug,sk.name,a.canonical_sha256,a.content_hash,v.id=sk.current_version_id FROM skills sk JOIN skill_versions v ON v.skill_id=sk.id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND v.id=coalesce(nullif($2,'')::uuid,sk.current_version_id) AND sk.archived_at IS NULL`, skillID, versionID).Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.SHA256, &pin.ContentHash, &pin.Current)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return profilePins{}, ErrNotFound
 		}
