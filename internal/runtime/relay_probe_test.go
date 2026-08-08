@@ -197,7 +197,10 @@ func TestRelayProbeTimeoutAndReasonRedaction(t *testing.T) {
 		<-request.Context().Done()
 		return nil, request.Context().Err()
 	})}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	// Leave enough budget for the race-instrumented mcpm --version subprocess
+	// before exercising the transport timeout. A 5ms deadline can expire during
+	// process startup and report mcpm_incompatible instead of relay_unhealthy.
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	status, err := manager.ProbeMembers(ctx, 6276, probeManifest("server"))
 	if err == nil || status.ErrorCode != bridgeprotocol.ErrRelayUnhealthy || status.Healthy {
