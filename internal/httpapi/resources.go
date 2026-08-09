@@ -122,7 +122,7 @@ func (a *API) uploadSkill(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "unsafe_archive", err.Error())
 		return
 	}
-	skill, created, err := a.store.ImportSkill(r.Context(), store.SourceInput{Kind: "zip", Name: header.Filename}, pkg, map[string]any{"filename": header.Filename})
+	skill, created, err := a.store.ImportSkill(r.Context(), store.SourceInput{Kind: "zip", Name: header.Filename, Metadata: map[string]any{}}, pkg, map[string]any{"filename": header.Filename})
 	if err != nil {
 		a.handleStoreError(w, r, err)
 		return
