@@ -110,6 +110,23 @@ func TestPausedRelayIsHealthyOnlyWhenPauseIsEnforced(t *testing.T) {
 	}
 }
 
+func TestRuntimeInventoryPayloadUsesPostCommitScan(t *testing.T) {
+	member := bridgeprotocol.InventoryMember{ID: "skill:formatter", Kind: "skill", Name: "formatter"}
+	relay := &bridgeprotocol.RelayStatus{State: "active", Healthy: true, FixedPort: 6276}
+	payload := runtimeInventoryPayload(bridgeprotocol.ScanResponse{
+		TargetRevision: strings.Repeat("a", 64),
+		Members:        []bridgeprotocol.InventoryMember{member},
+	}, bridgeprotocol.TargetResult{Relay: relay})
+
+	members, ok := payload["members"].([]bridgeprotocol.InventoryMember)
+	if !ok || len(members) != 1 || members[0].Name != "formatter" {
+		t.Fatalf("members=%#v", payload["members"])
+	}
+	if payload["relay"] != relay {
+		t.Fatalf("relay=%#v", payload["relay"])
+	}
+}
+
 func assertRevisionConflict(t *testing.T, err error) {
 	t.Helper()
 	var apiErr *bridgeprotocol.APIError

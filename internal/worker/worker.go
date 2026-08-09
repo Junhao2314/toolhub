@@ -524,6 +524,9 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 			result.Relay.IntentionalPaused = false
 		}
 	}
+	if err := w.refreshRuntimeSnapshot(ctx, item.OperationTarget.ID, target, result); err != nil && w.logger != nil {
+		w.logger.Warn("refresh runtime inventory after commit", "targetId", target.ID, "error", err)
+	}
 	if result.BackupID != "" {
 		_, _ = w.store.RecordBackup(ctx, bridgeprotocol.Backup{ID: result.BackupID, TargetID: target.ID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, Revision: metadata.TargetRevision, CreatedAt: time.Now().UTC()}, item.Operation.ID, &beforeManifest)
 	}
@@ -601,6 +604,9 @@ func (w *Worker) executeReconcile(ctx context.Context, item store.WorkItem, targ
 		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
 		return bridgeprotocol.TargetResult{}, apiErr
 	}
+	if err := w.refreshRuntimeSnapshot(ctx, item.OperationTarget.ID, target, result); err != nil && w.logger != nil {
+		w.logger.Warn("refresh runtime inventory after reconcile", "targetId", target.ID, "error", err)
+	}
 	if result.BackupID != "" {
 		_, _ = w.store.RecordBackup(ctx, bridgeprotocol.Backup{ID: result.BackupID, TargetID: target.ID, NodeKind: target.NodeKind, SaltMinionID: target.SaltMinionID, Runtime: target.Runtime, Revision: result.TargetRevision, CreatedAt: time.Now().UTC()}, item.Operation.ID, &manifest)
 	}
@@ -634,6 +640,22 @@ func normalizedResultHealth(health string) string {
 		return bridgeprotocol.HealthHealthy
 	}
 	return health
+}
+
+func (w *Worker) refreshRuntimeSnapshot(ctx context.Context, operationID string, target bridgeprotocol.Target, result bridgeprotocol.TargetResult) error {
+	response, err := w.bridge.Scan(ctx, operationID+":post-commit-scan", bridgeprotocol.ScanRequest{Target: target})
+	if err != nil {
+		return err
+	}
+	return w.store.ReplaceRuntimeSnapshot(ctx, target.ID, response.TargetRevision, runtimeInventoryPayload(response, result))
+}
+
+func runtimeInventoryPayload(response bridgeprotocol.ScanResponse, result bridgeprotocol.TargetResult) map[string]any {
+	relay := response.Relay
+	if relay == nil {
+		relay = result.Relay
+	}
+	return map[string]any{"members": response.Members, "relay": relay}
 }
 
 func relayStatusFromResult(result bridgeprotocol.TargetResult) bridgeprotocol.RelayStatus {
