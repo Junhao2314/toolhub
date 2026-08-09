@@ -40,8 +40,8 @@ Apply a Profile or otherwise change a target's desired snapshot.
   Profile, even when some of them overlap.
 - `qu-ai-wei` and the agreed web-research and agent-tooling baseline must be in
   every created Profile.
-- The Claude-only `*-codex` planning Skills must not be added to Codex
-  Profiles. `acemcp-incremental-sync` is Codex-only.
+- All five `grill-*` Skills are mandatory in every Claude and Codex Profile.
+  `acemcp-incremental-sync` remains Codex-only.
 - The existing `shared-mcp` Profile, MCP Library, desired snapshots, and target
   health must not be changed.
 
@@ -108,7 +108,7 @@ installed before the new groups.
 
 ## Mandatory Baseline
 
-Every Profile contains these 20 common Skills:
+Every Profile contains these 22 common Skills:
 
 ```text
 using-superpowers
@@ -123,7 +123,9 @@ using-git-worktrees
 executing-plans
 finishing-a-development-branch
 grill-me
+grill-me-codex
 grill-with-docs
+grill-with-docs-codex
 grilling
 qu-ai-wei
 firecrawl
@@ -133,20 +135,13 @@ writing-skills
 workflow-runner
 ```
 
-Every Claude Profile additionally contains:
-
-```text
-grill-me-codex
-grill-with-docs-codex
-```
-
 Every Codex Profile additionally contains:
 
 ```text
 acemcp-incremental-sync
 ```
 
-The effective baseline is therefore 22 Skills for Claude and 21 for Codex.
+The effective baseline is therefore 22 Skills for Claude and 23 for Codex.
 `ast-grep` remains available through its existing protected/global path and is
 not duplicated in a Profile.
 
@@ -178,7 +173,7 @@ firecrawl-build-interact
 
 Add `codex-build` and `codex-review` only to `claude-coding`.
 
-Expected totals: 36 Skills for Claude and 33 for Codex.
+Expected totals: 36 Skills for Claude and 35 for Codex.
 
 ### Data Analysis
 
@@ -195,7 +190,7 @@ funnel-analysis
 ltv-predictor
 ```
 
-Expected totals: 28 Skills for Claude and 27 for Codex.
+Expected totals: 28 Skills for Claude and 29 for Codex.
 
 ### Frontend UI
 
@@ -234,7 +229,7 @@ ui-ux-pro-max-cn
 This intentionally retains every newly installed taste/UI/web-design Skill,
 including the v1 taste entry, plus `hallmark`.
 
-Expected totals: 47 Skills for Claude and 46 for Codex.
+Expected totals: 47 Skills for Claude and 48 for Codex.
 
 ### Text Processing
 
@@ -250,15 +245,16 @@ chinese-documentation
 slides
 ```
 
-Expected totals: 27 Skills for Claude and 26 for Codex.
+Expected totals: 27 Skills for Claude and 28 for Codex.
 
 ## Operation Sequence
 
 1. Scan `local/claude` and `local/codex` and retain their exact inventory
    revisions and content hashes.
 2. Import the 19 retained common regular-directory Skills from one local
-   target. Import the four Claude-only Skills from `local/claude` and the two
-   Codex-only Skills from `local/codex`.
+   target. Import the four Skills available only from the Claude source root
+   from `local/claude`, and the two available only from the Codex source root
+   from `local/codex`.
 3. Respect the one-active-operation-per-target invariant by waiting for each
    target's import operation to reach a terminal state before queueing its next
    import. The Claude and Codex streams may progress independently.
@@ -307,9 +303,9 @@ Before reporting configuration completion:
 - confirm all eight Profiles exist with the exact counts above and contain no
   MCP members;
 - confirm every newly installed Library Skill belongs to at least one Profile;
-- confirm `qu-ai-wei`, `firecrawl`, the three common grill Skills, and the
+- confirm `qu-ai-wei`, `firecrawl`, all five grill Skills, and the
   agreed agent-tooling members belong to every Profile;
-- confirm Claude-only and Codex-only membership rules;
+- confirm the Codex-only membership rule;
 - confirm `shared-mcp`, desired snapshots, target health, and runtime inventory
   were not changed by Library/Profile creation;
 - inspect operation results and audit records for partial or failed imports;
