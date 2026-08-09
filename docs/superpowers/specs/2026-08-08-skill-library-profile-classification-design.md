@@ -12,7 +12,7 @@ in a normal session.
 The user will choose and Apply a Profile through ToolHub. This work must not
 Apply a Profile or otherwise change a target's desired snapshot.
 
-## Current State
+## Baseline At Design Time
 
 - The Library contains 47 Skills imported from the five newly installed
   groups: `superpowers-zh`, `webdesign-agency-skills`, `qu-ai-wei`,
@@ -27,6 +27,35 @@ Apply a Profile or otherwise change a target's desired snapshot.
 - The only current Profile is `shared-mcp`; it must remain unchanged.
 - Each runtime has 47 active symlinks into `/root/.shared/skills`. ToolHub
   classifies those symlinks as protected inventory entries.
+
+## Migration Outcome (2026-08-09)
+
+The user later authorized fully retiring the shared source instead of retaining
+it as the long-term Hermes backing store. The completed host migration is:
+
+- `/root/.shared/skills` no longer exists.
+- Claude and Codex have no active links targeting the retired shared path;
+  ToolHub Profiles now own their selected regular Skills.
+- All 47 shared packages are real directories under `/root/.hermes/skills`.
+  They have 47 unique canonical slugs and match both the migration source and
+  the current ToolHub Library artifacts by canonical SHA-256 and content hash.
+- The ToolHub Library contains 72 active Skills. All eight Claude/Codex
+  Profiles match the mandatory baseline and category sets in this document
+  exactly, with no missing or extra members.
+- Five pre-existing Hermes packages under `software-development/` used the
+  same canonical slugs but had different content. The migrated root-level
+  Library-matching versions remain active; the conflicting variants were moved
+  to a recoverable archive rather than deleted.
+- A canonical `local/hermes` Scan completed successfully with 209 unique Skill
+  members, 205 importable members, and zero shadowed members. All 47 migrated
+  packages were present and importable.
+
+Recovery material is retained outside active Skill roots:
+
+```text
+/root/.toolhub-shared-skill-migrations/20260809T030328Z
+/root/.toolhub-shared-skill-migrations/20260809T030810Z
+```
 
 ## Invariants
 
@@ -270,7 +299,7 @@ Expected totals: 27 Skills for Claude and 28 for Codex.
 If an import fails, leave that Skill out of dependent Profile creation until
 the cause is resolved. Do not silently create an incomplete Profile.
 
-## One-Time Symlink Migration Before First Apply
+## One-Time Symlink Migration Before First Apply (Completed)
 
 Creating Profiles alone will not reduce the currently visible Skill count.
 ToolHub preserves symlink inventory entries as protected unless a desired Skill
@@ -289,8 +318,10 @@ Immediately before the user's first Apply:
 5. Run Profile Preflight against the new target revision.
 6. The user reviews the destructive diff and performs Apply in the UI.
 
-The migration must happen before Preflight. Moving links after Preflight
-changes the target revision and correctly invalidates the confirmation token.
+The migration happened before the corresponding Preflight/Apply. Moving links
+after Preflight would change the target revision and correctly invalidate the
+confirmation token. The later Hermes source retirement is recorded in the
+migration outcome above and did not make Hermes writable through ToolHub.
 
 ## Validation
 
@@ -317,9 +348,11 @@ Before reporting configuration completion:
 - Library imports are non-destructive immutable intake. Unused imported Skills
   can remain in the Library or be archived later.
 - Profiles can be archived without changing any runtime target.
-- Before Apply, symlink migration rollback consists of moving each recorded
-  link back to its original runtime path only when that path is absent.
-- After Apply, use the separate symlink backup together with ToolHub's target
-  backup if the user chooses to restore the former shared-link layout.
-- Never delete `/root/.shared/skills`; it is the retained source behind the
-  reversible symlink migration.
+- Before Apply, symlink migration rollback consisted of moving each recorded
+  link back to its original runtime path only when that path was absent.
+- After Apply, use ToolHub's target backup for Claude/Codex runtime state. The
+  timestamped migration backups above preserve the former shared source,
+  original Hermes links, and the five conflicting Hermes variants.
+- Recreate `/root/.shared/skills` or its cross-runtime links only as an explicit
+  rollback to the retired shared-link architecture. Do not mix those links
+  with Profile-managed Claude/Codex Skills.
