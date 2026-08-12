@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -56,6 +57,9 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 			return domain.Operation{}, err
 		}
 	}
+	if err := lockActiveTargets(ctx, tx, input.TargetIDs); err != nil {
+		return domain.Operation{}, err
+	}
 	id := uuid.NewString()
 	var source any
 	if uuid.Validate(input.SourceID) == nil {
@@ -81,6 +85,40 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 		return domain.Operation{}, err
 	}
 	return s.Operation(ctx, id)
+}
+
+func lockActiveTargets(ctx context.Context, tx pgx.Tx, targetIDs []string) error {
+	ids := uniqueIDs(targetIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+	for _, id := range ids {
+		if uuid.Validate(id) != nil {
+			return ErrNotFound
+		}
+	}
+	rows, err := tx.Query(ctx, `SELECT t.id::text FROM targets t JOIN nodes n ON n.id=t.node_id WHERE t.id=ANY($1::uuid[]) AND n.archived_at IS NULL ORDER BY n.id,t.id FOR SHARE OF n`, ids)
+	if err != nil {
+		return err
+	}
+	count := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if count != len(ids) {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func operationRequestHash(request any, targetRequests map[string]any) (string, error) {
@@ -211,19 +249,58 @@ func (s *Store) ClaimOperationTarget(ctx context.Context) (WorkItem, error) {
 		return WorkItem{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var item WorkItem
-	err = tx.QueryRow(ctx, `SELECT ot.id::text,ot.operation_id::text,ot.target_id::text,ot.status,ot.attempt,ot.pending_rerun,ot.bridge_operation_id,ot.salt_jid,ot.request,ot.created_at,ot.updated_at FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id WHERE ot.status='queued' AND NOT o.cancel_requested ORDER BY ot.created_at FOR UPDATE OF ot SKIP LOCKED LIMIT 1`).Scan(&item.OperationTarget.ID, &item.OperationTarget.OperationID, &item.OperationTarget.TargetID, &item.OperationTarget.Status, &item.OperationTarget.Attempt, &item.OperationTarget.PendingRerun, &item.OperationTarget.BridgeOperationID, &item.OperationTarget.SaltJID, &item.OperationTarget.Request, &item.OperationTarget.CreatedAt, &item.OperationTarget.UpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return WorkItem{}, ErrNotFound
+	type candidate struct {
+		operationID       string
+		operationTargetID string
+		nodeID            string
 	}
+	rows, err := tx.Query(ctx, `SELECT o.id::text,ot.id::text,n.id::text FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.status='queued' AND NOT o.cancel_requested AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') ORDER BY o.id,ot.id,n.id LIMIT 100`)
 	if err != nil {
 		return WorkItem{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE operation_targets SET status='running',started_at=coalesce(started_at,now()),updated_at=now() WHERE id=$1`, item.OperationTarget.ID); err != nil {
+	candidates := []candidate{}
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.operationID, &item.operationTargetID, &item.nodeID); err != nil {
+			rows.Close()
+			return WorkItem{}, err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
 		return WorkItem{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE operations SET status='running',started_at=coalesce(started_at,now()),updated_at=now() WHERE id=$1`, item.OperationTarget.OperationID); err != nil {
-		return WorkItem{}, err
+	rows.Close()
+	var item WorkItem
+	claimed := false
+	for _, candidate := range candidates {
+		var operationID string
+		err := tx.QueryRow(ctx, `SELECT id::text FROM operations WHERE id=$1 AND NOT cancel_requested FOR UPDATE SKIP LOCKED`, candidate.operationID).Scan(&operationID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return WorkItem{}, err
+		}
+		err = tx.QueryRow(ctx, `SELECT ot.id::text,ot.operation_id::text,ot.target_id::text,ot.status,ot.attempt,ot.pending_rerun,ot.bridge_operation_id,ot.salt_jid,ot.request,ot.created_at,ot.updated_at FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.id=$1 AND ot.operation_id=$2 AND ot.status='queued' AND NOT o.cancel_requested AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') FOR UPDATE OF ot SKIP LOCKED`, candidate.operationTargetID, operationID).Scan(&item.OperationTarget.ID, &item.OperationTarget.OperationID, &item.OperationTarget.TargetID, &item.OperationTarget.Status, &item.OperationTarget.Attempt, &item.OperationTarget.PendingRerun, &item.OperationTarget.BridgeOperationID, &item.OperationTarget.SaltJID, &item.OperationTarget.Request, &item.OperationTarget.CreatedAt, &item.OperationTarget.UpdatedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return WorkItem{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET status='running',started_at=coalesce(started_at,now()),updated_at=now() WHERE id=$1`, item.OperationTarget.ID); err != nil {
+			return WorkItem{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE operations SET status='running',started_at=coalesce(started_at,now()),updated_at=now() WHERE id=$1`, item.OperationTarget.OperationID); err != nil {
+			return WorkItem{}, err
+		}
+		claimed = true
+		break
+	}
+	if !claimed {
+		return WorkItem{}, ErrNotFound
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return WorkItem{}, err
@@ -232,7 +309,7 @@ func (s *Store) ClaimOperationTarget(ctx context.Context) (WorkItem, error) {
 	if err != nil {
 		return WorkItem{}, err
 	}
-	item.Target, err = s.Target(ctx, item.OperationTarget.TargetID)
+	item.Target, err = s.historicalTarget(ctx, item.OperationTarget.TargetID)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -258,8 +335,20 @@ func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, st
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var operationID string
-	if err := tx.QueryRow(ctx, `UPDATE operation_targets SET status=$2,result=$3,error_code=$4,error_reason=$5,finished_at=now(),updated_at=now() WHERE id=$1 AND status='running' RETURNING operation_id::text`, operationTargetID, status, jsonText(resultJSON), errorCode, errorReason).Scan(&operationID); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT operation_id::text FROM operation_targets WHERE id=$1`, operationTargetID).Scan(&operationID); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
 		return err
+	}
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM operations WHERE id=$1 FOR UPDATE`, operationID).Scan(&operationID); err != nil {
+		return err
+	}
+	command, err := tx.Exec(ctx, `UPDATE operation_targets SET status=$2,result=$3,error_code=$4,error_reason=$5,finished_at=now(),updated_at=now() WHERE id=$1 AND status='running'`, operationTargetID, status, jsonText(resultJSON), errorCode, errorReason)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
 	}
 	if err := recalculateOperation(ctx, tx, operationID); err != nil {
 		return err
@@ -356,9 +445,9 @@ func (s *Store) EnqueueReconciles(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	rows, err := tx.Query(ctx, `SELECT ds.target_id::text,t.runtime,(t.runtime='shared-relay' AND (ds.health='blocked' OR ds.relay_last_member_check_at IS NULL OR ds.relay_last_member_check_at<=now()-interval '30 minutes')) AS full_relay_probe FROM target_desired_snapshots ds JOIN targets t ON t.id=ds.target_id WHERE t.runtime<>'shared-relay' OR (NOT ds.relay_suspended AND (ds.health<>'blocked' OR ds.relay_next_retry_at IS NULL OR ds.relay_next_retry_at<=now())) ORDER BY ds.target_id`)
+	rows, err := tx.Query(ctx, `SELECT ds.target_id::text,t.runtime,(t.runtime='shared-relay' AND (ds.health='blocked' OR ds.relay_last_member_check_at IS NULL OR ds.relay_last_member_check_at<=now()-interval '30 minutes')) AS full_relay_probe FROM target_desired_snapshots ds JOIN targets t ON t.id=ds.target_id JOIN nodes n ON n.id=t.node_id WHERE n.archived_at IS NULL AND (t.runtime<>'shared-relay' OR (NOT ds.relay_suspended AND (ds.health<>'blocked' OR ds.relay_next_retry_at IS NULL OR ds.relay_next_retry_at<=now()))) ORDER BY n.id,ds.target_id FOR SHARE OF n`)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("list active reconcile targets: %w", err)
 	}
 	type reconcileTarget struct {
 		id             string
@@ -374,11 +463,15 @@ func (s *Store) EnqueueReconciles(ctx context.Context) (int, error) {
 		}
 		targets = append(targets, target)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
 	rows.Close()
 	created := 0
 	for _, target := range targets {
 		var activeID string
-		err := tx.QueryRow(ctx, `SELECT id::text FROM operation_targets WHERE target_id=$1 AND status IN ('queued','running')`, target.id).Scan(&activeID)
+		err := tx.QueryRow(ctx, `SELECT id::text FROM operation_targets WHERE target_id=$1 AND status IN ('queued','running') FOR UPDATE`, target.id).Scan(&activeID)
 		if err == nil {
 			if _, err := tx.Exec(ctx, `UPDATE operation_targets SET pending_rerun=true,updated_at=now() WHERE id=$1`, activeID); err != nil {
 				return 0, err
@@ -386,18 +479,18 @@ func (s *Store) EnqueueReconciles(ctx context.Context) (int, error) {
 			continue
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return 0, err
+			return 0, fmt.Errorf("lock active reconcile step: %w", err)
 		}
 		operationID := uuid.NewString()
 		if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,'reconcile','queued','{"scheduled":true}')`, operationID); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("insert reconcile operation: %w", err)
 		}
 		request := `{}`
 		if target.fullRelayProbe {
 			request = `{"fullRelayProbe":true}`
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request) VALUES($1,$2,$3,$4)`, uuid.NewString(), operationID, target.id, request); err != nil {
-			return 0, err
+			return 0, fmt.Errorf("insert reconcile target: %w", err)
 		}
 		created++
 	}
@@ -410,9 +503,18 @@ func (s *Store) EnqueuePendingRerun(ctx context.Context, operationTargetID strin
 		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var nodeID string
+	var nodeActive bool
+	err = tx.QueryRow(ctx, `SELECT n.id::text,n.archived_at IS NULL FROM operation_targets ot JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.id=$1 FOR SHARE OF n`, operationTargetID).Scan(&nodeID, &nodeActive)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
 	var targetID string
 	var eligible, fullRelayProbe bool
-	err = tx.QueryRow(ctx, `SELECT ot.target_id::text,(t.runtime<>'shared-relay' OR (NOT ds.relay_suspended AND (ds.health<>'blocked' OR ds.relay_next_retry_at IS NULL OR ds.relay_next_retry_at<=now()))) AS eligible,(t.runtime='shared-relay' AND (ds.health='blocked' OR ds.relay_last_member_check_at IS NULL OR ds.relay_last_member_check_at<=now()-interval '30 minutes')) AS full_relay_probe FROM operation_targets ot JOIN targets t ON t.id=ot.target_id JOIN target_desired_snapshots ds ON ds.target_id=ot.target_id WHERE ot.id=$1 AND ot.pending_rerun AND ot.status IN ('succeeded','failed','cancelled') FOR UPDATE OF ot`, operationTargetID).Scan(&targetID, &eligible, &fullRelayProbe)
+	err = tx.QueryRow(ctx, `SELECT ot.target_id::text,$2 AND (t.runtime<>'shared-relay' OR (NOT ds.relay_suspended AND (ds.health<>'blocked' OR ds.relay_next_retry_at IS NULL OR ds.relay_next_retry_at<=now()))) AS eligible,(t.runtime='shared-relay' AND (ds.health='blocked' OR ds.relay_last_member_check_at IS NULL OR ds.relay_last_member_check_at<=now()-interval '30 minutes')) AS full_relay_probe FROM operation_targets ot JOIN targets t ON t.id=ot.target_id JOIN target_desired_snapshots ds ON ds.target_id=ot.target_id WHERE ot.id=$1 AND ot.pending_rerun AND ot.status IN ('succeeded','failed','cancelled') FOR UPDATE OF ot`, operationTargetID, nodeActive).Scan(&targetID, &eligible, &fullRelayProbe)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -474,11 +576,35 @@ func (s *Store) RequeueRunningOperationTarget(ctx context.Context, operationTarg
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var operationID string
-	err = tx.QueryRow(ctx, `UPDATE operation_targets SET status='queued',attempt=attempt+1,result=NULL,error_code='',error_reason='',started_at=NULL,finished_at=NULL,updated_at=now() WHERE id=$1 AND status='running' RETURNING operation_id::text`, operationTargetID).Scan(&operationID)
+	var active bool
+	err = tx.QueryRow(ctx, `SELECT ot.operation_id::text,n.archived_at IS NULL FROM operation_targets ot JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.id=$1 FOR SHARE OF n`, operationTargetID).Scan(&operationID, &active)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM operations WHERE id=$1 FOR UPDATE`, operationID).Scan(&operationID); err != nil {
+		return err
+	}
+	var bridgeOperationID string
+	err = tx.QueryRow(ctx, `SELECT bridge_operation_id FROM operation_targets WHERE id=$1 AND status='running' FOR UPDATE`, operationTargetID).Scan(&bridgeOperationID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !active && bridgeOperationID == "" {
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET status='cancelled',pending_rerun=false,finished_at=now(),updated_at=now() WHERE id=$1`, operationTargetID); err != nil {
+			return err
+		}
+		if err := recalculateOperation(ctx, tx, operationID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE operation_targets SET status='queued',attempt=attempt+1,result=NULL,error_code='',error_reason='',started_at=NULL,finished_at=NULL,updated_at=now() WHERE id=$1`, operationTargetID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE operations SET status=CASE WHEN EXISTS(SELECT 1 FROM operation_targets WHERE operation_id=$1 AND status='running') THEN 'running' ELSE 'queued' END,finished_at=NULL,error_code='',error_reason='',updated_at=now() WHERE id=$1`, operationID); err != nil {

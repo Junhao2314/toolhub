@@ -81,8 +81,19 @@ expired token, reused token, or mismatched manifest returns `409`.
 
 `POST /nodes/refresh` creates a durable `refresh` operation and returns `202`.
 The control worker asks the Bridge for the local node and accepted Salt keys,
-then persists the discovery result; clients observe completion through
-`/operations` and reload `/nodes` or `/targets`.
+then persists the successful discovery result as the authoritative active Salt
+inventory. Newly accepted keys create the fixed Claude, Codex, and Hermes
+Target set. Salt nodes absent from that successful result are soft-archived and
+their Targets disappear from active `/nodes`, `/targets`, and direct Target
+lookups. Rediscovering the same minion restores the original node and Target
+UUIDs, managed-username override, desired snapshot, inventory, backups, and
+operation history.
+
+Refresh is asynchronous: clients must poll `/operations/{id}` until the durable
+operation is terminal, and reload `/nodes` or `/targets` only after success. A
+failed Bridge accepted-key request changes no discovery projection. An empty
+successful accepted-key result archives every Salt node but never the local
+node or its Targets.
 
 `PATCH /nodes/{id}` sets a Salt node's managed-username override. Sending an
 empty `managedUsername` clears the override and makes every target on that node

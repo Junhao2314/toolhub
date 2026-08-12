@@ -383,6 +383,16 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		seenTargets[item.TargetID] = true
 		confirmed = append(confirmed, item)
 	}
+	targetIDs := make([]string, 0, len(confirmed))
+	for _, item := range confirmed {
+		targetIDs = append(targetIDs, item.TargetID)
+	}
+	if err := lockActiveTargets(ctx, tx, targetIDs); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return domain.Operation{}, ErrConflict
+		}
+		return domain.Operation{}, err
+	}
 	operationID := uuid.NewString()
 	metadata, _ := json.Marshal(map[string]any{"profileId": profileID, "targetCount": len(confirmed)})
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,'apply','queued',$2,$3,$4,$5)`, operationID, profileID, nullableText(idempotencyKey), requestHash, jsonText(metadata)); err != nil {

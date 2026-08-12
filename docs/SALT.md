@@ -34,7 +34,17 @@ salt --out=json --static --timeout=10 -- MINION test.version
 Minion IDs must match the driver's bounded literal identifier format. Target
 globs, compound matchers, arbitrary Salt functions, and caller-supplied argv are
 not accepted. A minion is writable only when `test.version` starts with
-`3008.`. Accepted but offline/incompatible nodes remain visible as unavailable.
+`3008.`. Accepted but offline/incompatible nodes remain active and visible as
+`unavailable`; transient connectivity does not archive them.
+
+A successful accepted-key refresh is authoritative. A previously active minion
+absent from that result becomes `archived`, and its Targets are hidden from
+active APIs without deleting node/Target identity, desired snapshots, runtime
+inventory, backups, or operation history. Rediscovering the same minion ID
+clears the archive marker and restores those original records. If the
+accepted-key command fails, ToolHub changes no discovery projection. An empty
+successful accepted-key list archives all Salt nodes while leaving the local
+node and its four Targets active.
 
 The remote managed username comes from Settings unless a node override is set.
 The driver resolves it through the allow-listed `user.info` function. A missing

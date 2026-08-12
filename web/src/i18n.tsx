@@ -169,6 +169,10 @@ const zh: Record<string, string> = {
 
   // Targets and relay
   'Node refresh queued': '节点刷新已排队',
+  'Node refresh running': '节点刷新进行中',
+  'Node refresh completed': '节点刷新已完成',
+  'Node refresh failed': '节点刷新失败',
+  'Node refresh cancelled': '节点刷新已取消',
   'Runtime inventory and pinned desired snapshots': '运行时清单与已固定的期望快照',
   'Refresh nodes': '刷新节点',
   'No Targets': '暂无目标',

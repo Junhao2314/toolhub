@@ -53,6 +53,131 @@ test('username login and generation-2 navigation render without overlap', async 
   expect(consoleErrors).toEqual([])
 })
 
+test('Targets refresh waits for completion and reloads active inventory', async ({ page }) => {
+  const operationID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const oldTarget = {
+    id: '11111111-1111-4111-8111-111111111111',
+    targetKey: 'salt:old-minion/claude',
+    nodeId: '22222222-2222-4222-8222-222222222222',
+    nodeName: 'old-minion',
+    nodeKind: 'salt',
+    saltMinionId: 'old-minion',
+    runtime: 'claude',
+    managedUsername: 'runner',
+    writable: true,
+    health: 'healthy',
+    desiredRevision: 0,
+    targetRevision: '',
+  }
+  const newTarget = {
+    ...oldTarget,
+    id: '33333333-3333-4333-8333-333333333333',
+    targetKey: 'salt:new-minion/claude',
+    nodeId: '44444444-4444-4444-8444-444444444444',
+    nodeName: 'new-minion',
+    saltMinionId: 'new-minion',
+  }
+  let refreshPosts = 0
+  let targetReads = 0
+  let operationPolls = 0
+  let refreshSucceeded = false
+  let releaseSuccess: () => void = () => {}
+  const successGate = new Promise<void>((resolve) => { releaseSuccess = resolve })
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/skills' || path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/targets' && request.method() === 'GET') {
+      targetReads++
+      return route.fulfill({ json: { items: [refreshSucceeded ? newTarget : oldTarget] } })
+    }
+    if (path === `/api/v1/targets/${oldTarget.id}`) return route.fulfill({ json: { target: oldTarget, targetRevision: '', inventory: { members: [] }, desired: null } })
+    if (path === `/api/v1/targets/${newTarget.id}`) return route.fulfill({ json: { target: newTarget, targetRevision: '', inventory: { members: [] }, desired: null } })
+    if (path === `/api/v1/targets/${oldTarget.id}/backups` || path === `/api/v1/targets/${newTarget.id}/backups`) return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/nodes/refresh' && request.method() === 'POST') {
+      refreshPosts++
+      return route.fulfill({ status: 202, json: { id: operationID, kind: 'refresh', status: 'queued', metadata: {}, cancelRequested: false, createdAt: now, updatedAt: now } })
+    }
+    if (path === `/api/v1/operations/${operationID}`) {
+      operationPolls++
+      if (operationPolls === 1) return route.fulfill({ json: { id: operationID, kind: 'refresh', status: 'running', metadata: {}, cancelRequested: false, createdAt: now, startedAt: now, updatedAt: now } })
+      await successGate
+      refreshSucceeded = true
+      return route.fulfill({ json: { id: operationID, kind: 'refresh', status: 'succeeded', metadata: {}, cancelRequested: false, createdAt: now, startedAt: now, finishedAt: now, updatedAt: now } })
+    }
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
+  })
+
+  await page.goto('/targets')
+  await expect(page.getByText('old-minion', { exact: true }).first()).toBeVisible()
+  const refresh = page.getByRole('button', { name: 'Refresh nodes' })
+  await page.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.includes('Refresh nodes'))
+    button?.click()
+    button?.click()
+  })
+  await expect.poll(() => refreshPosts).toBe(1)
+  await expect(refresh).toBeDisabled()
+  await expect.poll(() => operationPolls).toBeGreaterThanOrEqual(1)
+  await expect(page.getByText('old-minion', { exact: true }).first()).toBeVisible()
+  releaseSuccess()
+  await expect(page.getByText('new-minion', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('old-minion', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Node refresh completed')).toBeVisible()
+  expect(refreshPosts).toBe(1)
+})
+
+test('Targets refresh surfaces terminal failure without replacing inventory', async ({ page }) => {
+  const operationID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+  const target = {
+    id: '55555555-5555-4555-8555-555555555555',
+    targetKey: 'salt:stable-minion/claude',
+    nodeId: '66666666-6666-4666-8666-666666666666',
+    nodeName: 'stable-minion',
+    nodeKind: 'salt',
+    saltMinionId: 'stable-minion',
+    runtime: 'claude',
+    managedUsername: 'runner',
+    writable: true,
+    health: 'healthy',
+    desiredRevision: 0,
+    targetRevision: '',
+  }
+  let targetReads = 0
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/skills' || path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/targets' && request.method() === 'GET') {
+      targetReads++
+      return route.fulfill({ json: { items: [target] } })
+    }
+    if (path === `/api/v1/targets/${target.id}`) return route.fulfill({ json: { target, targetRevision: '', inventory: { members: [] }, desired: null } })
+    if (path === `/api/v1/targets/${target.id}/backups`) return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/nodes/refresh' && request.method() === 'POST') {
+      return route.fulfill({ status: 202, json: { id: operationID, kind: 'refresh', status: 'queued', metadata: {}, cancelRequested: false, createdAt: now, updatedAt: now } })
+    }
+    if (path === `/api/v1/operations/${operationID}`) {
+      return route.fulfill({ json: { id: operationID, kind: 'refresh', status: 'failed', metadata: {}, errorCode: 'target_unavailable', errorReason: 'Could not list accepted Salt keys', cancelRequested: false, createdAt: now, startedAt: now, finishedAt: now, updatedAt: now } })
+    }
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
+  })
+
+  await page.goto('/targets')
+  await expect(page.getByText('stable-minion', { exact: true }).first()).toBeVisible()
+  const initialTargetReads = targetReads
+  const refresh = page.getByRole('button', { name: 'Refresh nodes' })
+  await refresh.click()
+  await expect(page.getByText('Could not list accepted Salt keys')).toBeVisible()
+  await expect(page.getByText('stable-minion', { exact: true }).first()).toBeVisible()
+  await expect(refresh).toBeEnabled()
+  expect(targetReads).toBe(initialTargetReads)
+})
+
 test('Profile preflight pins confirmation tokens and partial operations remain actionable', async ({ page }, testInfo) => {
   const profileID = '22222222-2222-4222-8222-222222222222'
   const targetID = '11111111-1111-4111-8111-111111111111'

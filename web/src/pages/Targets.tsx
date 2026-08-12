@@ -11,7 +11,7 @@ import {
   Square,
   UserRoundCog,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   api,
   type Backup,
@@ -54,6 +54,9 @@ export default function Targets() {
   }, []);
   const [selected, setSelected] = useState("");
   const [notice, setNotice] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshOperationID, setRefreshOperationID] = useState("");
+  const refreshInFlight = useRef(false);
   useEffect(() => {
     if (
       state.data?.targets.length &&
@@ -66,22 +69,78 @@ export default function Targets() {
   )
     ? selected
     : (state.data?.targets[0]?.id ?? "");
-  const refreshNodes = () =>
+  const refreshNodes = () => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    setRefreshing(true);
     api
-      .post("/nodes/refresh")
-      .then(() => {
+      .post<Operation>("/nodes/refresh")
+      .then((operation) => {
+        setRefreshOperationID(operation.id);
         setNotice(t("Node refresh queued"));
-        state.reload();
       })
-      .catch((reason: Error) => setNotice(reason.message));
+      .catch((reason: Error) => {
+        refreshInFlight.current = false;
+        setRefreshing(false);
+        setRefreshOperationID("");
+        setNotice(reason.message);
+      });
+  };
+  useEffect(() => {
+    if (!refreshOperationID) return;
+    let active = true;
+    let timeout = 0;
+    const finish = () => {
+      refreshInFlight.current = false;
+      setRefreshing(false);
+      setRefreshOperationID("");
+    };
+    const poll = () => {
+      api
+        .get<Operation>(`/operations/${refreshOperationID}`)
+        .then((operation) => {
+          if (!active) return;
+          if (operation.status === "succeeded") {
+            finish();
+            setNotice(t("Node refresh completed"));
+            state.reload();
+            return;
+          }
+          if (["failed", "partial", "cancelled"].includes(operation.status)) {
+            finish();
+            setNotice(
+              operation.errorReason ||
+                t(
+                  operation.status === "cancelled"
+                    ? "Node refresh cancelled"
+                    : "Node refresh failed",
+                ),
+            );
+            return;
+          }
+          setNotice(t("Node refresh running"));
+          timeout = window.setTimeout(poll, 500);
+        })
+        .catch((reason: Error) => {
+          if (!active) return;
+          finish();
+          setNotice(reason.message);
+        });
+    };
+    poll();
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [refreshOperationID, state.reload, t]);
   return (
     <>
       <PageHeader
         title={t("Targets")}
         detail={t("Runtime inventory and pinned desired snapshots")}
         actions={
-          <Button variant="secondary" onClick={refreshNodes}>
-            <RefreshCw size={16} />
+          <Button variant="secondary" disabled={refreshing} onClick={refreshNodes}>
+            <RefreshCw className={refreshing ? "spin" : ""} size={16} />
             {t("Refresh nodes")}
           </Button>
         }

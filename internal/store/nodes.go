@@ -59,9 +59,31 @@ func (s *Store) UpsertDiscoveredNodes(ctx context.Context, nodes []bridgeprotoco
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var globalUsername string
-	if err := tx.QueryRow(ctx, `SELECT managed_username FROM settings WHERE singleton`).Scan(&globalUsername); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT managed_username FROM settings WHERE singleton FOR UPDATE`).Scan(&globalUsername); err != nil {
 		return err
 	}
+	rows, err := tx.Query(ctx, `SELECT id::text,archived_at IS NULL FROM nodes n WHERE kind='salt' ORDER BY id FOR UPDATE OF n`)
+	if err != nil {
+		return err
+	}
+	activeSaltNodes := map[string]bool{}
+	for rows.Next() {
+		var id string
+		var active bool
+		if err := rows.Scan(&id, &active); err != nil {
+			rows.Close()
+			return err
+		}
+		if active {
+			activeSaltNodes[id] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
 	seen := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		if node.Kind != bridgeprotocol.NodeKindSalt || strings.TrimSpace(node.SaltMinionID) == "" {
@@ -75,7 +97,7 @@ func (s *Store) UpsertDiscoveredNodes(ctx context.Context, nodes []bridgeprotoco
 		if node.Status == "online" {
 			status = "online"
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO nodes(id,name,kind,salt_minion_id,status,salt_version,last_seen_at) VALUES($1,$2,'salt',$3,$4,$5,CASE WHEN $4='online' THEN now() ELSE NULL END) ON CONFLICT(salt_minion_id) WHERE salt_minion_id IS NOT NULL DO UPDATE SET name=EXCLUDED.name,status=EXCLUDED.status,salt_version=EXCLUDED.salt_version,last_seen_at=CASE WHEN EXCLUDED.status='online' THEN now() ELSE nodes.last_seen_at END,updated_at=now() RETURNING id::text`, id, node.Name, node.SaltMinionID, status, node.Version).Scan(&id); err != nil {
+		if err := tx.QueryRow(ctx, `INSERT INTO nodes(id,name,kind,salt_minion_id,status,salt_version,last_seen_at) VALUES($1,$2,'salt',$3,$4,$5,CASE WHEN $4='online' THEN now() ELSE NULL END) ON CONFLICT(salt_minion_id) WHERE salt_minion_id IS NOT NULL DO UPDATE SET name=EXCLUDED.name,status=EXCLUDED.status,salt_version=EXCLUDED.salt_version,last_seen_at=CASE WHEN EXCLUDED.status='online' THEN now() ELSE nodes.last_seen_at END,archived_at=NULL,updated_at=now() RETURNING id::text`, id, node.Name, node.SaltMinionID, status, node.Version).Scan(&id); err != nil {
 			return err
 		}
 		seen = append(seen, id)
@@ -86,12 +108,99 @@ func (s *Store) UpsertDiscoveredNodes(ctx context.Context, nodes []bridgeprotoco
 			}
 		}
 	}
-	if len(seen) == 0 {
-		if _, err := tx.Exec(ctx, `UPDATE nodes SET status='unavailable',updated_at=now() WHERE kind='salt' AND archived_at IS NULL`); err != nil {
+	for _, id := range seen {
+		delete(activeSaltNodes, id)
+	}
+	absentNodeIDs := make([]string, 0, len(activeSaltNodes))
+	for id := range activeSaltNodes {
+		absentNodeIDs = append(absentNodeIDs, id)
+	}
+	if len(absentNodeIDs) > 0 {
+		operationRows, err := tx.Query(ctx, `SELECT o.id::text FROM operations o WHERE o.id IN (SELECT ot.operation_id FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE t.node_id=ANY($1::uuid[]) AND (ot.status IN ('queued','running') OR ot.pending_rerun)) ORDER BY o.id FOR UPDATE OF o`, absentNodeIDs)
+		if err != nil {
 			return err
 		}
-	} else if _, err := tx.Exec(ctx, `UPDATE nodes SET status='unavailable',updated_at=now() WHERE kind='salt' AND archived_at IS NULL AND NOT (id=ANY($1::uuid[]))`, seen); err != nil {
-		return err
+		operationIDs := []string{}
+		for operationRows.Next() {
+			var operationID string
+			if err := operationRows.Scan(&operationID); err != nil {
+				operationRows.Close()
+				return err
+			}
+			operationIDs = append(operationIDs, operationID)
+		}
+		if err := operationRows.Err(); err != nil {
+			operationRows.Close()
+			return err
+		}
+		operationRows.Close()
+
+		operationTargetRows, err := tx.Query(ctx, `SELECT ot.id::text FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE t.node_id=ANY($1::uuid[]) AND (ot.status IN ('queued','running') OR ot.pending_rerun) ORDER BY ot.id FOR UPDATE OF ot`, absentNodeIDs)
+		if err != nil {
+			return err
+		}
+		for operationTargetRows.Next() {
+			var operationTargetID string
+			if err := operationTargetRows.Scan(&operationTargetID); err != nil {
+				operationTargetRows.Close()
+				return err
+			}
+		}
+		if err := operationTargetRows.Err(); err != nil {
+			operationTargetRows.Close()
+			return err
+		}
+		operationTargetRows.Close()
+
+		archivedRows, err := tx.Query(ctx, `UPDATE nodes SET status='archived',archived_at=now(),updated_at=now() WHERE id=ANY($1::uuid[]) AND archived_at IS NULL RETURNING id::text`, absentNodeIDs)
+		if err != nil {
+			return err
+		}
+		archivedNodeIDs := []string{}
+		for archivedRows.Next() {
+			var id string
+			if err := archivedRows.Scan(&id); err != nil {
+				archivedRows.Close()
+				return err
+			}
+			archivedNodeIDs = append(archivedNodeIDs, id)
+		}
+		if err := archivedRows.Err(); err != nil {
+			archivedRows.Close()
+			return err
+		}
+		archivedRows.Close()
+
+		cancelledParents := map[string]bool{}
+		if len(archivedNodeIDs) > 0 {
+			cancelledRows, err := tx.Query(ctx, `UPDATE operation_targets ot SET status='cancelled',pending_rerun=false,finished_at=now(),updated_at=now() FROM targets t WHERE t.id=ot.target_id AND t.node_id=ANY($1::uuid[]) AND ot.status='queued' AND ot.bridge_operation_id='' RETURNING ot.operation_id::text`, archivedNodeIDs)
+			if err != nil {
+				return err
+			}
+			for cancelledRows.Next() {
+				var operationID string
+				if err := cancelledRows.Scan(&operationID); err != nil {
+					cancelledRows.Close()
+					return err
+				}
+				cancelledParents[operationID] = true
+			}
+			if err := cancelledRows.Err(); err != nil {
+				cancelledRows.Close()
+				return err
+			}
+			cancelledRows.Close()
+			if _, err := tx.Exec(ctx, `UPDATE operation_targets ot SET pending_rerun=false,updated_at=now() FROM targets t WHERE t.id=ot.target_id AND t.node_id=ANY($1::uuid[]) AND ot.pending_rerun`, archivedNodeIDs); err != nil {
+				return err
+			}
+		}
+		for _, operationID := range operationIDs {
+			if cancelledParents[operationID] {
+				if err := recalculateOperation(ctx, tx, operationID); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return tx.Commit(ctx)
 }
@@ -107,8 +216,20 @@ func (s *Store) ListTargets(ctx context.Context) (json.RawMessage, error) {
 const targetSelect = `SELECT t.id::text,t.target_key AS "targetKey",t.node_id::text AS "nodeId",n.name AS "nodeName",n.kind AS "nodeKind",coalesce(n.salt_minion_id,'') AS "saltMinionId",t.runtime,t.managed_username AS "managedUsername",t.writable,CASE WHEN EXISTS(SELECT 1 FROM operation_targets active_ot JOIN operations active_o ON active_o.id=active_ot.operation_id WHERE active_ot.target_id=t.id AND active_ot.status='running' AND active_o.kind='reconcile') THEN 'repairing' ELSE coalesce(ds.health,'drifted') END AS health,coalesce(ds.desired_revision,0) AS "desiredRevision",coalesce(rs.revision,'') AS "targetRevision",coalesce(ds.drift_summary,'{}'::jsonb) AS "driftSummary",rs.scanned_at AS "lastScannedAt",ds.last_reconciled_at AS "lastReconciledAt",coalesce(ds.error_code,'') AS "errorCode",coalesce(ds.error_reason,'') AS "errorReason",coalesce(ds.relay_failure_count,0) AS "relayFailureCount",ds.relay_next_retry_at AS "relayNextRetryAt",coalesce(ds.relay_suspended,false) AS "relaySuspended",ds.relay_last_member_check_at AS "relayLastMemberCheckAt",coalesce(ds.relay_member_status,'[]'::jsonb) AS "relayMemberStatuses" FROM targets t JOIN nodes n ON n.id=t.node_id LEFT JOIN runtime_snapshots rs ON rs.target_id=t.id LEFT JOIN target_desired_snapshots ds ON ds.target_id=t.id`
 
 func (s *Store) Target(ctx context.Context, id string) (domain.Target, error) {
+	return s.target(ctx, id, true)
+}
+
+func (s *Store) historicalTarget(ctx context.Context, id string) (domain.Target, error) {
+	return s.target(ctx, id, false)
+}
+
+func (s *Store) target(ctx context.Context, id string, activeOnly bool) (domain.Target, error) {
 	var target domain.Target
-	err := s.pool.QueryRow(ctx, targetSelect+` WHERE t.id=$1`, id).Scan(&target.ID, &target.TargetKey, &target.NodeID, &target.NodeName, &target.NodeKind, &target.SaltMinionID, &target.Runtime, &target.ManagedUsername, &target.Writable, &target.Health, &target.DesiredRevision, &target.TargetRevision, &target.DriftSummary, &target.LastScannedAt, &target.LastReconciledAt, &target.ErrorCode, &target.ErrorReason, &target.RelayFailureCount, &target.RelayNextRetryAt, &target.RelaySuspended, &target.RelayLastMemberCheckAt, &target.RelayMemberStatuses)
+	where := ` WHERE t.id=$1`
+	if activeOnly {
+		where += ` AND n.archived_at IS NULL`
+	}
+	err := s.pool.QueryRow(ctx, targetSelect+where, id).Scan(&target.ID, &target.TargetKey, &target.NodeID, &target.NodeName, &target.NodeKind, &target.SaltMinionID, &target.Runtime, &target.ManagedUsername, &target.Writable, &target.Health, &target.DesiredRevision, &target.TargetRevision, &target.DriftSummary, &target.LastScannedAt, &target.LastReconciledAt, &target.ErrorCode, &target.ErrorReason, &target.RelayFailureCount, &target.RelayNextRetryAt, &target.RelaySuspended, &target.RelayLastMemberCheckAt, &target.RelayMemberStatuses)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Target{}, ErrNotFound
 	}
@@ -173,7 +294,7 @@ func (s *Store) UpdateNodeManagedUsername(ctx context.Context, nodeID, username 
 	if username != "" {
 		value = username
 	}
-	command, err := tx.Exec(ctx, `UPDATE nodes SET managed_username_override=$2,updated_at=now() WHERE id=$1 AND kind='salt'`, nodeID, value)
+	command, err := tx.Exec(ctx, `UPDATE nodes SET managed_username_override=$2,updated_at=now() WHERE id=$1 AND kind='salt' AND archived_at IS NULL`, nodeID, value)
 	if err != nil {
 		return err
 	}

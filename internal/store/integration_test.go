@@ -7,9 +7,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
@@ -484,41 +486,464 @@ func TestCancelOperationOnlyStopsUndispatchedWorkIntegration(t *testing.T) {
 	}
 }
 
-func TestUpsertDiscoveredNodesIntegration(t *testing.T) {
+func TestDiscoveredNodeArchiveRestoreLifecycleIntegration(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)
 	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
 		t.Fatal(err)
 	}
-	onlineID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:online-minion")).String()
-	offlineID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:offline-minion")).String()
-	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{
-		{NodeID: onlineID, Name: "online-minion", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "online-minion", Status: "online", Version: "3008.0"},
-		{NodeID: offlineID, Name: "offline-minion", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "offline-minion", Status: "unavailable"},
-	}); err != nil {
+	online := bridgeprotocol.NodeInfo{
+		NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:online-minion")).String(),
+		Name:   "online-minion", Kind: bridgeprotocol.NodeKindSalt,
+		SaltMinionID: "online-minion", Status: "online", Version: "3008.0",
+	}
+	offline := bridgeprotocol.NodeInfo{
+		NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:offline-minion")).String(),
+		Name:   "offline-minion", Kind: bridgeprotocol.NodeKindSalt,
+		SaltMinionID: "offline-minion", Status: "unavailable",
+	}
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{online, offline}); err != nil {
 		t.Fatal(err)
 	}
-	var nodes, targets, online int
-	if err := st.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE status='online') FROM nodes WHERE kind='salt'`).Scan(&nodes, &online); err != nil {
+
+	var remoteTargets int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM targets t JOIN nodes n ON n.id=t.node_id WHERE n.kind='salt' AND n.archived_at IS NULL`).Scan(&remoteTargets); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM targets t JOIN nodes n ON n.id=t.node_id WHERE n.kind='salt'`).Scan(&targets); err != nil {
-		t.Fatal(err)
+	if remoteTargets != 6 {
+		t.Fatalf("remote target count=%d want=6", remoteTargets)
 	}
-	if nodes != 2 || online != 1 || targets != 6 {
-		t.Fatalf("discovery projection nodes=%d online=%d targets=%d", nodes, online, targets)
-	}
-	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{
-		{NodeID: onlineID, Name: "online-minion", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "online-minion", Status: "online", Version: "3008.0"},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var offlineStatus string
-	if err := st.pool.QueryRow(ctx, `SELECT status FROM nodes WHERE salt_minion_id='offline-minion'`).Scan(&offlineStatus); err != nil {
+	var offlineNodeID, offlineStatus string
+	if err := st.pool.QueryRow(ctx, `SELECT id::text,status FROM nodes WHERE salt_minion_id='offline-minion' AND archived_at IS NULL`).Scan(&offlineNodeID, &offlineStatus); err != nil {
 		t.Fatal(err)
 	}
 	if offlineStatus != "unavailable" {
-		t.Fatalf("unseen accepted node status=%q", offlineStatus)
+		t.Fatalf("accepted offline node status=%q want=unavailable", offlineStatus)
+	}
+	offlineTargets := map[string]string{}
+	rows, err := st.pool.Query(ctx, `SELECT runtime,id::text FROM targets WHERE node_id=$1 ORDER BY runtime`, offlineNodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var runtime, targetID string
+		if err := rows.Scan(&runtime, &targetID); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		offlineTargets[runtime] = targetID
+	}
+	rows.Close()
+	if len(offlineTargets) != 3 {
+		t.Fatalf("offline target identities=%v want three runtimes", offlineTargets)
+	}
+	if err := st.UpdateNodeManagedUsername(ctx, offlineNodeID, "operator"); err != nil {
+		t.Fatal(err)
+	}
+	offlineClaude, err := st.Target(ctx, offlineTargets[domain.RuntimeClaude])
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := bridgeprotocol.DesiredManifest{
+		SchemaVersion:    bridgeprotocol.ManifestSchemaVersion,
+		Target:           bridgeTarget(offlineClaude),
+		Skills:           []bridgeprotocol.SkillMember{},
+		MCPServers:       []bridgeprotocol.MCPMember{},
+		ManagedMemberIDs: []string{},
+	}
+	desired, err := st.PinDesiredSnapshot(ctx, offlineClaude.ID, "target_edit", "", "", manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := st.CreateOperation(ctx, CreateOperationInput{
+		Kind:      "scan",
+		Request:   map[string]any{"targetIds": []string{offlineClaude.ID, offlineTargets[domain.RuntimeCodex]}},
+		TargetIDs: []string{offlineClaude.ID, offlineTargets[domain.RuntimeCodex]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE operation_targets SET pending_rerun=true WHERE id=$1`, claimed.OperationTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{online}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Target(ctx, offlineClaude.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("archived target remained active: %v", err)
+	}
+	var archivedStatus string
+	var archivedAtSet bool
+	if err := st.pool.QueryRow(ctx, `SELECT status,archived_at IS NOT NULL FROM nodes WHERE id=$1`, offlineNodeID).Scan(&archivedStatus, &archivedAtSet); err != nil {
+		t.Fatal(err)
+	}
+	if archivedStatus != "archived" || !archivedAtSet {
+		t.Fatalf("archived node status=%q archivedAtSet=%v", archivedStatus, archivedAtSet)
+	}
+	nodesJSON, err := st.ListNodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetsJSON, err := st.ListTargets(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(nodesJSON), "offline-minion") || strings.Contains(string(targetsJSON), "offline-minion") {
+		t.Fatalf("archived minion remained in active projection: nodes=%s targets=%s", nodesJSON, targetsJSON)
+	}
+	var runningStatus string
+	var runningPending bool
+	if err := st.pool.QueryRow(ctx, `SELECT status,pending_rerun FROM operation_targets WHERE id=$1`, claimed.OperationTarget.ID).Scan(&runningStatus, &runningPending); err != nil {
+		t.Fatal(err)
+	}
+	if runningStatus != bridgeprotocol.OperationRunning || runningPending {
+		t.Fatalf("running archived step status=%q pendingRerun=%v", runningStatus, runningPending)
+	}
+	var queuedStatus string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM operation_targets WHERE operation_id=$1 AND id<>$2`, operation.ID, claimed.OperationTarget.ID).Scan(&queuedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if queuedStatus != bridgeprotocol.OperationCancelled {
+		t.Fatalf("undispatched archived step status=%q want=cancelled", queuedStatus)
+	}
+	assertOperationStatus(t, st, operation.ID, bridgeprotocol.OperationRunning)
+	if created, err := st.EnqueueReconciles(ctx); err != nil || created != 0 {
+		t.Fatalf("archived desired target reconcile: created=%d err=%v", created, err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT pending_rerun FROM operation_targets WHERE id=$1`, claimed.OperationTarget.ID).Scan(&runningPending); err != nil {
+		t.Fatal(err)
+	}
+	if runningPending {
+		t.Fatal("archived running step regained pending reconcile rerun")
+	}
+	var activeLocalNodes, activeLocalTargets int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE kind='local' AND archived_at IS NULL`).Scan(&activeLocalNodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM targets t JOIN nodes n ON n.id=t.node_id WHERE n.kind='local' AND n.archived_at IS NULL`).Scan(&activeLocalTargets); err != nil {
+		t.Fatal(err)
+	}
+	if activeLocalNodes != 1 || activeLocalTargets != 4 {
+		t.Fatalf("local projection changed: nodes=%d targets=%d", activeLocalNodes, activeLocalTargets)
+	}
+
+	if err := st.FinishOperationTarget(ctx, claimed.OperationTarget.ID, bridgeprotocol.OperationSucceeded, bridgeprotocol.TargetResult{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertOperationStatus(t, st, operation.ID, bridgeprotocol.OperationPartial)
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{online, offline}); err != nil {
+		t.Fatal(err)
+	}
+	var restoredNodeID, restoredUsername string
+	var restoredArchivedAt *string
+	if err := st.pool.QueryRow(ctx, `SELECT id::text,coalesce(managed_username_override,''),archived_at::text FROM nodes WHERE salt_minion_id='offline-minion'`).Scan(&restoredNodeID, &restoredUsername, &restoredArchivedAt); err != nil {
+		t.Fatal(err)
+	}
+	if restoredNodeID != offlineNodeID || restoredUsername != "operator" || restoredArchivedAt != nil {
+		t.Fatalf("restored node id=%s username=%q archivedAt=%v", restoredNodeID, restoredUsername, restoredArchivedAt)
+	}
+	for runtime, originalID := range offlineTargets {
+		var restoredTargetID string
+		if err := st.pool.QueryRow(ctx, `SELECT id::text FROM targets WHERE node_id=$1 AND runtime=$2`, restoredNodeID, runtime).Scan(&restoredTargetID); err != nil {
+			t.Fatal(err)
+		}
+		if restoredTargetID != originalID {
+			t.Fatalf("restored %s target id=%s want=%s", runtime, restoredTargetID, originalID)
+		}
+	}
+	var restoredSnapshotID string
+	if err := st.pool.QueryRow(ctx, `SELECT snapshot_id::text FROM target_desired_snapshots WHERE target_id=$1`, offlineClaude.ID).Scan(&restoredSnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	if restoredSnapshotID != desired.ID {
+		t.Fatalf("restored desired snapshot=%s want=%s", restoredSnapshotID, desired.ID)
+	}
+	if created, err := st.EnqueueReconciles(ctx); err != nil || created != 1 {
+		t.Fatalf("restored desired target reconcile: created=%d err=%v", created, err)
+	}
+}
+
+func TestEmptyDiscoveryArchivesAllSaltNodesOnlyIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	node := bridgeprotocol.NodeInfo{
+		NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:only-minion")).String(),
+		Name:   "only-minion", Kind: bridgeprotocol.NodeKindSalt,
+		SaltMinionID: "only-minion", Status: "online", Version: "3008.0",
+	}
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDiscoveredNodes(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	var saltNodes, saltTargets, localNodes, localTargets int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE kind='salt' AND archived_at IS NULL`).Scan(&saltNodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM targets t JOIN nodes n ON n.id=t.node_id WHERE n.kind='salt' AND n.archived_at IS NULL`).Scan(&saltTargets); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM nodes WHERE kind='local' AND archived_at IS NULL`).Scan(&localNodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM targets t JOIN nodes n ON n.id=t.node_id WHERE n.kind='local' AND n.archived_at IS NULL`).Scan(&localTargets); err != nil {
+		t.Fatal(err)
+	}
+	if saltNodes != 0 || saltTargets != 0 || localNodes != 1 || localTargets != 4 {
+		t.Fatalf("active projection saltNodes=%d saltTargets=%d localNodes=%d localTargets=%d", saltNodes, saltTargets, localNodes, localTargets)
+	}
+}
+
+func TestArchivedTargetsRejectNewAndScheduledWorkIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	node := bridgeprotocol.NodeInfo{NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:archived-intake")).String(), Name: "archived-intake", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "archived-intake", Status: "online", Version: "3008.0"}
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
+		t.Fatal(err)
+	}
+	target := integrationTarget(t, st, "salt:archived-intake/claude")
+	manifest := bridgeprotocol.DesiredManifest{SchemaVersion: bridgeprotocol.ManifestSchemaVersion, Target: bridgeTarget(target), Skills: []bridgeprotocol.SkillMember{}, MCPServers: []bridgeprotocol.MCPMember{}, ManagedMemberIDs: []string{}}
+	if _, err := st.PinDesiredSnapshot(ctx, target.ID, "target_edit", "", "", manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDiscoveredNodes(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", Request: map[string]any{"targetId": target.ID}, TargetIDs: []string{target.ID}}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("archived target accepted new work: %v", err)
+	}
+	if _, err := st.ClaimOperationTarget(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("archived target claim result: %v", err)
+	}
+	if created, err := st.EnqueueReconciles(ctx); err != nil || created != 0 {
+		t.Fatalf("archived target reconcile: created=%d err=%v", created, err)
+	}
+	var queued int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE n.archived_at IS NOT NULL AND ot.status='queued'`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("archived target left queued work=%d", queued)
+	}
+}
+
+func TestArchivedTargetRecoveryReplaysOnlyDispatchedWorkIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	node := bridgeprotocol.NodeInfo{NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:archive-recovery")).String(), Name: "archive-recovery", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "archive-recovery", Status: "online", Version: "3008.0"}
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
+		t.Fatal(err)
+	}
+	claude := integrationTarget(t, st, "salt:archive-recovery/claude")
+	codex := integrationTarget(t, st, "salt:archive-recovery/codex")
+	first, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", Request: map[string]any{"targetId": claude.ID}, TargetIDs: []string{claude.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", Request: map[string]any{"targetId": codex.ID}, TargetIDs: []string{codex.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstClaim, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatalf("claim first target: %v", err)
+	}
+	secondClaim, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatalf("claim second target: %v", err)
+	}
+	if firstClaim.Target.ID == codex.ID && secondClaim.Target.ID == claude.ID {
+		firstClaim, secondClaim = secondClaim, firstClaim
+	}
+	if firstClaim.Target.ID != claude.ID || secondClaim.Target.ID != codex.ID {
+		t.Fatalf("claimed targets=(%s,%s) want=(%s,%s)", firstClaim.Target.ID, secondClaim.Target.ID, claude.ID, codex.ID)
+	}
+	if err := st.SetBridgeOperationMetadata(ctx, firstClaim.OperationTarget.ID, "bridge-dispatched", "salt-jid"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDiscoveredNodes(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RequeueRunningOperationTarget(ctx, firstClaim.OperationTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RequeueRunningOperationTarget(ctx, secondClaim.OperationTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+	var firstStatus, secondStatus string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM operation_targets WHERE id=$1`, firstClaim.OperationTarget.ID).Scan(&firstStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM operation_targets WHERE id=$1`, secondClaim.OperationTarget.ID).Scan(&secondStatus); err != nil {
+		t.Fatal(err)
+	}
+	if firstStatus != bridgeprotocol.OperationQueued || secondStatus != bridgeprotocol.OperationCancelled {
+		t.Fatalf("recovery statuses dispatched=%q undispatched=%q", firstStatus, secondStatus)
+	}
+	replay, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatalf("claim dispatched replay: %v", err)
+	}
+	if replay.Target.ID != claude.ID {
+		t.Fatalf("replay target=%s want=%s", replay.Target.ID, claude.ID)
+	}
+	if err := st.FinishOperationTarget(ctx, replay.OperationTarget.ID, bridgeprotocol.OperationSucceeded, bridgeprotocol.TargetResult{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertOperationStatus(t, st, second.ID, bridgeprotocol.OperationCancelled)
+	assertOperationStatus(t, st, first.ID, bridgeprotocol.OperationSucceeded)
+	if created, err := st.EnqueuePendingRerun(ctx, replay.OperationTarget.ID); err != nil || created {
+		t.Fatalf("archived replay scheduled rerun: created=%v err=%v", created, err)
+	}
+}
+
+func TestArchivedTargetDoesNotConsumeProfileApplyConfirmationIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "Archive race", SkillIDs: []string{}, MCPServerIDs: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	node := bridgeprotocol.NodeInfo{NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:profile-archive")).String(), Name: "profile-archive", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "profile-archive", Status: "online", Version: "3008.0"}
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
+		t.Fatal(err)
+	}
+	target := integrationTarget(t, st, "salt:profile-archive/claude")
+	manifest, err := st.ResolveProfileManifest(ctx, profile.ID, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, target.ID, strings.Repeat("a", 64), manifest, bridgeprotocol.Diff{Add: []bridgeprotocol.DiffItem{}, Replace: []bridgeprotocol.DiffItem{}, Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{}}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDiscoveredNodes(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{token}, "apply-archive-fail"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("archived Apply error=%v want conflict", err)
+	}
+	var consumedAt *time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT consumed_at FROM preflight_confirmations WHERE token_hash=$1`, security.TokenHash(token)).Scan(&consumedAt); err != nil {
+		t.Fatal(err)
+	}
+	if consumedAt != nil {
+		t.Fatalf("failed archived Apply consumed confirmation at %v", consumedAt)
+	}
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
+		t.Fatal(err)
+	}
+	operation, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{token}, "apply-archive-success")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Status != bridgeprotocol.OperationQueued {
+		t.Fatalf("restored Apply status=%q", operation.Status)
+	}
+	var operationTargetID, operationTargetTargetID string
+	if err := st.pool.QueryRow(ctx, `SELECT id::text,target_id::text FROM operation_targets WHERE operation_id=$1`, operation.ID).Scan(&operationTargetID, &operationTargetTargetID); err != nil {
+		t.Fatal(err)
+	}
+	if operationTargetTargetID != target.ID || operationTargetID == "" {
+		t.Fatalf("restored Apply target=%s want=%s", operationTargetTargetID, target.ID)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT consumed_at FROM preflight_confirmations WHERE token_hash=$1`, security.TokenHash(token)).Scan(&consumedAt); err != nil {
+		t.Fatal(err)
+	}
+	if consumedAt == nil {
+		t.Fatal("successful Apply did not consume confirmation")
+	}
+}
+
+func TestArchiveAndFinishUseCanonicalLockOrderIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	node := bridgeprotocol.NodeInfo{NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:lock-order")).String(), Name: "lock-order", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "lock-order", Status: "online", Version: "3008.0"}
+	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
+		t.Fatal(err)
+	}
+	target := integrationTarget(t, st, "salt:lock-order/claude")
+	operation, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", Request: map[string]any{"targetId": target.ID}, TargetIDs: []string{target.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	barrier, finishStore, archiveStore, closePools := integrationLockOrderStores(t, st)
+	defer closePools()
+	barrierTx, err := barrier.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer barrierTx.Rollback(ctx)
+	if _, err := barrierTx.Exec(ctx, `SELECT id FROM operation_targets WHERE id=$1 FOR UPDATE`, claimed.OperationTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+	finishCtx, finishCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer finishCancel()
+	finishDone := make(chan error, 1)
+	go func() {
+		finishDone <- finishStore.FinishOperationTarget(finishCtx, claimed.OperationTarget.ID, bridgeprotocol.OperationSucceeded, bridgeprotocol.TargetResult{}, nil)
+	}()
+	waitForBackendLock(t, st, "toolhub-finish-lock-order")
+	probeCtx, probeCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer probeCancel()
+	var probeErr error
+	probeTx, err := st.pool.Begin(probeCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ignored string
+	probeErr = probeTx.QueryRow(probeCtx, `SELECT id::text FROM operations WHERE id=$1 FOR UPDATE NOWAIT`, operation.ID).Scan(&ignored)
+	_ = probeTx.Rollback(probeCtx)
+	var pgErr *pgconn.PgError
+	if !errors.As(probeErr, &pgErr) || pgErr.Code != "55P03" {
+		t.Fatalf("finish did not lock parent before waiting: err=%v", probeErr)
+	}
+	archiveCtx, archiveCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer archiveCancel()
+	archiveDone := make(chan error, 1)
+	go func() { archiveDone <- archiveStore.UpsertDiscoveredNodes(archiveCtx, nil) }()
+	waitForBackendLock(t, st, "toolhub-archive-lock-order")
+	if err := barrierTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-finishDone; err != nil {
+		t.Fatalf("finish returned %v", err)
+	}
+	if err := <-archiveDone; err != nil {
+		t.Fatalf("archive returned %v", err)
+	}
+	assertOperationStatus(t, st, operation.ID, bridgeprotocol.OperationSucceeded)
+	var status string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM nodes WHERE id=$1`, node.NodeID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "archived" {
+		t.Fatalf("node status=%q want archived", status)
 	}
 }
 
@@ -632,6 +1057,58 @@ func newIntegrationStore(t *testing.T, migrate bool) *Store {
 		}
 	}
 	return st
+}
+
+func integrationLockOrderStores(t *testing.T, st *Store) (*pgxpool.Pool, *Store, *Store, func()) {
+	t.Helper()
+	ctx := context.Background()
+	newPool := func(applicationName string) *pgxpool.Pool {
+		config := st.pool.Config()
+		config.MaxConns = 1
+		config.MinConns = 1
+		config.ConnConfig.RuntimeParams["application_name"] = applicationName
+		pool, err := pgxpool.NewWithConfig(ctx, config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.Ping(ctx); err != nil {
+			pool.Close()
+			t.Fatal(err)
+		}
+		return pool
+	}
+	barrier := newPool("toolhub-barrier-lock-order")
+	finishPool := newPool("toolhub-finish-lock-order")
+	archivePool := newPool("toolhub-archive-lock-order")
+	closePools := func() {
+		archivePool.Close()
+		finishPool.Close()
+		barrier.Close()
+	}
+	return barrier, &Store{pool: finishPool, cipher: st.cipher}, &Store{pool: archivePool, cipher: st.cipher}, closePools
+}
+
+func waitForBackendLock(t *testing.T, st *Store, applicationName string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var locked bool
+		err := st.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND application_name=$1 AND wait_event_type='Lock')`, applicationName).Scan(&locked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if locked {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("backend %q did not wait on a lock: %v", applicationName, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func integrationTarget(t *testing.T, st *Store, key string) domain.Target {
