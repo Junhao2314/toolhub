@@ -4,9 +4,11 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -96,6 +98,143 @@ func TestProfileApplyFinalizationFailureIsPersistedIntegration(t *testing.T) {
 	}
 }
 
+func TestRecoverFinalizesCompletedProfileApplyIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	if err := st.BootstrapEnvironment(ctx, "finalization-recovery-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	fixture := createCompletedProfileApplyForRecovery(t, st, "claude-recovery")
+	w := &Worker{store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := w.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertRecoveredProfileApply(t, st, fixture)
+}
+
+func TestRecoverContinuesAfterPersistedProfileApplyFinalizationFailureIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	if err := st.BootstrapEnvironment(ctx, "finalization-recovery-continue-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	var invalidTargetID string
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/codex'`).Scan(&invalidTargetID); err != nil {
+		t.Fatal(err)
+	}
+	invalidOperationID := uuid.NewString()
+	if _, err := st.Pool().Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,'apply','running','{}')`, invalidOperationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,governance_finalization_pending,finished_at) VALUES($1,$2,$3,'succeeded',true,now())`, uuid.NewString(), invalidOperationID, invalidTargetID); err != nil {
+		t.Fatal(err)
+	}
+	validFixture := createCompletedProfileApplyForRecovery(t, st, "claude-recovery-after-failure")
+
+	w := &Worker{store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := w.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var invalidStatus string
+	var invalidPending int
+	if err := st.Pool().QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, invalidOperationID).Scan(&invalidStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM operation_targets WHERE operation_id=$1 AND governance_finalization_pending`, invalidOperationID).Scan(&invalidPending); err != nil {
+		t.Fatal(err)
+	}
+	if invalidStatus != bridgeprotocol.OperationFailed || invalidPending != 0 {
+		t.Fatalf("persisted recovery failure status=%s pending=%d", invalidStatus, invalidPending)
+	}
+	assertRecoveredProfileApply(t, st, validFixture)
+}
+
+type completedProfileApplyFixture struct {
+	operation        domain.Operation
+	profile          domain.Profile
+	skillTargetRowID string
+	relayTargetRowID string
+}
+
+func createCompletedProfileApplyForRecovery(t *testing.T, st *store.Store, name string) completedProfileApplyFixture {
+	t.Helper()
+	ctx := context.Background()
+	profileID := uuid.NewString()
+	profile, err := st.SaveProfile(ctx, profileID, store.ProfileInput{Name: name + "-" + profileID[:8], ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var skillTargetID, relayTargetID string
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/claude'`).Scan(&skillTargetID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/shared-relay'`).Scan(&relayTargetID); err != nil {
+		t.Fatal(err)
+	}
+	skillManifest, err := st.ResolveProfileManifest(ctx, profile.ID, skillTargetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayManifest, err := st.ResolveProfileManifest(ctx, profile.ID, relayTargetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, skillTargetID, strings.Repeat("a", 64), skillManifest, bridgeprotocol.Diff{}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, relayTargetID, strings.Repeat("b", 64), relayManifest, bridgeprotocol.Diff{}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{skillToken, relayToken}, "recover-finalization-"+profileID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillItem, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishOperationTarget(ctx, skillItem.OperationTarget.ID, bridgeprotocol.OperationSucceeded, bridgeprotocol.TargetResult{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	relayItem, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishOperationTarget(ctx, relayItem.OperationTarget.ID, bridgeprotocol.OperationSucceeded, map[string]any{
+		"routingReloaded": true,
+		"routingHash":     relayManifest.RelayGovernance.RoutingHash,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	return completedProfileApplyFixture{operation: operation, profile: profile, skillTargetRowID: skillItem.OperationTarget.ID, relayTargetRowID: relayItem.OperationTarget.ID}
+}
+
+func assertRecoveredProfileApply(t *testing.T, st *store.Store, fixture completedProfileApplyFixture) {
+	t.Helper()
+	ctx := context.Background()
+	var status, publishedRevision string
+	var snapshots, pending int
+	if err := st.Pool().QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, fixture.operation.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1`, fixture.profile.ID).Scan(&publishedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM desired_snapshots WHERE source_operation_target_id IN ($1,$2)`, fixture.skillTargetRowID, fixture.relayTargetRowID).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM operation_targets WHERE operation_id=$1 AND governance_finalization_pending`, fixture.operation.ID).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if status != bridgeprotocol.OperationSucceeded || publishedRevision != fixture.profile.CurrentRevisionID || snapshots != 2 || pending != 0 {
+		t.Fatalf("recovered Profile Apply status=%s published=%s snapshots=%d pending=%d", status, publishedRevision, snapshots, pending)
+	}
+}
+
 func newWorkerIntegrationStore(t *testing.T) *store.Store {
 	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("TOOLHUB_TEST_DATABASE_URL"))
@@ -123,14 +262,18 @@ func newWorkerIntegrationStore(t *testing.T) *store.Store {
 		_ = admin.Close(ctx)
 		t.Fatal(err)
 	}
-	config.ConnConfig.Database = databaseName
-	databaseURL := config.ConnString()
+	databaseURL, err := url.Parse(config.ConnConfig.ConnString())
+	if err != nil {
+		_ = admin.Close(ctx)
+		t.Fatal(err)
+	}
+	databaseURL.Path = "/" + databaseName
 	cipher, err := security.NewCipher([]byte(strings.Repeat("k", 32)))
 	if err != nil {
 		_ = admin.Close(ctx)
 		t.Fatal(err)
 	}
-	st, err := store.Open(ctx, databaseURL, cipher)
+	st, err := store.Open(ctx, databaseURL.String(), cipher)
 	if err != nil {
 		_ = admin.Close(ctx)
 		t.Fatal(err)

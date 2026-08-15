@@ -506,8 +506,14 @@ func (s *Store) CancelOperation(ctx context.Context, operationID string) error {
 	if _, err := tx.Exec(ctx, `UPDATE operations SET cancel_requested=true,updated_at=now() WHERE id=$1`, operationID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE operation_targets SET status='cancelled',finished_at=now(),updated_at=now() WHERE operation_id=$1 AND status='queued'`, operationID); err != nil {
+	cancelledTargets, err := tx.Exec(ctx, `UPDATE operation_targets SET status='cancelled',finished_at=now(),updated_at=now() WHERE operation_id=$1 AND status='queued'`, operationID)
+	if err != nil {
 		return err
+	}
+	if cancelledTargets.RowsAffected() > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=false,updated_at=now() WHERE operation_id=$1 AND governance_finalization_pending`, operationID); err != nil {
+			return err
+		}
 	}
 	var targetCount int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM operation_targets WHERE operation_id=$1`, operationID).Scan(&targetCount); err != nil {
@@ -650,6 +656,36 @@ func (s *Store) RunningOperationTargets(ctx context.Context) ([]RunningOperation
 	return result, rows.Err()
 }
 
+func (s *Store) PendingProfileApplyFinalizations(ctx context.Context) ([]domain.Operation, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT o.id::text,o.kind,o.status,coalesce(o.source_id::text,''),coalesce(o.idempotency_key,''),o.metadata,o.error_code,o.error_reason,o.cancel_requested,o.created_at,o.started_at,o.finished_at,o.updated_at
+		FROM operations o
+		WHERE o.kind='apply'
+		  AND o.status='running'
+		  AND EXISTS (
+		      SELECT 1 FROM operation_targets pending
+		      WHERE pending.operation_id=o.id AND pending.governance_finalization_pending
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1 FROM operation_targets unfinished
+		      WHERE unfinished.operation_id=o.id AND unfinished.status<>'succeeded'
+		  )
+		ORDER BY o.created_at,o.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.Operation{}
+	for rows.Next() {
+		var operation domain.Operation
+		if err := rows.Scan(&operation.ID, &operation.Kind, &operation.Status, &operation.SourceID, &operation.IdempotencyKey, &operation.Metadata, &operation.ErrorCode, &operation.ErrorReason, &operation.CancelRequested, &operation.CreatedAt, &operation.StartedAt, &operation.FinishedAt, &operation.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, operation)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) RequeueRunningControlOperations(ctx context.Context) (int64, error) {
 	command, err := s.pool.Exec(ctx, `UPDATE operations SET status='queued',started_at=NULL,finished_at=NULL,error_code='',error_reason='',updated_at=now() WHERE status='running' AND kind=ANY($1::text[]) AND NOT EXISTS(SELECT 1 FROM operation_targets ot WHERE ot.operation_id=operations.id)`, controlOperationKinds)
 	return command.RowsAffected(), err
@@ -700,11 +736,14 @@ func (s *Store) RequeueRunningOperationTarget(ctx context.Context, operationTarg
 }
 
 func (s *Store) RetryFailedTargets(ctx context.Context, operationID, idempotencyKey string) (domain.Operation, error) {
-	var originalKind string
-	if err := s.pool.QueryRow(ctx, `SELECT kind FROM operations WHERE id=$1`, operationID).Scan(&originalKind); errors.Is(err, pgx.ErrNoRows) {
+	original, err := s.Operation(ctx, operationID)
+	if errors.Is(err, ErrNotFound) {
 		return domain.Operation{}, ErrNotFound
 	} else if err != nil {
 		return domain.Operation{}, err
+	}
+	if original.Kind == "apply" && original.SourceID != "" && bridgeprotocol.IsSHA256(stringMetadata(original.Metadata, "routingHash")) && uuid.Validate(stringMetadata(original.Metadata, "profileRevisionId")) == nil {
+		return s.retryProfileApplyTargets(ctx, operationID, idempotencyKey)
 	}
 	rows, err := s.pool.Query(ctx, `SELECT target_id::text FROM operation_targets WHERE operation_id=$1 AND status IN ('failed','partial') ORDER BY target_id`, operationID)
 	if err != nil {
@@ -737,7 +776,163 @@ func (s *Store) RetryFailedTargets(ctx context.Context, operationID, idempotency
 		requests[targetID] = request
 	}
 	requestRows.Close()
-	return s.CreateOperation(ctx, CreateOperationInput{Kind: originalKind, SourceID: operationID, IdempotencyKey: idempotencyKey, Request: map[string]any{"retryOf": operationID, "targetIds": ids}, Metadata: map[string]any{"retryOf": operationID, "originalKind": originalKind}, TargetIDs: ids, TargetRequests: requests})
+	return s.CreateOperation(ctx, CreateOperationInput{Kind: original.Kind, SourceID: operationID, IdempotencyKey: idempotencyKey, Request: map[string]any{"retryOf": operationID, "targetIds": ids}, Metadata: map[string]any{"retryOf": operationID, "originalKind": original.Kind}, TargetIDs: ids, TargetRequests: requests})
+}
+
+type profileApplyRetryTarget struct {
+	targetID string
+	runtime  string
+	status   string
+	request  json.RawMessage
+	result   json.RawMessage
+}
+
+func (s *Store) retryProfileApplyTargets(ctx context.Context, operationID, idempotencyKey string) (domain.Operation, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var original domain.Operation
+	if err := tx.QueryRow(ctx, `SELECT id::text,kind,status,coalesce(source_id::text,''),coalesce(idempotency_key,''),metadata,error_code,error_reason,cancel_requested,created_at,started_at,finished_at,updated_at FROM operations WHERE id=$1 FOR UPDATE`, operationID).Scan(&original.ID, &original.Kind, &original.Status, &original.SourceID, &original.IdempotencyKey, &original.Metadata, &original.ErrorCode, &original.ErrorReason, &original.CancelRequested, &original.CreatedAt, &original.StartedAt, &original.FinishedAt, &original.UpdatedAt); errors.Is(err, pgx.ErrNoRows) {
+		return domain.Operation{}, ErrNotFound
+	} else if err != nil {
+		return domain.Operation{}, err
+	}
+	if original.Kind != "apply" || (original.Status != bridgeprotocol.OperationFailed && original.Status != bridgeprotocol.OperationPartial) || uuid.Validate(original.SourceID) != nil || uuid.Validate(stringMetadata(original.Metadata, "profileRevisionId")) != nil || !bridgeprotocol.IsSHA256(stringMetadata(original.Metadata, "routingHash")) {
+		return domain.Operation{}, ErrConflict
+	}
+	rows, err := tx.Query(ctx, `SELECT ot.target_id::text,t.runtime,ot.status,ot.request,ot.result FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=$1 ORDER BY ot.target_id`, operationID)
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	targets := make([]profileApplyRetryTarget, 0, 2)
+	for rows.Next() {
+		var target profileApplyRetryTarget
+		if err := rows.Scan(&target.targetID, &target.runtime, &target.status, &target.request, &target.result); err != nil {
+			rows.Close()
+			return domain.Operation{}, err
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.Operation{}, err
+	}
+	rows.Close()
+	if len(targets) != 2 {
+		return domain.Operation{}, ErrConflict
+	}
+	var skillTargetID, relayTargetID string
+	failedTargets := 0
+	targetRequests := make(map[string]any, len(targets))
+	for _, target := range targets {
+		if target.status != bridgeprotocol.OperationSucceeded && target.status != bridgeprotocol.OperationFailed && target.status != bridgeprotocol.OperationPartial {
+			return domain.Operation{}, ErrConflict
+		}
+		if target.status == bridgeprotocol.OperationFailed || target.status == bridgeprotocol.OperationPartial {
+			failedTargets++
+		}
+		var requestMetadata struct {
+			SourceKind string `json:"sourceKind"`
+			SourceID   string `json:"sourceId"`
+		}
+		if err := json.Unmarshal(target.request, &requestMetadata); err != nil || requestMetadata.SourceKind != "profile_apply" || requestMetadata.SourceID != original.SourceID {
+			return domain.Operation{}, ErrConflict
+		}
+		targetRequests[target.targetID] = target.request
+		switch target.runtime {
+		case domain.RuntimeSharedRelay:
+			if relayTargetID != "" {
+				return domain.Operation{}, ErrConflict
+			}
+			relayTargetID = target.targetID
+		case domain.RuntimeClaude, domain.RuntimeCodex:
+			if skillTargetID != "" {
+				return domain.Operation{}, ErrConflict
+			}
+			skillTargetID = target.targetID
+		default:
+			return domain.Operation{}, ErrConflict
+		}
+	}
+	if failedTargets == 0 || skillTargetID == "" || relayTargetID == "" {
+		return domain.Operation{}, ErrConflict
+	}
+	request := map[string]any{"retryOf": operationID, "targetIds": []string{skillTargetID, relayTargetID}}
+	dependencies := map[string]any{relayTargetID: skillTargetID}
+	requestHash, err := operationRequestHashWithDependencies(request, targetRequests, dependencies)
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	if idempotencyKey != "" {
+		var existingID, existingHash string
+		err := tx.QueryRow(ctx, `SELECT id::text,request_hash FROM operations WHERE kind='apply' AND idempotency_key=$1`, idempotencyKey).Scan(&existingID, &existingHash)
+		if err == nil {
+			if existingHash != requestHash {
+				return domain.Operation{}, ErrIdempotencyConflict
+			}
+			_ = tx.Rollback(ctx)
+			return s.Operation(ctx, existingID)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return domain.Operation{}, err
+		}
+	}
+	if err := validatePublishedProfilePredecessorTx(ctx, tx, original.SourceID, stringMetadata(original.Metadata, "expectedPublishedProfileRevisionId")); err != nil {
+		return domain.Operation{}, err
+	}
+	if err := lockActiveTargets(ctx, tx, []string{skillTargetID, relayTargetID}); err != nil {
+		return domain.Operation{}, err
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(original.Metadata, &metadata); err != nil || metadata == nil {
+		return domain.Operation{}, ErrConflict
+	}
+	delete(metadata, "governanceFinalizedAction")
+	metadata["retryOf"] = operationID
+	metadata["originalKind"] = original.Kind
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	retryOperationID := uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,'apply','queued',$2,$3,$4,$5)`, retryOperationID, original.SourceID, nullableText(idempotencyKey), requestHash, jsonText(metadataJSON)); err != nil {
+		return domain.Operation{}, err
+	}
+	rowIDs := map[string]string{skillTargetID: uuid.NewString(), relayTargetID: uuid.NewString()}
+	targetByID := make(map[string]profileApplyRetryTarget, len(targets))
+	for _, target := range targets {
+		targetByID[target.targetID] = target
+	}
+	for _, targetID := range []string{skillTargetID, relayTargetID} {
+		target := targetByID[targetID]
+		status := bridgeprotocol.OperationQueued
+		var result any
+		var finishedAt any
+		if target.status == bridgeprotocol.OperationSucceeded {
+			status = bridgeprotocol.OperationSucceeded
+			finishedAt = time.Now().UTC()
+			if len(target.result) > 0 {
+				result = jsonText(target.result)
+			}
+		}
+		var dependency any
+		if target.targetID == relayTargetID {
+			dependency = rowIDs[skillTargetID]
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,status,request,result,finished_at,governance_finalization_pending) VALUES($1,$2,$3,$4,$5,$6,$7,$8,true)`, rowIDs[target.targetID], retryOperationID, target.targetID, dependency, status, jsonText(target.request), result, finishedAt); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return domain.Operation{}, ErrOperationActive
+			}
+			return domain.Operation{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Operation{}, err
+	}
+	return s.Operation(ctx, retryOperationID)
 }
 
 func (s *Store) SetBridgeOperationMetadata(ctx context.Context, operationTargetID, bridgeOperationID, saltJID string) error {

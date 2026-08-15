@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -618,6 +619,81 @@ func TestGovernanceFinalizationOwnershipMigrationFailsClosedForUnfinalizedSucces
 	}
 	if _, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", TargetIDs: []string{target.ID}, TargetRequests: map[string]any{target.ID: map[string]any{}}}); err != nil {
 		t.Fatalf("upgrade retained ownership for unrecoverable finalization: %v", err)
+	}
+}
+
+func TestGovernanceFinalizationOwnershipMigrationResolvesPreexistingTargetOverlap(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		relayStatus       string
+		wantOldStatus     string
+		wantPendingTarget bool
+	}{
+		{name: "undispatched relay", relayStatus: bridgeprotocol.OperationQueued, wantOldStatus: bridgeprotocol.OperationFailed},
+		{name: "running relay", relayStatus: bridgeprotocol.OperationRunning, wantOldStatus: bridgeprotocol.OperationRunning, wantPendingTarget: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newIntegrationStore(t, false)
+			for version, name := range []string{
+				"001_initial.sql",
+				"002_relay_projection.sql",
+				"003_profile_revisions_bundles.sql",
+				"004_mcp_profile_routing_governance.sql",
+				"005_mcp_profile_routing_governance_contract.sql",
+				"006_mcp_governance_reload_integrity.sql",
+				"007_mcp_governance_consistency.sql",
+				"008_mcp_governance_revision_seals.sql",
+			} {
+				applyHistoricalMigrationForTest(t, st, name, version+1)
+			}
+			if err := st.BootstrapEnvironment(ctx, "ownership-overlap-upgrade-host", "runner", "UTC", 6276); err != nil {
+				t.Fatal(err)
+			}
+			skillTarget := integrationTarget(t, st, "local/claude")
+			relayTarget := integrationTarget(t, st, "local/shared-relay")
+			oldOperationID := uuid.NewString()
+			if _, err := st.pool.Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,'apply','running',$2)`, oldOperationID, jsonText([]byte(`{"routingHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","profileRevisionId":"11111111-1111-4111-8111-111111111111"}`))); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,finished_at) VALUES($1,$2,$3,'succeeded',now())`, uuid.NewString(), oldOperationID, skillTarget.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,started_at) VALUES($1,$2,$3,$4,CASE WHEN $4='running' THEN now() END)`, uuid.NewString(), oldOperationID, relayTarget.ID, test.relayStatus); err != nil {
+				t.Fatal(err)
+			}
+			newOperationID := uuid.NewString()
+			if _, err := st.pool.Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,'scan','queued','{}')`, newOperationID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status) VALUES($1,$2,$3,'queued')`, uuid.NewString(), newOperationID, skillTarget.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := st.Migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			var oldStatus, newStatus string
+			var pendingSkill, pendingRelay bool
+			if err := st.pool.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, oldOperationID).Scan(&oldStatus); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.pool.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, newOperationID).Scan(&newStatus); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.pool.QueryRow(ctx, `SELECT governance_finalization_pending FROM operation_targets WHERE operation_id=$1 AND target_id=$2`, oldOperationID, skillTarget.ID).Scan(&pendingSkill); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.pool.QueryRow(ctx, `SELECT governance_finalization_pending FROM operation_targets WHERE operation_id=$1 AND target_id=$2`, oldOperationID, relayTarget.ID).Scan(&pendingRelay); err != nil {
+				t.Fatal(err)
+			}
+			if oldStatus != test.wantOldStatus || newStatus != bridgeprotocol.OperationQueued || pendingSkill || pendingRelay != test.wantPendingTarget {
+				t.Fatalf("upgraded overlap old=%s new=%s pendingSkill=%v pendingRelay=%v", oldStatus, newStatus, pendingSkill, pendingRelay)
+			}
+			if _, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", TargetIDs: []string{skillTarget.ID}, TargetRequests: map[string]any{skillTarget.ID: map[string]any{}}}); !errors.Is(err, ErrOperationActive) {
+				t.Fatalf("replacement active owner was not preserved: %v", err)
+			}
+		})
 	}
 }
 

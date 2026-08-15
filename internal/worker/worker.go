@@ -76,6 +76,20 @@ func (w *Worker) Recover(ctx context.Context) error {
 			return fmt.Errorf("requeue recovered operation target %s: %w", item.ID, err)
 		}
 	}
+	pendingFinalizations, err := w.store.PendingProfileApplyFinalizations(ctx)
+	if err != nil {
+		return fmt.Errorf("list pending Profile Apply finalizations: %w", err)
+	}
+	for _, operation := range pendingFinalizations {
+		if err := w.finalizeProfileApplyOperation(ctx, operation); err != nil {
+			var persisted *persistedGovernanceFinalizationError
+			if errors.As(err, &persisted) {
+				w.logger.Warn("recovered Profile Apply finalization failed safely", "operationId", operation.ID, "error", persisted.Unwrap())
+				continue
+			}
+			return fmt.Errorf("recover Profile Apply finalization %s: %w", operation.ID, err)
+		}
+	}
 	return nil
 }
 
@@ -313,14 +327,25 @@ func (w *Worker) loop(ctx context.Context, index int) {
 }
 
 func (w *Worker) finalizeProfileApply(ctx context.Context, item store.WorkItem) error {
+	return w.finalizeProfileApplyOperation(ctx, item.Operation)
+}
+
+type persistedGovernanceFinalizationError struct {
+	err error
+}
+
+func (e *persistedGovernanceFinalizationError) Error() string { return e.err.Error() }
+func (e *persistedGovernanceFinalizationError) Unwrap() error { return e.err }
+
+func (w *Worker) finalizeProfileApplyOperation(ctx context.Context, operation domain.Operation) error {
 	var metadata struct {
 		ProfileRevisionID string `json:"profileRevisionId"`
 	}
 	var finalizationErr error
-	if err := json.Unmarshal(item.Operation.Metadata, &metadata); err != nil || strings.TrimSpace(metadata.ProfileRevisionID) == "" {
+	if err := json.Unmarshal(operation.Metadata, &metadata); err != nil || strings.TrimSpace(metadata.ProfileRevisionID) == "" {
 		finalizationErr = errors.New("Profile Apply finalization metadata is invalid")
 	} else {
-		finalizationErr = w.store.FinalizeProfileApply(ctx, item.Operation.ID, item.Operation.SourceID, metadata.ProfileRevisionID)
+		finalizationErr = w.store.FinalizeProfileApply(ctx, operation.ID, operation.SourceID, metadata.ProfileRevisionID)
 	}
 	if finalizationErr == nil {
 		return nil
@@ -329,10 +354,10 @@ func (w *Worker) finalizeProfileApply(ctx context.Context, item store.WorkItem) 
 	if errors.Is(finalizationErr, store.ErrConflict) {
 		apiErr = &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Profile Apply finalization state changed"}
 	}
-	if err := w.store.FailGovernanceFinalization(ctx, item.Operation.ID, apiErr); err != nil {
+	if err := w.store.FailGovernanceFinalization(ctx, operation.ID, apiErr); err != nil {
 		return fmt.Errorf("%w; persist finalization failure: %v", finalizationErr, err)
 	}
-	return finalizationErr
+	return &persistedGovernanceFinalizationError{err: finalizationErr}
 }
 
 func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
