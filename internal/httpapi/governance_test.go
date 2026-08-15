@@ -261,6 +261,14 @@ func TestValidBrowserPreflightResponseRejectsUnboundOrUnsafeDiff(t *testing.T) {
 	if !validBrowserPreflightResponse(manifest, valid()) {
 		t.Fatal("valid preflight response was rejected")
 	}
+	for _, nameLength := range []int{129, 255} {
+		response := valid()
+		response.Diff.Add = []bridgeprotocol.DiffItem{}
+		response.Diff.Excluded = []bridgeprotocol.DiffItem{{Kind: "entry", Name: strings.Repeat("x", nameLength), Reason: "protected"}}
+		if !validBrowserPreflightResponse(manifest, response) {
+			t.Fatalf("protected %d-byte runtime entry was rejected", nameLength)
+		}
+	}
 	tests := []struct {
 		name   string
 		mutate func(*bridgeprotocol.PreflightResponse)
@@ -275,10 +283,23 @@ func TestValidBrowserPreflightResponseRejectsUnboundOrUnsafeDiff(t *testing.T) {
 			}
 		}},
 		{name: "unknown kind", mutate: func(item *bridgeprotocol.PreflightResponse) { item.Diff.Add[0].Kind = "secret" }},
+		{name: "inventory-only kind in add", mutate: func(item *bridgeprotocol.PreflightResponse) { item.Diff.Add[0].Kind = "entry" }},
 		{name: "member binding mismatch", mutate: func(item *bridgeprotocol.PreflightResponse) {
 			item.Diff.Add[0].MemberID = "66666666-6666-4666-8666-666666666666"
 		}},
 		{name: "raw reason", mutate: func(item *bridgeprotocol.PreflightResponse) { item.Diff.Add[0].Reason = "raw upstream error" }},
+		{name: "inventory-only kind in delete", mutate: func(item *bridgeprotocol.PreflightResponse) {
+			item.Diff.Add = []bridgeprotocol.DiffItem{}
+			item.Diff.Delete = []bridgeprotocol.DiffItem{{Kind: "entry", Name: "preserved-file"}}
+		}},
+		{name: "overlong inventory name", mutate: func(item *bridgeprotocol.PreflightResponse) {
+			item.Diff.Add = []bridgeprotocol.DiffItem{}
+			item.Diff.Excluded = []bridgeprotocol.DiffItem{{Kind: "entry", Name: strings.Repeat("x", 256), Reason: "protected"}}
+		}},
+		{name: "nul inventory name", mutate: func(item *bridgeprotocol.PreflightResponse) {
+			item.Diff.Add = []bridgeprotocol.DiffItem{}
+			item.Diff.Excluded = []bridgeprotocol.DiffItem{{Kind: "entry", Name: "bad\x00name", Reason: "protected"}}
+		}},
 		{name: "duplicate across groups", mutate: func(item *bridgeprotocol.PreflightResponse) {
 			item.Diff.Replace = append(item.Diff.Replace, item.Diff.Add[0])
 		}},
@@ -375,6 +396,16 @@ func TestGovernanceConfirmationDecisionIsProfileBoundAndPayloadFree(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := harness.store.Pool().Exec(context.Background(), `INSERT INTO published_profiles(profile_id,profile_revision_id) VALUES($1,$2)`, profile.ID, profile.CurrentRevisionID); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := harness.store.SaveProfile(context.Background(), profile.ID, store.ProfileInput{Name: "claude-coding-draft", ClientKind: "claude", Category: "coding", Revision: profile.Revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.CurrentRevisionID == profile.CurrentRevisionID {
+		t.Fatal("draft did not advance the current Profile revision")
+	}
 	summary = bridgeprotocol.ConfirmationSummary{
 		ChallengeID: challengeID, BindingHash: bindingHash, ArgumentHash: strings.Repeat("a", 64), CreatedAt: 1, ExpiresAt: 2,
 		ProfileID: profile.ID, ProfileRevisionID: profile.CurrentRevisionID, ProfileName: profile.Name, ClientKind: profile.ClientKind,
@@ -439,6 +470,41 @@ func TestGovernanceConfirmationDecisionIsProfileBoundAndPayloadFree(t *testing.T
 	}
 	if !unknownAudited {
 		t.Fatalf("unknown confirmation outcome was not audited: %s", audit)
+	}
+}
+
+func TestGovernanceConfirmationApprovalRejectsUnpublishedProfile(t *testing.T) {
+	const challengeID = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	const bindingHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	decisionCalls := 0
+	var summary bridgeprotocol.ConfirmationSummary
+	harness := newGovernanceHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/relay/governance/confirmations/list":
+			writeJSON(w, http.StatusOK, bridgeprotocol.ConfirmationListResponse{Items: []bridgeprotocol.ConfirmationSummary{summary}})
+		case "/v1/relay/governance/confirmations/approve":
+			decisionCalls++
+			writeJSON(w, http.StatusOK, bridgeprotocol.ConfirmationDecisionResponse{ChallengeID: challengeID, BindingHash: bindingHash})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	profile, err := harness.store.SaveProfile(context.Background(), "11111111-1111-4111-8111-111111111111", store.ProfileInput{Name: "claude-unpublished", ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary = bridgeprotocol.ConfirmationSummary{
+		ChallengeID: challengeID, BindingHash: bindingHash, ArgumentHash: strings.Repeat("a", 64), CreatedAt: 1, ExpiresAt: 2,
+		ProfileID: profile.ID, ProfileRevisionID: profile.CurrentRevisionID, ProfileName: profile.Name, ClientKind: profile.ClientKind,
+		ServerID: "22222222-2222-4222-8222-222222222222", ServerName: "acemcp", ToolID: "33333333-3333-4333-8333-333333333333", ToolName: "search", RuntimeName: "search",
+		MCPConfigRevisionID: "44444444-4444-4444-8444-444444444444", ContractRevisionID: "55555555-5555-4555-8555-555555555555", GlobalPolicyRevisionID: "66666666-6666-4666-8666-666666666666",
+		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{},
+	}
+
+	response := harness.request(t, http.MethodPost, "/api/v1/relay/confirmations/"+challengeID+"/approve", `{"profileName":"claude-unpublished","bindingHash":"`+bindingHash+`"}`)
+	assertGovernanceError(t, response, http.StatusConflict, "confirmation_binding_mismatch")
+	if decisionCalls != 0 {
+		t.Fatalf("unpublished confirmation reached Bridge %d times", decisionCalls)
 	}
 }
 

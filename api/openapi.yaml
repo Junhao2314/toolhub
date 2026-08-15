@@ -706,6 +706,7 @@ paths:
     post:
       tags: [Governance]
       operationId: approveRelayConfirmation
+      description: Approves only when the challenge revision and exact Profile name still match the currently Published immutable revision; a later draft does not invalidate that binding.
       parameters:
         - {name: challengeID, in: path, required: true, schema: {$ref: '#/components/schemas/SHA256'}}
         - {$ref: '#/components/parameters/CSRFToken'}
@@ -1288,18 +1289,32 @@ components:
       additionalProperties: false
       required: [add, replace, delete, excluded]
       properties:
-        add: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
-        replace: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
-        delete: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
-        excluded: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
-    DiffItem:
+        add: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DesiredDiffItem'}}
+        replace: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DesiredDiffItem'}}
+        delete: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/RemovedDiffItem'}}
+        excluded: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/ExcludedDiffItem'}}
+    DesiredDiffItem:
+      type: object
+      additionalProperties: false
+      required: [kind, memberId, name]
+      properties:
+        kind: {type: string, enum: [skill, mcp]}
+        memberId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string, minLength: 1, maxLength: 255}
+    RemovedDiffItem:
       type: object
       additionalProperties: false
       required: [kind, name]
       properties:
         kind: {type: string, enum: [skill, mcp]}
-        memberId: {$ref: '#/components/schemas/UUID'}
-        name: {type: string, minLength: 1, maxLength: 128}
+        name: {type: string, minLength: 1, maxLength: 255}
+    ExcludedDiffItem:
+      type: object
+      additionalProperties: false
+      required: [kind, name, reason]
+      properties:
+        kind: {type: string, enum: [skill, mcp, entry]}
+        name: {type: string, minLength: 1, maxLength: 255}
         reason: {type: string, enum: [protected]}
     PreflightItem:
       type: object

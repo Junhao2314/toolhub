@@ -268,7 +268,11 @@ func validBrowserPreflightResponse(manifest bridgeprotocol.DesiredManifest, resu
 	seen := make(map[string]struct{}, len(diff.Add)+len(diff.Replace)+len(diff.Delete)+len(diff.Excluded))
 	validItems := func(items []bridgeprotocol.DiffItem, desiredMember, excluded bool) bool {
 		for _, item := range items {
-			if (item.Kind != "skill" && item.Kind != "mcp") || !validPreflightName(item.Name) {
+			validKind := item.Kind == "skill" || item.Kind == "mcp"
+			if excluded {
+				validKind = validKind || item.Kind == "entry"
+			}
+			if !validKind || !validPreflightName(item.Name) {
 				return false
 			}
 			key := item.Kind + "\x00" + item.Name
@@ -296,7 +300,7 @@ func validBrowserPreflightResponse(manifest bridgeprotocol.DesiredManifest, resu
 }
 
 func validPreflightName(value string) bool {
-	if value == "" || len(value) > 128 || strings.TrimSpace(value) != value {
+	if value == "" || len(value) > 255 || strings.TrimSpace(value) != value {
 		return false
 	}
 	for _, character := range value {
@@ -404,8 +408,8 @@ func (a *API) approveRelayConfirmation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusConflict, "confirmation_binding_mismatch", "Confirmation binding does not match")
 		return
 	}
-	profile, err := a.store.Profile(r.Context(), summary.ProfileID)
-	if err != nil || profile.CurrentRevisionID != summary.ProfileRevisionID || !constantTimeEqual(profile.Name, summary.ProfileName) {
+	publishedName, err := a.store.PublishedProfileName(r.Context(), summary.ProfileID, summary.ProfileRevisionID)
+	if err != nil || !constantTimeEqual(publishedName, summary.ProfileName) {
 		writeError(w, r, http.StatusConflict, "confirmation_binding_mismatch", "Confirmation Profile is stale")
 		return
 	}

@@ -122,8 +122,10 @@ create a backup.
 
 Preflight responses bind a SHA-256 target revision and canonical manifest hash
 to four non-null diff collections. Diff entries are bounded, typed as `skill`
-or `mcp`, and add/replace entries reference an exact desired member ID; only
-excluded protected entries carry the `protected` reason.
+or `mcp`, except that protected regular files use `entry` in the `excluded`
+collection. Inventory names are bounded to the Linux 255-byte basename limit.
+Add/replace entries reference an exact desired member ID; only excluded
+protected entries carry the `protected` reason.
 
 For Salt targets the Bridge resolves `managedUsername` through the fixed
 `user.info` call, validates a canonical non-root home, and injects that home

@@ -214,11 +214,14 @@ servers and 500 most-recent rename proposals.
 
 `GET /relay/confirmations` reads bounded, payload-free, in-memory challenges
 from the Relay. Approval requires the exact case-sensitive Profile name and
-binding hash; the handler verifies the Profile's current revision before sending
-only `{challengeId,bindingHash}` to the Bridge. Rejection requires the binding
-hash. Both decisions require an authenticated session and CSRF token but not a
-password. Challenges and 60-second one-shot grants are ephemeral and are not
-durable operations. A transport failure or mismatched decision response returns
+binding hash; the handler verifies the challenge against the Profile's currently
+Published revision and that immutable revision's name before sending only
+`{challengeId,bindingHash}` to the Bridge. Saving a later draft does not invalidate
+a running Published session, while an unpublished or superseded revision cannot
+be approved. Rejection requires the binding hash. Both decisions require an
+authenticated session and CSRF token but not a password. Challenges and
+60-second one-shot grants are ephemeral and are not durable operations. A
+transport failure or mismatched decision response returns
 `confirmation_outcome_unknown`; clients must not retry or claim the tool was not
 executed.
 

@@ -100,6 +100,32 @@ func TestBackupRootRemovesPartialDestinationOnFailure(t *testing.T) {
 	}
 }
 
+func TestSkillPreflightReportsProtectedRegularFileWithMaxLinuxName(t *testing.T) {
+	home := t.TempDir()
+	user := ManagedUser{Name: "operator", Home: home, UID: os.Getuid(), GID: os.Getgid()}
+	target := bridgeprotocol.Target{ID: uuid.NewString(), NodeID: uuid.NewString(), NodeKind: bridgeprotocol.NodeKindLocal, Runtime: bridgeprotocol.RuntimeClaude, ManagedUsername: user.Name}
+	runtimeRoot := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(runtimeRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	name := strings.Repeat("x", 255)
+	if err := os.WriteFile(filepath.Join(runtimeRoot, name), []byte("preserve"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := bridgeprotocol.DesiredManifest{
+		SchemaVersion: bridgeprotocol.ManifestSchemaVersion, Target: target,
+		Skills: []bridgeprotocol.SkillMember{}, MCPServers: []bridgeprotocol.MCPMember{}, ManagedMemberIDs: []string{},
+	}
+
+	result, err := NewManager(t.TempDir()).Preflight(user, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diff.Excluded) != 1 || result.Diff.Excluded[0].Kind != "entry" || result.Diff.Excluded[0].Name != name || result.Diff.Excluded[0].Reason != "protected" {
+		t.Fatalf("protected regular file diff=%+v", result.Diff)
+	}
+}
+
 func TestSkillModesRoundTripUnderRestrictiveUmask(t *testing.T) {
 	home := t.TempDir()
 	backupRoot := t.TempDir()

@@ -429,6 +429,15 @@ func (s *Store) Profile(ctx context.Context, id string) (domain.Profile, error) 
 	return profile, nil
 }
 
+func (s *Store) PublishedProfileName(ctx context.Context, profileID, revisionID string) (string, error) {
+	var name string
+	err := s.pool.QueryRow(ctx, `SELECT pr.name FROM published_profiles pp JOIN profile_revisions pr ON pr.profile_id=pp.profile_id AND pr.id=pp.profile_revision_id WHERE pp.profile_id=$1 AND pp.profile_revision_id=$2`, profileID, revisionID).Scan(&name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return name, err
+}
+
 func (s *Store) ProfileEffectiveVisibleCount(ctx context.Context, revisionID string) (int, error) {
 	var count int
 	err := s.pool.QueryRow(ctx, `
