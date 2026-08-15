@@ -403,7 +403,7 @@ func ValidateGovernanceBody(body []byte) error {
 		maxDepth = GovernanceMaxRoutingDepth
 	}
 	items := 0
-	return validateGovernanceValue(value, 0, &items, maxDepth)
+	return validateGovernanceValue(value, 0, &items, maxDepth, false)
 }
 
 func DecodeGovernanceBody(body []byte, target any) error {
@@ -433,7 +433,7 @@ func ensureGovernanceEOF(decoder *json.Decoder) error {
 	return nil
 }
 
-func validateGovernanceValue(value any, depth int, items *int, maxDepth int) error {
+func validateGovernanceValue(value any, depth int, items *int, maxDepth int, schemaData bool) error {
 	if depth > maxDepth || *items >= GovernanceMaxItems {
 		return errors.New("governance body exceeds nesting or item limit")
 	}
@@ -443,19 +443,20 @@ func validateGovernanceValue(value any, depth int, items *int, maxDepth int) err
 		for key, child := range typed {
 			lower := strings.ToLower(key)
 			forbidden := map[string]struct{}{"secretvalues": {}, "arguments": {}, "result": {}, "prompt": {}, "rawerror": {}, "sessionid": {}, "ciphertext": {}}
-			if _, ok := forbidden[lower]; ok {
+			if _, ok := forbidden[lower]; ok && !schemaData {
 				return fmt.Errorf("governance body contains forbidden field %q", key)
 			}
 			if len(key) > 256 {
 				return errors.New("governance key is too long")
 			}
-			if err := validateGovernanceValue(child, depth+1, items, maxDepth); err != nil {
+			childIsSchemaData := schemaData || lower == "inputschema" || lower == "outputschema"
+			if err := validateGovernanceValue(child, depth+1, items, maxDepth, childIsSchemaData); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if err := validateGovernanceValue(child, depth+1, items, maxDepth); err != nil {
+			if err := validateGovernanceValue(child, depth+1, items, maxDepth, schemaData); err != nil {
 				return err
 			}
 		}

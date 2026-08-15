@@ -132,6 +132,7 @@ func TestPublishProfileRequiresAcceptedPinAndAppliedRelayMembership(t *testing.T
 	if err := st.FinalizeProfilePublish(ctx, opID, profile.ID, profile.CurrentRevisionID, governanceRoutingHash(t, st, opID)); err != ErrConflict {
 		t.Fatalf("profile without accepted contract published: %v", err)
 	}
+	failGovernanceOperation(t, st, opID)
 	observed, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
 	if err != nil {
 		t.Fatal(err)
@@ -203,8 +204,41 @@ func TestFinalizeProfileApplyPublishesOnlyAfterOrderedTargetsSucceed(t *testing.
 	if err := st.FinishOperationTarget(ctx, second.OperationTarget.ID, "succeeded", map[string]any{"routingReloaded": true, "routingHash": relayHash}, nil); err != nil {
 		t.Fatal(err)
 	}
+	var snapshotsBefore int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM desired_snapshots WHERE source_operation_target_id IN ($1,$2)`, first.OperationTarget.ID, second.OperationTarget.ID).Scan(&snapshotsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotsBefore != 0 {
+		t.Fatalf("Profile Apply snapshots existed before finalization: %d", snapshotsBefore)
+	}
+	var operationStatus string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, operation.ID).Scan(&operationStatus); err != nil {
+		t.Fatal(err)
+	}
+	if operationStatus != bridgeprotocol.OperationRunning {
+		t.Fatalf("Profile Apply status before finalization=%s, want running", operationStatus)
+	}
+	if _, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", TargetIDs: []string{skillTarget.ID}, TargetRequests: map[string]any{skillTarget.ID: map[string]any{}}}); err != ErrOperationActive {
+		t.Fatalf("Profile Apply released target ownership before finalization: %v", err)
+	}
 	if err := st.FinalizeProfileApply(ctx, operation.ID, profile.ID, profile.CurrentRevisionID); err != nil {
 		t.Fatal(err)
+	}
+	var snapshotsAfter, activePointers int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE active.snapshot_id=snapshot.id) FROM desired_snapshots snapshot LEFT JOIN target_desired_snapshots active ON active.target_id=snapshot.target_id WHERE snapshot.source_operation_target_id IN ($1,$2)`, first.OperationTarget.ID, second.OperationTarget.ID).Scan(&snapshotsAfter, &activePointers); err != nil {
+		t.Fatal(err)
+	}
+	if snapshotsAfter != 2 || activePointers != 2 {
+		t.Fatalf("Profile Apply snapshots=%d activePointers=%d, want 2/2", snapshotsAfter, activePointers)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, operation.ID).Scan(&operationStatus); err != nil {
+		t.Fatal(err)
+	}
+	if operationStatus != bridgeprotocol.OperationSucceeded {
+		t.Fatalf("Profile Apply status after finalization=%s, want succeeded", operationStatus)
+	}
+	if _, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", TargetIDs: []string{skillTarget.ID}, TargetRequests: map[string]any{skillTarget.ID: map[string]any{}}}); err != nil {
+		t.Fatalf("Profile Apply retained target ownership after finalization: %v", err)
 	}
 	var publishedRevision string
 	if err := st.pool.QueryRow(ctx, `SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1`, profile.ID).Scan(&publishedRevision); err != nil {
@@ -212,6 +246,73 @@ func TestFinalizeProfileApplyPublishesOnlyAfterOrderedTargetsSucceed(t *testing.
 	}
 	if publishedRevision != profile.CurrentRevisionID {
 		t.Fatalf("published revision=%s", publishedRevision)
+	}
+}
+
+func TestFinalizeProfileApplyRollsBackWhenOneSnapshotWasPinnedEarly(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "publish-rollback-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	skillTarget := integrationTarget(t, st, "local/claude")
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "claude-apply-rollback", ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillManifest, err := st.ResolveProfileManifest(ctx, profile.ID, skillTarget.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayManifest, err := st.ResolveProfileManifest(ctx, profile.ID, relayTarget.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	skillToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, skillTarget.ID, strings.Repeat("a", 64), skillManifest, bridgeprotocol.Diff{}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, relayTarget.ID, strings.Repeat("b", 64), relayManifest, bridgeprotocol.Diff{}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{skillToken, relayToken}, "ordered-apply-rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishOperationTarget(ctx, first.OperationTarget.ID, bridgeprotocol.OperationSucceeded, map[string]any{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinishOperationTarget(ctx, second.OperationTarget.ID, bridgeprotocol.OperationSucceeded, map[string]any{"routingReloaded": true, "routingHash": relayManifest.RelayGovernance.RoutingHash}, nil); err != nil {
+		t.Fatal(err)
+	}
+	prePinned := first
+	prePinnedManifest := skillManifest
+	if first.Target.ID < second.Target.ID {
+		prePinned = second
+		prePinnedManifest = relayManifest
+	}
+	if _, err := st.PinDesiredSnapshot(ctx, prePinned.Target.ID, "profile_apply", profile.ID, prePinned.OperationTarget.ID, prePinnedManifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinalizeProfileApply(ctx, operation.ID, profile.ID, profile.CurrentRevisionID); err != ErrConflict {
+		t.Fatalf("Profile Apply with an early snapshot returned %v, want conflict", err)
+	}
+	var snapshots, published int
+	if err := st.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM desired_snapshots WHERE source_operation_target_id IN ($1,$2)),(SELECT count(*) FROM published_profiles WHERE profile_id=$3)`, first.OperationTarget.ID, second.OperationTarget.ID, profile.ID).Scan(&snapshots, &published); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 1 || published != 0 {
+		t.Fatalf("failed atomic finalization left snapshots=%d published=%d, want 1/0", snapshots, published)
 	}
 }
 

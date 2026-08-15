@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -388,18 +389,65 @@ func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, st
 			return err
 		}
 	}
+	var terminalFailures int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM operation_targets WHERE operation_id=$1 AND status IN ('partial','failed','cancelled')`, operationID).Scan(&terminalFailures); err != nil {
+		return err
+	}
+	if terminalFailures > 0 {
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=false,updated_at=now() WHERE operation_id=$1 AND governance_finalization_pending`, operationID); err != nil {
+			return err
+		}
+	}
 	if err := recalculateOperation(ctx, tx, operationID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-func recalculateOperation(ctx context.Context, tx pgx.Tx, operationID string) error {
-	var queued, running, succeeded, partial, failed, cancelled int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE status='queued'),count(*) FILTER(WHERE status='running'),count(*) FILTER(WHERE status='succeeded'),count(*) FILTER(WHERE status='partial'),count(*) FILTER(WHERE status='failed'),count(*) FILTER(WHERE status='cancelled') FROM operation_targets WHERE operation_id=$1`, operationID).Scan(&queued, &running, &succeeded, &partial, &failed, &cancelled); err != nil {
+func (s *Store) FailGovernanceFinalization(ctx context.Context, operationID string, apiErr *bridgeprotocol.APIError) error {
+	if uuid.Validate(operationID) != nil {
+		return ErrNotFound
+	}
+	if apiErr == nil || strings.TrimSpace(apiErr.Code) == "" || strings.TrimSpace(apiErr.Message) == "" {
+		return errors.New("governance finalization error is required")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	if queued > 0 || running > 0 {
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1 FOR UPDATE`, operationID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	if status != bridgeprotocol.OperationRunning {
+		return ErrConflict
+	}
+	command, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=false,updated_at=now() WHERE operation_id=$1 AND governance_finalization_pending`, operationID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	command, err = tx.Exec(ctx, `UPDATE operations SET status='failed',error_code=$2,error_reason=$3,finished_at=now(),updated_at=now() WHERE id=$1 AND status='running'`, operationID, truncate(apiErr.Code, 120), truncate(apiErr.Message, 500))
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return tx.Commit(ctx)
+}
+
+func recalculateOperation(ctx context.Context, tx pgx.Tx, operationID string) error {
+	var queued, running, succeeded, partial, failed, cancelled, finalizationPending int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER(WHERE status='queued'),count(*) FILTER(WHERE status='running'),count(*) FILTER(WHERE status='succeeded'),count(*) FILTER(WHERE status='partial'),count(*) FILTER(WHERE status='failed'),count(*) FILTER(WHERE status='cancelled'),count(*) FILTER(WHERE governance_finalization_pending) FROM operation_targets WHERE operation_id=$1`, operationID).Scan(&queued, &running, &succeeded, &partial, &failed, &cancelled, &finalizationPending); err != nil {
+		return err
+	}
+	if queued > 0 || running > 0 || finalizationPending > 0 {
 		return nil
 	}
 	var cancelRequested bool

@@ -208,7 +208,7 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 	if err := upgrade.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 7 {
+	if versions != 9 {
 		t.Fatalf("migration reran or skipped: versions=%d", versions)
 	}
 }
@@ -372,8 +372,8 @@ func assertGovernanceMigrationState(t *testing.T, st *Store) {
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 7 {
-		t.Fatalf("migration versions=%d want 7", versions)
+	if versions != 9 {
+		t.Fatalf("migration versions=%d want 9", versions)
 	}
 	var generation string
 	if err := st.pool.QueryRow(ctx, `SELECT value FROM app_meta WHERE key='schema_generation'`).Scan(&generation); err != nil {
@@ -536,6 +536,88 @@ func TestGovernanceSchemaInvariantsIntegration(t *testing.T) {
 	}
 	if _, err := st.pool.Exec(ctx, `INSERT INTO desired_snapshots(id,target_id,revision,source_kind,manifest_schema_version,manifest_hash,manifest) VALUES($1,$2,24,'relay_config_apply',1,$3,$4)`, uuid.NewString(), relayTarget.ID, v2Hash, jsonText(v2Body)); err == nil {
 		t.Fatal("v2 manifest bypassed canonical routing bytes through a v1 schema-version column")
+	}
+}
+
+func TestRelayConfigurationRevisionRejectsMemberAppendAfterSeal(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	first, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "sealed-relay-first", Transport: "http", URL: "https://example.invalid/first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{first.ID}, MCPRevisionIDs: map[string]string{first.ID: first.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "sealed-relay-second", Transport: "http", URL: "https://example.invalid/second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `INSERT INTO relay_configuration_revision_mcp_servers(relay_configuration_revision_id,server_id,mcp_revision_id,position) VALUES($1,$2,$3,1)`, revision.ID, second.ID, second.CurrentRevisionID); err == nil {
+		t.Fatal("sealed Relay Configuration revision accepted a member append")
+	}
+}
+
+func TestContractRevisionRejectsToolAppendAfterSeal(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "sealed-contract", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "first_tool", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolID := uuid.NewString()
+	if _, err := st.pool.Exec(ctx, `INSERT INTO mcp_tools(id,server_id,name) VALUES($1,$2,'second_tool')`, toolID, server.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `INSERT INTO mcp_contract_revision_tools(contract_revision_id,tool_id,position,input_schema,output_schema,annotations,presentation,status) VALUES($1,$2,1,'{}','{}','{}','{}','new_hidden')`, observed.Revision.ID, toolID); err == nil {
+		t.Fatal("sealed Contract revision accepted a tool append")
+	}
+}
+
+func TestGovernanceFinalizationOwnershipMigrationFailsClosedForUnfinalizedSuccess(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, false)
+	for version, name := range []string{
+		"001_initial.sql",
+		"002_relay_projection.sql",
+		"003_profile_revisions_bundles.sql",
+		"004_mcp_profile_routing_governance.sql",
+		"005_mcp_profile_routing_governance_contract.sql",
+		"006_mcp_governance_reload_integrity.sql",
+		"007_mcp_governance_consistency.sql",
+		"008_mcp_governance_revision_seals.sql",
+	} {
+		applyHistoricalMigrationForTest(t, st, name, version+1)
+	}
+	if err := st.BootstrapEnvironment(ctx, "ownership-upgrade-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	target := integrationTarget(t, st, "local/shared-relay")
+	operationID := uuid.NewString()
+	if _, err := st.pool.Exec(ctx, `INSERT INTO operations(id,kind,status,metadata,finished_at) VALUES($1,'apply','succeeded',$2,now())`, operationID, jsonText([]byte(`{"routingHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,finished_at) VALUES($1,$2,$3,'succeeded',now())`, uuid.NewString(), operationID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status, errorCode string
+	var pending bool
+	if err := st.pool.QueryRow(ctx, `SELECT o.status,o.error_code,bool_or(ot.governance_finalization_pending) FROM operations o JOIN operation_targets ot ON ot.operation_id=o.id WHERE o.id=$1 GROUP BY o.id`, operationID).Scan(&status, &errorCode, &pending); err != nil {
+		t.Fatal(err)
+	}
+	if status != bridgeprotocol.OperationFailed || errorCode != "governance_finalization_interrupted" || pending {
+		t.Fatalf("upgraded unfinalized operation status=%s code=%s pending=%v", status, errorCode, pending)
+	}
+	if _, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", TargetIDs: []string{target.ID}, TargetRequests: map[string]any{target.ID: map[string]any{}}}); err != nil {
+		t.Fatalf("upgrade retained ownership for unrecoverable finalization: %v", err)
 	}
 }
 

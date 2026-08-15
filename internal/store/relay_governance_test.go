@@ -29,8 +29,12 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 		if err := st.pool.QueryRow(ctx, `SELECT applied_revision_id::text,coalesce(default_profile_id::text,'') FROM relay_configuration_state WHERE singleton`).Scan(&appliedRevisionID, &defaultProfileID); err != nil {
 			t.Fatal(err)
 		}
-		metadata["expectedAppliedRelayConfigurationRevisionId"] = appliedRevisionID
-		metadata["expectedDefaultProfileId"] = defaultProfileID
+		if metadata["expectedAppliedRelayConfigurationRevisionId"] == nil {
+			metadata["expectedAppliedRelayConfigurationRevisionId"] = appliedRevisionID
+		}
+		if metadata["expectedDefaultProfileId"] == nil {
+			metadata["expectedDefaultProfileId"] = defaultProfileID
+		}
 		if metadata["affectedProfileRevisions"] == nil {
 			metadata["affectedProfileRevisions"] = map[string]string{}
 		}
@@ -42,18 +46,24 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 		if err := st.pool.QueryRow(ctx, `SELECT applied_revision_id::text FROM global_policy_state WHERE singleton`).Scan(&appliedRevisionID); err != nil {
 			t.Fatal(err)
 		}
-		metadata["expectedAppliedGlobalPolicyRevisionId"] = appliedRevisionID
+		if metadata["expectedAppliedGlobalPolicyRevisionId"] == nil {
+			metadata["expectedAppliedGlobalPolicyRevisionId"] = appliedRevisionID
+		}
 	case "apply":
 		var publishedRevisionID string
 		if err := st.pool.QueryRow(ctx, `SELECT coalesce((SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1),'')`, sourceID).Scan(&publishedRevisionID); err != nil {
 			t.Fatal(err)
 		}
-		metadata["expectedPublishedProfileRevisionId"] = publishedRevisionID
+		if metadata["expectedPublishedProfileRevisionId"] == nil {
+			metadata["expectedPublishedProfileRevisionId"] = publishedRevisionID
+		}
 		var defaultProfileID string
 		if err := st.pool.QueryRow(ctx, `SELECT coalesce(default_profile_id::text,'') FROM relay_configuration_state WHERE singleton`).Scan(&defaultProfileID); err != nil {
 			t.Fatal(err)
 		}
-		metadata["expectedDefaultProfileId"] = defaultProfileID
+		if metadata["expectedDefaultProfileId"] == nil {
+			metadata["expectedDefaultProfileId"] = defaultProfileID
+		}
 	}
 	candidate := RoutingBundleCandidate{}
 	switch kind {
@@ -102,7 +112,7 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.pool.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,metadata) VALUES($1,$2,'succeeded',NULLIF($3,'')::uuid,$4)`, id, kind, sourceID, jsonText(body)); err != nil {
+	if _, err := st.pool.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,metadata) VALUES($1,$2,'running',NULLIF($3,'')::uuid,$4)`, id, kind, sourceID, jsonText(body)); err != nil {
 		t.Fatal(err)
 	}
 	result, err := json.Marshal(map[string]any{"routingReloaded": true, "routingHash": routingHash})
@@ -113,7 +123,7 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.pool.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,request,result,finished_at) VALUES($1,$2,$3,'succeeded',$4,$5,now())`, uuid.NewString(), id, relayTarget.ID, jsonText(request), jsonText(result)); err != nil {
+	if _, err := st.pool.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,request,result,finished_at,governance_finalization_pending) VALUES($1,$2,$3,'succeeded',$4,$5,now(),true)`, uuid.NewString(), id, relayTarget.ID, jsonText(request), jsonText(result)); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -145,6 +155,13 @@ func governanceRoutingHash(t *testing.T, st *Store, operationID string) string {
 	return hash
 }
 
+func failGovernanceOperation(t *testing.T, st *Store, operationID string) {
+	t.Helper()
+	if err := st.FailGovernanceFinalization(context.Background(), operationID, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "test finalization conflict"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFinalizeRelayDefaultProfileRequiresExpectedPredecessorAndIsOneShot(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)
@@ -170,6 +187,7 @@ func TestFinalizeRelayDefaultProfileRequiresExpectedPredecessorAndIsOneShot(t *t
 	if err := st.FinalizeRelayDefaultProfile(ctx, staleOperation, first.ID); err != ErrConflict {
 		t.Fatalf("stale Default Profile finalization returned %v, want conflict", err)
 	}
+	failGovernanceOperation(t, st, staleOperation)
 	var defaultProfileID string
 	if err := st.pool.QueryRow(ctx, `SELECT default_profile_id::text FROM relay_configuration_state WHERE singleton`).Scan(&defaultProfileID); err != nil {
 		t.Fatal(err)
@@ -208,8 +226,11 @@ func TestRelayConfigurationFinalizerRejectsASecondOperationWithStalePredecessor(
 	if err != nil {
 		t.Fatal(err)
 	}
+	var predecessor string
+	if err := st.pool.QueryRow(ctx, `SELECT applied_revision_id::text FROM relay_configuration_state WHERE singleton`).Scan(&predecessor); err != nil {
+		t.Fatal(err)
+	}
 	firstOperation := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"revisionId": first.ID, "routingHash": strings.Repeat("a", 64)})
-	secondOperation := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"revisionId": second.ID, "routingHash": strings.Repeat("b", 64)})
 	var routingValid, manifestValid bool
 	var manifestJSON []byte
 	if err := st.pool.QueryRow(ctx, `SELECT validate_routing_bundle_v1(ot.request->'manifest'->'relayGovernance'->'routingBundle'),validate_desired_manifest(ot.request->'manifest'),ot.request->'manifest' FROM operation_targets ot WHERE ot.operation_id=$1`, firstOperation).Scan(&routingValid, &manifestValid, &manifestJSON); err != nil {
@@ -221,6 +242,7 @@ func TestRelayConfigurationFinalizerRejectsASecondOperationWithStalePredecessor(
 	if err := st.FinalizeRelayConfigurationApply(ctx, firstOperation, first.ID, governanceRoutingHash(t, st, firstOperation)); err != nil {
 		t.Fatal(err)
 	}
+	secondOperation := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"revisionId": second.ID, "routingHash": strings.Repeat("b", 64), "expectedAppliedRelayConfigurationRevisionId": predecessor})
 	if err := st.FinalizeRelayConfigurationApply(ctx, secondOperation, second.ID, governanceRoutingHash(t, st, secondOperation)); err != ErrConflict {
 		t.Fatalf("stale Relay Configuration operation returned %v, want conflict", err)
 	}
@@ -392,6 +414,60 @@ func TestPrepareAffectedProfileUpdatesCreatesMCPRevisionCandidate(t *testing.T) 
 	if len(bundle.Profiles) != 1 || bundle.Profiles[0].ProfileRevisionID != profile.CurrentRevisionID || bundle.Profiles[0].Servers[0].MCPConfigRevisionID != server.CurrentRevisionID {
 		t.Fatalf("combined candidate bundle=%+v", bundle.Profiles)
 	}
+}
+
+func TestPrepareAffectedProfileUpdatesClonesPublishedRevisionNotCurrentDraft(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, _, profile, _ := setupPublishedRelayProfile(t, st, "published-baseline")
+	publishedRevisionID := profile.CurrentRevisionID
+
+	draftProfile, err := st.SaveProfile(ctx, profile.ID, ProfileInput{
+		Name: profile.Name, Description: "unpublished unrelated draft", Revision: profile.Revision,
+		ClientKind: profile.ClientKind, Category: profile.Category, Variant: profile.Variant, MigrationState: profile.MigrationState,
+		MCPServerIDs: profile.MCPServerIDs, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: acceptedContractRevisionID(t, st, server.ID), VisibilityMode: "all_accepted"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draftProfile.CurrentRevisionID == publishedRevisionID {
+		t.Fatal("unpublished draft did not create a new Profile revision")
+	}
+	server, err = st.SaveMCPServer(ctx, server.ID, MCPInput{Name: server.Name, Description: "relay revision two", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayDraft, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PrepareAffectedProfileUpdates(ctx, relayDraft.ID); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := st.Profile(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.Description != profile.Description {
+		t.Fatalf("Relay update candidate inherited unpublished draft description %q", candidate.Description)
+	}
+	var stillPublished string
+	if err := st.pool.QueryRow(ctx, `SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1`, profile.ID).Scan(&stillPublished); err != nil {
+		t.Fatal(err)
+	}
+	if stillPublished != publishedRevisionID {
+		t.Fatalf("prepare advanced Published pointer to %s", stillPublished)
+	}
+}
+
+func acceptedContractRevisionID(t *testing.T, st *Store, serverID string) string {
+	t.Helper()
+	var revisionID string
+	if err := st.pool.QueryRow(context.Background(), `SELECT accepted_revision_id::text FROM mcp_contract_state WHERE server_id=$1`, serverID).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	return revisionID
 }
 
 func TestPrepareAffectedProfileUpdatesRejectsPublishedServerRemoval(t *testing.T) {
@@ -812,5 +888,39 @@ func TestRoutingBundlePauseTracksLatestContractAgainstAcceptedRevision(t *testin
 	}
 	if !bundle.Servers[0].Tools[0].Paused {
 		t.Fatalf("tool missing from latest contract was not paused: %+v", bundle.Servers[0].Tools[0])
+	}
+}
+
+func TestRelaySnapshotAcceptsPayloadLikeJSONSchemaPropertyNames(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "schema-properties", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{
+		Name: "submit", InputSchema: json.RawMessage(`{"type":"object","properties":{"arguments":{"type":"string"},"result":{"type":"string"},"prompt":{"type":"string"}}}`), ReadOnlyHint: true,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, contract.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	relay, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"revisionId": relay.ID})
+	if err := st.FinalizeRelayConfigurationApply(ctx, operationID, relay.ID, governanceRoutingHash(t, st, operationID)); err != nil {
+		t.Fatal(err)
+	}
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	_, manifest, err := st.ActiveDesiredManifest(ctx, relayTarget.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.RelayGovernance == nil {
+		t.Fatal("relay snapshot omitted governance after JSON Schema property validation")
 	}
 }

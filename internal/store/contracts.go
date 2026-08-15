@@ -223,6 +223,9 @@ func (s *Store) ObserveContractsTx(ctx context.Context, tx pgx.Tx, input Contrac
 			return ContractObservationResult{}, err
 		}
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO mcp_contract_revision_seals(contract_revision_id) VALUES($1)`, revisionID); err != nil {
+		return ContractObservationResult{}, err
+	}
 	newState := "changed"
 	for _, status := range statuses {
 		if status == ContractToolPausedIncompatible {

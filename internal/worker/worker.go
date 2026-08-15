@@ -300,10 +300,39 @@ func (w *Worker) loop(ctx context.Context, index int) {
 			w.logger.Error("finish operation target", "operationTargetId", item.OperationTarget.ID, "error", err)
 			continue
 		}
+		if status == bridgeprotocol.OperationSucceeded && item.Operation.Kind == "apply" && item.Target.Runtime == domain.RuntimeSharedRelay {
+			if err := w.finalizeProfileApply(ctx, item); err != nil {
+				w.logger.Error("finalize Profile Apply", "operationId", item.Operation.ID, "error", err)
+				continue
+			}
+		}
 		if _, err := w.store.EnqueuePendingRerun(ctx, item.OperationTarget.ID); err != nil {
 			w.logger.Error("enqueue coalesced reconcile", "operationTargetId", item.OperationTarget.ID, "error", err)
 		}
 	}
+}
+
+func (w *Worker) finalizeProfileApply(ctx context.Context, item store.WorkItem) error {
+	var metadata struct {
+		ProfileRevisionID string `json:"profileRevisionId"`
+	}
+	var finalizationErr error
+	if err := json.Unmarshal(item.Operation.Metadata, &metadata); err != nil || strings.TrimSpace(metadata.ProfileRevisionID) == "" {
+		finalizationErr = errors.New("Profile Apply finalization metadata is invalid")
+	} else {
+		finalizationErr = w.store.FinalizeProfileApply(ctx, item.Operation.ID, item.Operation.SourceID, metadata.ProfileRevisionID)
+	}
+	if finalizationErr == nil {
+		return nil
+	}
+	apiErr := publicError(finalizationErr)
+	if errors.Is(finalizationErr, store.ErrConflict) {
+		apiErr = &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Profile Apply finalization state changed"}
+	}
+	if err := w.store.FailGovernanceFinalization(ctx, item.Operation.ID, apiErr); err != nil {
+		return fmt.Errorf("%w; persist finalization failure: %v", finalizationErr, err)
+	}
+	return finalizationErr
 }
 
 func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
@@ -561,8 +590,11 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		if sourceKind == "" {
 			sourceKind = "profile_apply"
 		}
-		if _, err := w.store.PinDesiredSnapshot(ctx, target.ID, sourceKind, metadata.SourceID, item.OperationTarget.ID, *result.Manifest); err != nil {
-			return bridgeprotocol.TargetResult{}, publicError(err)
+		atomicProfileApply := item.Operation.Kind == "apply" && sourceKind == "profile_apply"
+		if !atomicProfileApply {
+			if _, err := w.store.PinDesiredSnapshot(ctx, target.ID, sourceKind, metadata.SourceID, item.OperationTarget.ID, *result.Manifest); err != nil {
+				return bridgeprotocol.TargetResult{}, publicError(err)
+			}
 		}
 	}
 	result.Health = normalizedResultHealth(result.Health)

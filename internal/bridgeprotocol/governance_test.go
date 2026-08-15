@@ -19,6 +19,26 @@ func TestRoutingBundleAcceptsTheCompanionStrictContractShape(t *testing.T) {
 	}
 }
 
+func TestRoutingBundleAllowsPayloadLikeJSONSchemaPropertyNames(t *testing.T) {
+	body := []byte(`{"schemaVersion":1,"mode":"compatibility","relayConfigurationRevisionId":"00000000-0000-0000-0000-000000000001","relayConfigurationHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","globalPolicyRevisionId":"00000000-0000-0000-0000-000000000002","globalPolicyHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","defaultProfileId":null,"servers":[{"serverId":"00000000-0000-0000-0000-000000000003","serverName":"acemcp","mcpConfigRevisionId":"00000000-0000-0000-0000-000000000004","acceptedContractRevisionId":null,"acceptedContractHash":null,"tools":[{"toolId":"00000000-0000-0000-0000-000000000005","name":"submit","inputSchema":{"type":"object","properties":{"arguments":{"type":"string"},"result":{"type":"string"},"prompt":{"type":"string"}}},"outputSchema":{},"annotations":{},"globalDecision":"allow","reasonCodes":[],"paused":false}]}],"profiles":[]}`)
+	var bundle RoutingBundle
+	if err := DecodeGovernanceBody(body, &bundle); err != nil {
+		t.Fatalf("routing bundle rejected legitimate JSON Schema property names: %v", err)
+	}
+}
+
+func TestGovernanceBodyRejectsPayloadFieldsOutsideJSONSchemas(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"arguments":{"id":"payload"}}`),
+		[]byte(`{"annotations":{"result":"payload"}}`),
+		[]byte(`{"inputSchema":{},"prompt":"payload"}`),
+	} {
+		if err := ValidateGovernanceBody(body); err == nil {
+			t.Fatalf("governance body accepted payload field: %s", body)
+		}
+	}
+}
+
 func TestRoutingBundleCanonicalUsesRFC8785CompatibleBytes(t *testing.T) {
 	bundle := RoutingBundle{
 		SchemaVersion:                1,

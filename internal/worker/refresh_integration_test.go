@@ -60,6 +60,42 @@ func TestFailedNodeRefreshPreservesActiveTargetsIntegration(t *testing.T) {
 	}
 }
 
+func TestProfileApplyFinalizationFailureIsPersistedIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	if err := st.BootstrapEnvironment(ctx, "finalization-worker-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	var targetID string
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/shared-relay'`).Scan(&targetID); err != nil {
+		t.Fatal(err)
+	}
+	operationID, operationTargetID := uuid.NewString(), uuid.NewString()
+	if _, err := st.Pool().Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,'apply','running','{}')`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,governance_finalization_pending,finished_at) VALUES($1,$2,$3,'succeeded',true,now())`, operationTargetID, operationID, targetID); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	item := store.WorkItem{
+		Operation:       domain.Operation{ID: operationID, Kind: "apply", Metadata: []byte(`{}`)},
+		OperationTarget: domain.OperationTarget{ID: operationTargetID},
+		Target:          domain.Target{ID: targetID, Runtime: domain.RuntimeSharedRelay},
+	}
+	if err := w.finalizeProfileApply(ctx, item); err == nil {
+		t.Fatal("invalid Profile Apply metadata unexpectedly finalized")
+	}
+	var status string
+	var pending bool
+	if err := st.Pool().QueryRow(ctx, `SELECT o.status,bool_or(ot.governance_finalization_pending) FROM operations o JOIN operation_targets ot ON ot.operation_id=o.id WHERE o.id=$1 GROUP BY o.id`, operationID).Scan(&status, &pending); err != nil {
+		t.Fatal(err)
+	}
+	if status != bridgeprotocol.OperationFailed || pending {
+		t.Fatalf("worker finalization failure status=%s pending=%v", status, pending)
+	}
+}
+
 func newWorkerIntegrationStore(t *testing.T) *store.Store {
 	t.Helper()
 	baseURL := strings.TrimSpace(os.Getenv("TOOLHUB_TEST_DATABASE_URL"))

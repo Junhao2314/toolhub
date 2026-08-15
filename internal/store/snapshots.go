@@ -576,7 +576,7 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		if err != nil {
 			return domain.Operation{}, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request) VALUES($1,$2,$3,$4)`, rowIDs[item.TargetID], operationID, item.TargetID, jsonText(targetRequest)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request,governance_finalization_pending) VALUES($1,$2,$3,$4,true)`, rowIDs[item.TargetID], operationID, item.TargetID, jsonText(targetRequest)); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				return domain.Operation{}, ErrOperationActive
@@ -640,49 +640,69 @@ func (s *Store) ConsumePreflightConfirmation(ctx context.Context, token string) 
 }
 
 func (s *Store) PinDesiredSnapshot(ctx context.Context, targetID, sourceKind, sourceID, operationTargetID string, manifest bridgeprotocol.DesiredManifest) (domain.DesiredSnapshot, error) {
-	body, hash, err := manifest.Canonical()
-	if err != nil {
-		return domain.DesiredSnapshot{}, err
-	}
-	if manifest.Target.ID != targetID {
-		return domain.DesiredSnapshot{}, errors.New("manifest target does not match snapshot target")
-	}
-	var routingBundleCanonical any
-	if manifest.SchemaVersion == bridgeprotocol.ManifestSchemaVersionV2 {
-		if manifest.RelayGovernance == nil {
-			return domain.DesiredSnapshot{}, ErrConflict
-		}
-		var routingBundle bridgeprotocol.RoutingBundle
-		if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &routingBundle); err != nil {
-			return domain.DesiredSnapshot{}, err
-		}
-		canonicalRouting, _, err := routingBundle.Canonical()
-		if err != nil {
-			return domain.DesiredSnapshot{}, err
-		}
-		routingBundleCanonical = canonicalRouting
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.DesiredSnapshot{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	id, err := pinDesiredSnapshotTx(ctx, tx, targetID, sourceKind, sourceID, operationTargetID, manifest, false)
+	if err != nil {
+		return domain.DesiredSnapshot{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.DesiredSnapshot{}, err
+	}
+	return s.DesiredSnapshot(ctx, id)
+}
+
+func pinDesiredSnapshotTx(ctx context.Context, tx pgx.Tx, targetID, sourceKind, sourceID, operationTargetID string, manifest bridgeprotocol.DesiredManifest, rejectExisting bool) (string, error) {
+	body, hash, err := manifest.Canonical()
+	if err != nil {
+		return "", err
+	}
+	if manifest.Target.ID != targetID {
+		return "", errors.New("manifest target does not match snapshot target")
+	}
+	var routingBundleCanonical any
+	if manifest.SchemaVersion == bridgeprotocol.ManifestSchemaVersionV2 {
+		if manifest.RelayGovernance == nil {
+			return "", ErrConflict
+		}
+		var routingBundle bridgeprotocol.RoutingBundle
+		if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &routingBundle); err != nil {
+			return "", err
+		}
+		canonicalRouting, routingHash, err := routingBundle.Canonical()
+		if err != nil || routingHash != manifest.RelayGovernance.RoutingHash {
+			return "", ErrConflict
+		}
+		routingBundleCanonical = canonicalRouting
+	}
 	var operationTargetValue any
 	if uuid.Validate(operationTargetID) == nil {
 		operationTargetValue = operationTargetID
 		var existingID string
 		err := tx.QueryRow(ctx, `SELECT id::text FROM desired_snapshots WHERE source_operation_target_id=$1`, operationTargetID).Scan(&existingID)
 		if err == nil {
-			_ = tx.Rollback(ctx)
-			return s.DesiredSnapshot(ctx, existingID)
+			if rejectExisting {
+				return "", ErrConflict
+			}
+			return existingID, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return domain.DesiredSnapshot{}, err
+			return "", err
 		}
+	}
+	var lockedTargetID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM targets WHERE id=$1 FOR UPDATE`, targetID).Scan(&lockedTargetID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", err
 	}
 	var revision int64
 	if err := tx.QueryRow(ctx, `SELECT coalesce(max(revision),0)+1 FROM desired_snapshots WHERE target_id=$1`, targetID).Scan(&revision); err != nil {
-		return domain.DesiredSnapshot{}, err
+		return "", err
 	}
 	id := uuid.NewString()
 	var sourceValue any
@@ -690,15 +710,12 @@ func (s *Store) PinDesiredSnapshot(ctx context.Context, targetID, sourceKind, so
 		sourceValue = sourceID
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO desired_snapshots(id,target_id,revision,source_kind,source_id,source_operation_target_id,profile_revision,manifest_schema_version,manifest_hash,manifest,routing_bundle_canonical) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, id, targetID, revision, sourceKind, sourceValue, operationTargetValue, manifest.ProfileRevision, manifest.SchemaVersion, hash, jsonText(body), routingBundleCanonical); err != nil {
-		return domain.DesiredSnapshot{}, err
+		return "", err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO target_desired_snapshots(target_id,snapshot_id,desired_revision,health,drift_summary,error_code,error_reason,updated_at) VALUES($1,$2,$3,'healthy','{}','','',now()) ON CONFLICT(target_id) DO UPDATE SET snapshot_id=EXCLUDED.snapshot_id,desired_revision=EXCLUDED.desired_revision,health='healthy',drift_summary='{}',error_code='',error_reason='',updated_at=now()`, targetID, id, revision); err != nil {
-		return domain.DesiredSnapshot{}, err
+		return "", err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.DesiredSnapshot{}, err
-	}
-	return s.DesiredSnapshot(ctx, id)
+	return id, nil
 }
 
 func (s *Store) DesiredSnapshot(ctx context.Context, id string) (domain.DesiredSnapshot, error) {

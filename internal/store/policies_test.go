@@ -63,11 +63,15 @@ func TestGlobalPolicyFinalizerRejectsASecondOperationWithStalePredecessor(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	var predecessor string
+	if err := st.pool.QueryRow(ctx, `SELECT applied_revision_id::text FROM global_policy_state WHERE singleton`).Scan(&predecessor); err != nil {
+		t.Fatal(err)
+	}
 	firstOperation := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": first.ID})
-	secondOperation := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": second.ID})
 	if err := st.FinalizeGlobalPolicyApply(ctx, firstOperation, first.ID); err != nil {
 		t.Fatal(err)
 	}
+	secondOperation := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": second.ID, "expectedAppliedGlobalPolicyRevisionId": predecessor})
 	if err := st.FinalizeGlobalPolicyApply(ctx, secondOperation, second.ID); err != ErrConflict {
 		t.Fatalf("stale Global Policy operation returned %v, want conflict", err)
 	}
