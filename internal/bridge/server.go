@@ -39,6 +39,7 @@ type Adapter interface {
 	ListRelayConfirmations(context.Context) (bridgeprotocol.ConfirmationListResponse, error)
 	DecideRelayConfirmation(context.Context, bool, bridgeprotocol.ConfirmationDecisionRequest) (bridgeprotocol.ConfirmationDecisionResponse, error)
 	DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error)
+	InspectNativeClient(context.Context, bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error)
 }
 
 type Server struct {
@@ -109,6 +110,7 @@ func (s *Server) Router() http.Handler {
 		return s.decideRelayConfirmation(ctx, false, body)
 	}))
 	router.Post("/v1/relay/governance/observations/drain", s.ephemeral(s.drainRelayObservations))
+	router.Post("/v1/native-clients/inspect", s.ephemeral(s.inspectNativeClient))
 	router.Get("/v1/operations/{operationID}", s.operation)
 	router.Post("/v1/operations/{operationID}/cancel", s.mutation(s.cancelOperation))
 	return router
@@ -474,6 +476,21 @@ func (s *Server) drainRelayObservations(ctx context.Context, body []byte) (int, 
 		return 0, nil, invalidRequest(errors.New("observation cursor or limit is invalid"))
 	}
 	result, err := s.adapter.DrainRelayObservations(ctx, input)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) inspectNativeClient(ctx context.Context, body []byte) (int, any, error) {
+	var input bridgeprotocol.NativeClientInspectionRequest
+	if err := bridgeprotocol.DecodeGovernanceBody(body, &input); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	if err := bridgeprotocol.ValidateManagedUsername(input.ManagedUsername); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	if input.ClientKind != bridgeprotocol.RuntimeClaude && input.ClientKind != bridgeprotocol.RuntimeCodex {
+		return 0, nil, invalidRequest(errors.New("native client kind must be claude or codex"))
+	}
+	result, err := s.adapter.InspectNativeClient(ctx, input)
 	return http.StatusOK, result, err
 }
 

@@ -252,9 +252,12 @@ paths:
   /native-clients/inspect:
     post:
       operationId: inspectNativeClients
-      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/NativeClientInspectionRequest'}}}
       responses:
         '200': {description: Supported native client versions, content: {application/json: {schema: {$ref: '#/components/schemas/NativeClientInspectionResponse'}}}}
+        '400': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
   /operations/{operationID}:
     get:
@@ -760,6 +763,13 @@ components:
         outcome: {type: string, enum: [confirmation_required, confirmed, rejected, expired, denied, executed, failed, unknown, not_executed]}
         errorClass: {type: string, enum: [none, policy, confirmation, rate_limited, timeout, transport, upstream, internal]}
         durationBucket: {type: string, enum: [lt_10ms, lt_100ms, lt_1s, lt_10s, gte_10s]}
+    NativeClientInspectionRequest:
+      type: object
+      additionalProperties: false
+      required: [managedUsername, clientKind]
+      properties:
+        managedUsername: {type: string, pattern: '^[a-z_][a-z0-9_-]{0,31}$'}
+        clientKind: {type: string, enum: [claude, codex]}
     NativeClientInspectionResponse:
       type: object
       additionalProperties: false

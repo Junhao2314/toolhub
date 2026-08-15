@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -27,6 +28,8 @@ type fakeAdapter struct {
 	relayCalls           int
 	relayCapabilityCalls int
 	relayGovernanceCalls int
+	nativeClientCalls    int
+	nativeClientRequest  bridgeprotocol.NativeClientInspectionRequest
 }
 
 func (f *fakeAdapter) Health(context.Context) error { return nil }
@@ -91,6 +94,11 @@ func (f *fakeAdapter) DecideRelayConfirmation(_ context.Context, _ bool, input b
 func (f *fakeAdapter) DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error) {
 	f.relayGovernanceCalls++
 	return bridgeprotocol.ObservationDrainResponse{BootID: "boot-1", Items: []bridgeprotocol.Observation{}}, nil
+}
+func (f *fakeAdapter) InspectNativeClient(_ context.Context, input bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error) {
+	f.nativeClientCalls++
+	f.nativeClientRequest = input
+	return bridgeprotocol.NativeClientInspectionResponse{ClientKind: input.ClientKind, Version: "2.1.232", Supported: true}, nil
 }
 
 func testServer(t *testing.T) (*Server, *fakeAdapter, []byte) {
@@ -227,6 +235,41 @@ func TestRelayRejectsInvalidTargetAndPort(t *testing.T) {
 				t.Fatalf("adapter relay calls=%d; want zero", adapter.relayCalls)
 			}
 		})
+	}
+}
+
+func TestNativeClientInspectionRequiresTypedRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "empty", body: `{}`},
+		{name: "unknown field", body: `{"managedUsername":"operator","clientKind":"claude","path":"/tmp/claude"}`},
+		{name: "invalid username", body: `{"managedUsername":"../root","clientKind":"claude"}`},
+		{name: "invalid client", body: `{"managedUsername":"operator","clientKind":"hermes"}`},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, adapter, key := testServer(t)
+			request := signedRequest(t, key, http.MethodPost, "/v1/native-clients/inspect", []byte(test.body), server.now(), fmt.Sprintf("native-invalid-%04d", index), "")
+			recorder := httptest.NewRecorder()
+			server.Router().ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusBadRequest || adapter.nativeClientCalls != 0 {
+				t.Fatalf("status=%d calls=%d body=%s", recorder.Code, adapter.nativeClientCalls, recorder.Body.String())
+			}
+		})
+	}
+
+	server, adapter, key := testServer(t)
+	body := []byte(`{"managedUsername":"operator","clientKind":"claude"}`)
+	request := signedRequest(t, key, http.MethodPost, "/v1/native-clients/inspect", body, server.now(), "native-valid-0001", "")
+	recorder := httptest.NewRecorder()
+	server.Router().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || adapter.nativeClientCalls != 1 || adapter.nativeClientRequest.ManagedUsername != "operator" || adapter.nativeClientRequest.ClientKind != "claude" {
+		t.Fatalf("status=%d calls=%d request=%+v body=%s", recorder.Code, adapter.nativeClientCalls, adapter.nativeClientRequest, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "path") || strings.Contains(recorder.Body.String(), "argv") {
+		t.Fatalf("inspection leaked executable details: %s", recorder.Body.String())
 	}
 }
 

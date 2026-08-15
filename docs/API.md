@@ -71,11 +71,18 @@ values; `export-secrets` requires current-password reauthentication and sends
 an explicit plaintext backup with `Cache-Control: no-store`. Preview stores
 only a short-lived hash-bound token; import re-uploads the same bytes.
 
-`POST /profiles/{id}/preflight` accepts 1-100 target IDs. It resolves current
-Library revisions and returns a per-target destructive diff plus a five-minute,
-one-use confirmation token. `POST /profiles/{id}/apply` atomically consumes the
-tokens and queues one fleet operation. A changed Profile, changed target,
-expired token, reused token, or mismatched manifest returns `409`.
+`POST /profiles/{id}/preflight` accepts 1-100 unique target IDs including the
+Profile's local client target. Before calling any target preflight or issuing a
+token, it asks the Bridge to inspect that managed user's fixed Claude/Codex
+adapter. Missing, unsafe, invalid, timed-out, or below-floor clients return a
+stable `409` reason code and issue no tokens. Multiple approved paths that
+resolve to different executable inodes return
+`native_client_resolution_ambiguous`; aliases of the same inode are
+deduplicated. A successful request resolves current Library revisions and
+returns a per-target destructive diff plus a five-minute, one-use confirmation
+token. `POST /profiles/{id}/apply` atomically consumes the tokens and queues one
+fleet operation. A changed Profile, changed target, expired token, reused
+token, or mismatched manifest returns `409`.
 
 ## Targets And Snapshots
 

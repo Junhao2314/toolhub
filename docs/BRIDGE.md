@@ -163,6 +163,21 @@ socket: capability discovery, routing-bundle reload, contract observation,
 confirmation approve/reject, payload-free observation drain, and native-client
 inspection. They do not provide a generic action or body proxy.
 
+Native-client inspection accepts only the managed username and `claude` or
+`codex` client kind. The Bridge scans only managed-home `~/.local/bin`,
+`~/.nvm/versions/node/*/bin`, and `~/.volta/bin` entries plus `/usr/bin` and
+`/usr/local/bin`, rejects escaped
+symlinks and non-regular executables, and runs only `--version` as the managed
+UID/GID with a clean environment, bounded output, and a five-second deadline.
+Claude Code must be at least `2.1.232` and Codex CLI at least `0.147.0`.
+Responses contain only client kind, canonical semantic version, supported
+state, and a bounded reason code; binary paths and argv never cross the Bridge
+boundary. Inspection enumerates every approved candidate and deduplicates
+aliases by device and inode. More than one distinct executable fails closed as
+`native_client_resolution_ambiguous`. Shell aliases/functions and custom PATH
+entries are part of the external launch environment and cannot be verified by
+ToolHub.
+
 The relay admin protocol is a separate bounded one-line JSON protocol at the
 fixed `/run/toolhub-mcpm/relay.sock`. The systemd unit passes the fixed routing
 file `~/.config/mcpm/toolhub-routing.json`; neither path is caller-selectable.

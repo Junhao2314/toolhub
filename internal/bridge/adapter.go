@@ -704,3 +704,11 @@ func (a *CompositeAdapter) DecideRelayConfirmation(ctx context.Context, approve 
 func (a *CompositeAdapter) DrainRelayObservations(ctx context.Context, input bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error) {
 	return a.RelayManager.DrainRelayObservations(ctx, input)
 }
+
+func (a *CompositeAdapter) InspectNativeClient(ctx context.Context, input bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error) {
+	user, err := runtime.LookupManagedUser(input.ManagedUsername)
+	if err != nil {
+		return bridgeprotocol.NativeClientInspectionResponse{}, err
+	}
+	return runtime.InspectNativeClient(ctx, user, input.ClientKind), nil
+}

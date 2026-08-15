@@ -434,6 +434,11 @@ type ObservationDrainResponse struct {
 	NextSequence int64         `json:"nextSequence"`
 }
 
+type NativeClientInspectionRequest struct {
+	ManagedUsername string `json:"managedUsername"`
+	ClientKind      string `json:"clientKind"`
+}
+
 type NativeClientInspectionResponse struct {
 	ClientKind string `json:"clientKind"`
 	Version    string `json:"version"`

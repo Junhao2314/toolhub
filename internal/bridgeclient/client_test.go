@@ -43,6 +43,10 @@ func TestGovernanceClientUsesFixedTypedRoutes(t *testing.T) {
 			_, err := client.DrainRelayObservations(ctx, bridgeprotocol.ObservationDrainRequest{Limit: 1000})
 			return err
 		}},
+		{name: "native client", path: "/v1/native-clients/inspect", body: `{"managedUsername":"operator","clientKind":"claude"}`, response: `{"clientKind":"claude","version":"2.1.232","supported":true}`, call: func(ctx context.Context, client *Client) error {
+			_, err := client.InspectNativeClient(ctx, bridgeprotocol.NativeClientInspectionRequest{ManagedUsername: "operator", ClientKind: "claude"})
+			return err
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

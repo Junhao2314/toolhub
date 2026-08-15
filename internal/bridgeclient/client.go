@@ -196,6 +196,12 @@ func (c *Client) DrainRelayObservations(ctx context.Context, input bridgeprotoco
 	return result, err
 }
 
+func (c *Client) InspectNativeClient(ctx context.Context, input bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error) {
+	var result bridgeprotocol.NativeClientInspectionResponse
+	err := c.call(ctx, http.MethodPost, "/v1/native-clients/inspect", "", input, &result)
+	return result, err
+}
+
 func (c *Client) GCBackups(ctx context.Context, key string, input bridgeprotocol.BackupGCRequest) (bridgeprotocol.BackupGCResponse, error) {
 	var result bridgeprotocol.BackupGCResponse
 	err := c.call(ctx, http.MethodPost, "/v1/backups/gc", key, input, &result)

@@ -660,6 +660,59 @@ func (a *API) profilePreflight(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "invalid_request", "Select 1-100 targets")
 		return
 	}
+	profile, err := a.store.Profile(r.Context(), profileID)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	if profile.ClientKind != bridgeprotocol.RuntimeClaude && profile.ClientKind != bridgeprotocol.RuntimeCodex {
+		writeError(w, r, http.StatusConflict, "profile_client_unsupported", "Profile client does not support native launch")
+		return
+	}
+	type resolvedTarget struct {
+		id       string
+		manifest bridgeprotocol.DesiredManifest
+	}
+	resolved := make([]resolvedTarget, 0, len(input.TargetIDs))
+	seenTargets := make(map[string]struct{}, len(input.TargetIDs))
+	var nativeRequest *bridgeprotocol.NativeClientInspectionRequest
+	for _, targetID := range input.TargetIDs {
+		if uuid.Validate(targetID) != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid_request", "Target IDs must be unique UUIDs")
+			return
+		}
+		if _, exists := seenTargets[targetID]; exists {
+			writeError(w, r, http.StatusBadRequest, "invalid_request", "Target IDs must be unique UUIDs")
+			return
+		}
+		seenTargets[targetID] = struct{}{}
+		manifest, err := a.store.ResolveProfileManifest(r.Context(), profileID, targetID)
+		if err != nil {
+			a.handleStoreError(w, r, err)
+			return
+		}
+		if manifest.Target.NodeKind == bridgeprotocol.NodeKindLocal && manifest.Target.Runtime == profile.ClientKind {
+			if nativeRequest != nil {
+				writeError(w, r, http.StatusBadRequest, "invalid_request", "Select one local client target")
+				return
+			}
+			nativeRequest = &bridgeprotocol.NativeClientInspectionRequest{ManagedUsername: manifest.Target.ManagedUsername, ClientKind: profile.ClientKind}
+		}
+		resolved = append(resolved, resolvedTarget{id: targetID, manifest: manifest})
+	}
+	if nativeRequest == nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "Select the Profile local client target")
+		return
+	}
+	inspection, err := a.bridge.InspectNativeClient(r.Context(), *nativeRequest)
+	if err != nil {
+		writeError(w, r, http.StatusConflict, "native_client_inspection_failed", "Native client inspection could not be completed")
+		return
+	}
+	if reason := nativeClientPreflightReason(profile.ClientKind, inspection); reason != "" {
+		writeError(w, r, http.StatusConflict, reason, "Native client does not satisfy Profile requirements")
+		return
+	}
 	type item struct {
 		TargetID  string                           `json:"targetId"`
 		Token     string                           `json:"confirmationToken"`
@@ -667,25 +720,42 @@ func (a *API) profilePreflight(w http.ResponseWriter, r *http.Request) {
 		Result    bridgeprotocol.PreflightResponse `json:"result"`
 	}
 	items := make([]item, 0, len(input.TargetIDs))
-	for _, targetID := range input.TargetIDs {
-		manifest, err := a.store.ResolveProfileManifest(r.Context(), profileID, targetID)
-		if err != nil {
-			a.handleStoreError(w, r, err)
-			return
-		}
-		result, err := a.bridge.Preflight(r.Context(), "preflight-"+targetID+"-"+strconv.FormatInt(time.Now().UnixNano(), 10), bridgeprotocol.PreflightRequest{Target: manifest.Target, Manifest: manifest})
+	for _, target := range resolved {
+		result, err := a.bridge.Preflight(r.Context(), "preflight-"+target.id+"-"+strconv.FormatInt(time.Now().UnixNano(), 10), bridgeprotocol.PreflightRequest{Target: target.manifest.Target, Manifest: target.manifest})
 		if err != nil {
 			writeError(w, r, 409, "preflight_failed", err.Error())
 			return
 		}
-		token, expires, err := a.store.CreatePreflightConfirmation(r.Context(), profileID, targetID, result.TargetRevision, manifest, result.Diff, 5*time.Minute)
+		token, expires, err := a.store.CreatePreflightConfirmation(r.Context(), profileID, target.id, result.TargetRevision, target.manifest, result.Diff, 5*time.Minute)
 		if err != nil {
 			a.handleStoreError(w, r, err)
 			return
 		}
-		items = append(items, item{TargetID: targetID, Token: token, ExpiresAt: expires, Result: result})
+		items = append(items, item{TargetID: target.id, Token: token, ExpiresAt: expires, Result: result})
 	}
 	writeJSON(w, 200, map[string]any{"items": items})
+}
+
+func nativeClientPreflightReason(expectedKind string, inspection bridgeprotocol.NativeClientInspectionResponse) string {
+	if inspection.ClientKind != expectedKind || inspection.Supported && inspection.Version == "" {
+		return "native_client_inspection_invalid"
+	}
+	if inspection.Supported {
+		return ""
+	}
+	switch inspection.ErrorCode {
+	case "native_client_not_found",
+		"native_client_path_unsafe",
+		"native_client_resolution_ambiguous",
+		"native_client_timeout",
+		"native_client_output_invalid",
+		"native_client_version_invalid",
+		"native_client_version_unsupported",
+		"native_client_inspection_failed":
+		return inspection.ErrorCode
+	default:
+		return "native_client_unsupported"
+	}
 }
 
 func (a *API) applyProfile(w http.ResponseWriter, r *http.Request) {
