@@ -12,8 +12,9 @@ import (
 )
 
 type fakeSchedulerStore struct {
-	settings domain.Settings
-	created  []store.CreateOperationInput
+	settings     domain.Settings
+	relayHealthy bool
+	created      []store.CreateOperationInput
 }
 
 func (fake *fakeSchedulerStore) Settings(context.Context) (domain.Settings, error) {
@@ -21,6 +22,10 @@ func (fake *fakeSchedulerStore) Settings(context.Context) (domain.Settings, erro
 }
 
 func (fake *fakeSchedulerStore) EnqueueReconciles(context.Context) (int, error) { return 0, nil }
+
+func (fake *fakeSchedulerStore) RelayGovernanceHealthy(context.Context) (bool, error) {
+	return fake.relayHealthy, nil
+}
 
 func (fake *fakeSchedulerStore) CreateOperation(_ context.Context, input store.CreateOperationInput) (domain.Operation, error) {
 	fake.created = append(fake.created, input)
@@ -58,5 +63,41 @@ func TestEnqueueBackupGCUsesDailyIdempotencyAndFixedRetention(t *testing.T) {
 	request, ok := input.Request.(map[string]any)
 	if !ok || request["maxAgeDays"] != 30 || request["maxPerTarget"] != 10 {
 		t.Fatalf("backup GC request=%#v", input.Request)
+	}
+}
+
+func TestSchedulerEnqueuesHealthyContractObservationOnBoundedCadence(t *testing.T) {
+	fake := &fakeSchedulerStore{relayHealthy: true}
+	scheduler := &Scheduler{store: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time {
+		return time.Date(2026, 8, 16, 12, 44, 29, 0, time.UTC)
+	}}
+	scheduler.enqueueContractObservation(context.Background())
+	if len(fake.created) != 1 {
+		t.Fatalf("created=%d", len(fake.created))
+	}
+	input := fake.created[0]
+	if input.Kind != "contract_observe" || input.IdempotencyKey != "scheduled-contract-observe:20260816T1230Z" {
+		t.Fatalf("contract observation=%+v", input)
+	}
+
+	fake.relayHealthy = false
+	scheduler.enqueueContractObservation(context.Background())
+	if len(fake.created) != 1 {
+		t.Fatalf("unhealthy relay queued another observation: %d", len(fake.created))
+	}
+}
+
+func TestSchedulerEnqueuesTelemetryPullWithMinuteIdempotency(t *testing.T) {
+	fake := &fakeSchedulerStore{}
+	scheduler := &Scheduler{store: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time {
+		return time.Date(2026, 8, 16, 12, 44, 29, 0, time.UTC)
+	}}
+	scheduler.enqueueTelemetryPull(context.Background())
+	if len(fake.created) != 1 {
+		t.Fatalf("created=%d", len(fake.created))
+	}
+	input := fake.created[0]
+	if input.Kind != "relay_telemetry_pull" || input.IdempotencyKey != "scheduled-relay-telemetry:20260816T1244Z" {
+		t.Fatalf("telemetry pull=%+v", input)
 	}
 }

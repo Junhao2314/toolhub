@@ -38,7 +38,9 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-var controlOperationKinds = []string{"skill_import", "update_check", "refresh", "backup_gc"}
+var controlOperationKinds = []string{"skill_import", "update_check", "refresh", "backup_gc", "contract_observe", "relay_telemetry_pull"}
+
+var coalescedControlOperationKinds = map[string]bool{"contract_observe": true, "relay_telemetry_pull": true}
 
 func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput) (domain.Operation, error) {
 	dependencyIdentity := make(map[string]any, len(input.TargetDependencies))
@@ -72,6 +74,17 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 			return domain.Operation{}, err
 		}
 	}
+	if coalescedControlOperationKinds[input.Kind] && len(input.TargetIDs) == 0 {
+		var existingID string
+		err := tx.QueryRow(ctx, `SELECT id::text FROM operations WHERE kind=$1 AND status IN ('queued','running') ORDER BY created_at LIMIT 1 FOR UPDATE`, input.Kind).Scan(&existingID)
+		if err == nil {
+			_ = tx.Rollback(ctx)
+			return s.Operation(ctx, existingID)
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return domain.Operation{}, err
+		}
+	}
 	if err := lockActiveTargets(ctx, tx, input.TargetIDs); err != nil {
 		return domain.Operation{}, err
 	}
@@ -87,6 +100,15 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 		source = input.SourceID
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,$2,'queued',$3,$4,$5,$6)`, id, input.Kind, source, nullableText(input.IdempotencyKey), requestHash, jsonText(metadataJSON)); err != nil {
+		var pgErr *pgconn.PgError
+		if coalescedControlOperationKinds[input.Kind] && errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "operations_governance_control_one_active_idx" {
+			_ = tx.Rollback(ctx)
+			var existingID string
+			if queryErr := s.pool.QueryRow(ctx, `SELECT id::text FROM operations WHERE kind=$1 AND status IN ('queued','running') ORDER BY created_at LIMIT 1`, input.Kind).Scan(&existingID); queryErr != nil {
+				return domain.Operation{}, queryErr
+			}
+			return s.Operation(ctx, existingID)
+		}
 		return domain.Operation{}, err
 	}
 	targetRowIDs := make(map[string]string)
@@ -102,7 +124,8 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 		if dependencyID := targetRowIDs[dependencies[targetID]]; dependencyID != "" {
 			dependency = dependencyID
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,request) VALUES($1,$2,$3,$4,$5)`, targetRowIDs[targetID], id, targetID, dependency, jsonText(requestJSON)); err != nil {
+		governancePending := input.Kind == "relay_config_apply" || input.Kind == "policy_apply"
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,request,governance_finalization_pending) VALUES($1,$2,$3,$4,$5,$6)`, targetRowIDs[targetID], id, targetID, dependency, jsonText(requestJSON), governancePending); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				return domain.Operation{}, ErrOperationActive
@@ -657,10 +680,24 @@ func (s *Store) RunningOperationTargets(ctx context.Context) ([]RunningOperation
 }
 
 func (s *Store) PendingProfileApplyFinalizations(ctx context.Context) ([]domain.Operation, error) {
+	operations, err := s.PendingGovernanceFinalizations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := operations[:0]
+	for _, operation := range operations {
+		if operation.Kind == "apply" {
+			result = append(result, operation)
+		}
+	}
+	return result, nil
+}
+
+func (s *Store) PendingGovernanceFinalizations(ctx context.Context) ([]domain.Operation, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT o.id::text,o.kind,o.status,coalesce(o.source_id::text,''),coalesce(o.idempotency_key,''),o.metadata,o.error_code,o.error_reason,o.cancel_requested,o.created_at,o.started_at,o.finished_at,o.updated_at
 		FROM operations o
-		WHERE o.kind='apply'
+		WHERE o.kind IN ('apply','relay_config_apply','policy_apply')
 		  AND o.status='running'
 		  AND EXISTS (
 		      SELECT 1 FROM operation_targets pending

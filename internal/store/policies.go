@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/policy"
 )
@@ -164,7 +165,22 @@ func (s *Store) FinalizeGlobalPolicyApply(ctx context.Context, operationID, revi
 	if !exists {
 		return ErrNotFound
 	}
+	var manifestJSON []byte
+	if err := tx.QueryRow(ctx, `SELECT request->'manifest' FROM operation_targets WHERE operation_id=$1`, operationID).Scan(&manifestJSON); err != nil {
+		return err
+	}
+	manifest, err := bridgeprotocol.DecodeManifest(manifestJSON, true)
+	if err != nil || manifest.RelayGovernance == nil {
+		return ErrConflict
+	}
+	operationTargetID, targetID, relayManifest, err := relayOperationManifestTx(ctx, tx, operationID, manifest.RelayGovernance.RelayConfigurationRevisionID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE global_policy_state SET applied_revision_id=$1,updated_at=now() WHERE singleton`, revisionID); err != nil {
+		return err
+	}
+	if err := pinRelayDesiredSnapshotTx(ctx, tx, targetID, manifest.RelayGovernance.RelayConfigurationRevisionID, operationTargetID, relayManifest); err != nil {
 		return err
 	}
 	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "global_policy_apply"); err != nil {

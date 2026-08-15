@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/domain"
 )
 
@@ -51,6 +52,12 @@ type ContractObservationInput struct {
 type ContractObservationResult struct {
 	Revision domain.ObservedContractRevision
 	Statuses map[string]string
+}
+
+type RelayContractObservationResult struct {
+	Observed int
+	Changed  int
+	Paused   int
 }
 
 type normalizedObservedTool struct {
@@ -132,6 +139,98 @@ func (s *Store) ObserveContracts(ctx context.Context, input ContractObservationI
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ContractObservationResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Store) ObserveRelayContracts(ctx context.Context, response bridgeprotocol.ContractObservationResponse) (RelayContractObservationResult, error) {
+	if uuid.Validate(response.RelayConfigurationRevisionID) != nil || len(response.Servers) > 500 {
+		return RelayContractObservationResult{}, ErrConflict
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return RelayContractObservationResult{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var appliedRevisionID string
+	if err := tx.QueryRow(ctx, `SELECT applied_revision_id::text FROM relay_configuration_state WHERE singleton FOR SHARE`).Scan(&appliedRevisionID); err != nil {
+		return RelayContractObservationResult{}, err
+	}
+	if appliedRevisionID != response.RelayConfigurationRevisionID {
+		return RelayContractObservationResult{}, ErrConflict
+	}
+	type expectedServer struct{ name, revisionID string }
+	expected := map[string]expectedServer{}
+	rows, err := tx.Query(ctx, `SELECT member.server_id::text,server.name,member.mcp_revision_id::text FROM relay_configuration_revision_mcp_servers member JOIN mcp_servers server ON server.id=member.server_id WHERE member.relay_configuration_revision_id=$1 ORDER BY member.position`, appliedRevisionID)
+	if err != nil {
+		return RelayContractObservationResult{}, err
+	}
+	for rows.Next() {
+		var serverID string
+		var item expectedServer
+		if err := rows.Scan(&serverID, &item.name, &item.revisionID); err != nil {
+			rows.Close()
+			return RelayContractObservationResult{}, err
+		}
+		expected[serverID] = item
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return RelayContractObservationResult{}, err
+	}
+	rows.Close()
+	if len(expected) != len(response.Servers) {
+		return RelayContractObservationResult{}, ErrConflict
+	}
+
+	result := RelayContractObservationResult{}
+	seen := map[string]struct{}{}
+	for _, observed := range response.Servers {
+		server, ok := expected[observed.ServerID]
+		if !ok || server.name != observed.ServerName || server.revisionID != observed.MCPConfigRevisionID {
+			return RelayContractObservationResult{}, ErrConflict
+		}
+		if _, duplicate := seen[observed.ServerID]; duplicate {
+			return RelayContractObservationResult{}, ErrConflict
+		}
+		seen[observed.ServerID] = struct{}{}
+		tools := make([]ObservedToolInput, 0, len(observed.Tools))
+		for _, tool := range observed.Tools {
+			inputSchema, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				return RelayContractObservationResult{}, err
+			}
+			outputSchema, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				return RelayContractObservationResult{}, err
+			}
+			presentation := map[string]any{}
+			if tool.Title != nil {
+				presentation["title"] = *tool.Title
+			}
+			if tool.Description != nil {
+				presentation["description"] = *tool.Description
+			}
+			readOnly, _ := tool.Annotations["readOnlyHint"].(bool)
+			mutating, _ := tool.Annotations["mutatingHint"].(bool)
+			tools = append(tools, ObservedToolInput{Name: tool.Name, InputSchema: inputSchema, OutputSchema: outputSchema, Annotations: cloneObject(tool.Annotations), Presentation: presentation, ReadOnlyHint: readOnly, Mutating: mutating})
+		}
+		observation, err := s.ObserveContractsTx(ctx, tx, ContractObservationInput{ServerID: observed.ServerID, Tools: tools})
+		if err != nil {
+			return RelayContractObservationResult{}, err
+		}
+		result.Observed++
+		for _, status := range observation.Statuses {
+			if status != ContractToolUnchanged {
+				result.Changed++
+			}
+			if status == ContractToolPausedIncompatible {
+				result.Paused++
+			}
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RelayContractObservationResult{}, err
 	}
 	return result, nil
 }

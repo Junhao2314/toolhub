@@ -105,6 +105,8 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 		targetRequest = map[string]any{"manifest": manifest}
 		if kind == "relay_config_apply" {
 			targetRequest = map[string]any{"manifest": manifest, "sourceKind": "relay_config_apply", "sourceId": metadata["revisionId"]}
+		} else if kind == "policy_apply" {
+			targetRequest = map[string]any{"manifest": manifest, "sourceKind": "relay_config_apply", "sourceId": manifest.RelayGovernance.RelayConfigurationRevisionID}
 		}
 	}
 	id := uuid.NewString()

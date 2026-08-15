@@ -1,11 +1,14 @@
 package worker
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
+	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/store"
 )
 
 func TestProjectScanHealthDetectsPinnedDriftAndIgnoresUnmanagedExtras(t *testing.T) {
@@ -124,6 +127,67 @@ func TestRuntimeInventoryPayloadUsesPostCommitScan(t *testing.T) {
 	}
 	if payload["relay"] != relay {
 		t.Fatalf("relay=%#v", payload["relay"])
+	}
+}
+
+func TestGovernanceCommitKindsUseTypedApplyAndPersistReloadEvidence(t *testing.T) {
+	routingHash := strings.Repeat("a", 64)
+	manifest := bridgeprotocol.DesiredManifest{
+		SchemaVersion: bridgeprotocol.ManifestSchemaVersionV2,
+		RelayGovernance: &bridgeprotocol.RelayGovernanceManifest{
+			RoutingHash: routingHash,
+		},
+	}
+	request, err := json.Marshal(map[string]any{"manifest": manifest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operationKind := range []string{"apply", "relay_config_apply", "policy_apply"} {
+		if kind := bridgeCommitKind(operationKind); kind != "apply" {
+			t.Fatalf("operation %s used Bridge kind %s", operationKind, kind)
+		}
+		item := store.WorkItem{
+			Operation:       domain.Operation{Kind: operationKind},
+			OperationTarget: domain.OperationTarget{Request: request},
+			Target:          domain.Target{Runtime: domain.RuntimeSharedRelay},
+		}
+		persisted := persistedTargetResult(item, bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, Manifest: &manifest})
+		body, err := json.Marshal(persisted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(body, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded["routingReloaded"] != true || decoded["routingHash"] != routingHash {
+			t.Fatalf("operation %s evidence=%s", operationKind, body)
+		}
+	}
+}
+
+func TestGovernanceApplyDefersDesiredSnapshotToFinalizer(t *testing.T) {
+	tests := []struct {
+		name       string
+		kind       string
+		sourceKind string
+		runtime    string
+		want       bool
+	}{
+		{name: "profile skill apply", kind: "apply", sourceKind: "profile_apply", runtime: domain.RuntimeClaude, want: true},
+		{name: "profile relay apply", kind: "apply", sourceKind: "profile_apply", runtime: domain.RuntimeSharedRelay, want: true},
+		{name: "relay configuration apply", kind: "relay_config_apply", sourceKind: "relay_config_apply", runtime: domain.RuntimeSharedRelay, want: true},
+		{name: "global policy apply", kind: "policy_apply", sourceKind: "relay_config_apply", runtime: domain.RuntimeSharedRelay, want: true},
+		{name: "target edit", kind: "edit", sourceKind: "target_edit", runtime: domain.RuntimeSharedRelay, want: false},
+		{name: "restore", kind: "restore", sourceKind: "restore", runtime: domain.RuntimeSharedRelay, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			item := store.WorkItem{Operation: domain.Operation{Kind: test.kind}, Target: domain.Target{Runtime: test.runtime}}
+			if got := desiredSnapshotOwnedByFinalizer(item, test.sourceKind); got != test.want {
+				t.Fatalf("desiredSnapshotOwnedByFinalizer(%s, %s, %s)=%v, want %v", test.kind, test.sourceKind, test.runtime, got, test.want)
+			}
+		})
 	}
 }
 

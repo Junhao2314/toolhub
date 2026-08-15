@@ -14,6 +14,7 @@ import (
 type schedulerStore interface {
 	Settings(context.Context) (domain.Settings, error)
 	EnqueueReconciles(context.Context) (int, error)
+	RelayGovernanceHealthy(context.Context) (bool, error)
 	CreateOperation(context.Context, store.CreateOperationInput) (domain.Operation, error)
 }
 
@@ -24,10 +25,12 @@ type Scheduler struct {
 	reconcileEvery  time.Duration
 	settingsRefresh time.Duration
 	backupGCEvery   time.Duration
+	contractEvery   time.Duration
+	telemetryEvery  time.Duration
 }
 
 func NewScheduler(st *store.Store, logger *slog.Logger) *Scheduler {
-	return &Scheduler{store: st, logger: logger, now: time.Now, reconcileEvery: 5 * time.Minute, settingsRefresh: 30 * time.Second, backupGCEvery: 24 * time.Hour}
+	return &Scheduler{store: st, logger: logger, now: time.Now, reconcileEvery: 5 * time.Minute, settingsRefresh: 30 * time.Second, backupGCEvery: 24 * time.Hour, contractEvery: 30 * time.Minute, telemetryEvery: time.Minute}
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
@@ -37,11 +40,17 @@ func (s *Scheduler) Run(ctx context.Context) {
 	defer settingsRefresh.Stop()
 	backupGC := time.NewTicker(s.backupGCEvery)
 	defer backupGC.Stop()
+	contractObservation := time.NewTicker(s.contractEvery)
+	defer contractObservation.Stop()
+	telemetryPull := time.NewTicker(s.telemetryEvery)
+	defer telemetryPull.Stop()
 	updates := cron.New()
 	var updateEntry cron.EntryID
 	var updateSignature string
 	s.reloadUpdateSchedule(ctx, updates, &updateEntry, &updateSignature)
 	s.enqueueBackupGC(ctx)
+	s.enqueueContractObservation(ctx)
+	s.enqueueTelemetryPull(ctx)
 	updates.Start()
 	defer updates.Stop()
 	for {
@@ -58,7 +67,45 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.reloadUpdateSchedule(ctx, updates, &updateEntry, &updateSignature)
 		case <-backupGC.C:
 			s.enqueueBackupGC(ctx)
+		case <-contractObservation.C:
+			s.enqueueContractObservation(ctx)
+		case <-telemetryPull.C:
+			s.enqueueTelemetryPull(ctx)
 		}
+	}
+}
+
+func (s *Scheduler) enqueueContractObservation(ctx context.Context) {
+	healthy, err := s.store.RelayGovernanceHealthy(ctx)
+	if err != nil {
+		s.logger.Error("check relay health for contract observation", "error", err)
+		return
+	}
+	if !healthy {
+		return
+	}
+	bucket := s.now().UTC().Truncate(30 * time.Minute)
+	_, err = s.store.CreateOperation(ctx, store.CreateOperationInput{
+		Kind:           "contract_observe",
+		IdempotencyKey: "scheduled-contract-observe:" + bucket.Format("20060102T1504Z"),
+		Request:        map[string]any{"scheduled": true, "scheduledAt": bucket},
+		Metadata:       map[string]any{"scheduled": true, "scheduledAt": bucket},
+	})
+	if err != nil {
+		s.logger.Error("enqueue relay contract observation", "error", err)
+	}
+}
+
+func (s *Scheduler) enqueueTelemetryPull(ctx context.Context) {
+	scheduledAt := s.now().UTC().Truncate(time.Minute)
+	_, err := s.store.CreateOperation(ctx, store.CreateOperationInput{
+		Kind:           "relay_telemetry_pull",
+		IdempotencyKey: "scheduled-relay-telemetry:" + scheduledAt.Format("20060102T1504Z"),
+		Request:        map[string]any{"scheduled": true, "scheduledAt": scheduledAt},
+		Metadata:       map[string]any{"scheduled": true, "scheduledAt": scheduledAt},
+	})
+	if err != nil {
+		s.logger.Error("enqueue relay telemetry pull", "error", err)
 	}
 }
 

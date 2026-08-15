@@ -3,9 +3,12 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 )
 
 func TestCanonicalContractIgnoresToolAndPresentationOrder(t *testing.T) {
@@ -157,6 +160,62 @@ func TestObserveContractsRejectsPayloadFields(t *testing.T) {
 	if err == nil {
 		t.Fatal("payload-like observation was accepted")
 	}
+}
+
+func TestObserveRelayContractsIsAtomicAndBoundToAppliedConfiguration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, _, _, relayRevisionID := setupPublishedRelayProfile(t, st, "relay-observe")
+	before := contractRevisionCount(t, st, server.ID)
+	response := bridgeprotocol.ContractObservationResponse{
+		RelayConfigurationRevisionID: relayRevisionID,
+		Servers: []bridgeprotocol.ContractServerObservation{{
+			ServerID: server.ID, ServerName: server.Name, MCPConfigRevisionID: server.CurrentRevisionID,
+			Tools: []bridgeprotocol.ContractToolDTO{{
+				Name: "read_item", RuntimeName: "read_item", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "integer"}}}, OutputSchema: map[string]any{}, Annotations: map[string]any{"readOnlyHint": true},
+			}},
+		}},
+	}
+	invalid := response
+	invalid.Servers = append(append([]bridgeprotocol.ContractServerObservation(nil), response.Servers...), bridgeprotocol.ContractServerObservation{
+		ServerID: uuid.NewString(), ServerName: "unknown", MCPConfigRevisionID: uuid.NewString(), Tools: []bridgeprotocol.ContractToolDTO{},
+	})
+	if _, err := st.ObserveRelayContracts(ctx, invalid); !errors.Is(err, ErrConflict) {
+		t.Fatalf("invalid relay observation returned %v", err)
+	}
+	if got := contractRevisionCount(t, st, server.ID); got != before {
+		t.Fatalf("invalid batch persisted %d revisions, before=%d", got, before)
+	}
+
+	result, err := st.ObserveRelayContracts(ctx, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Observed != 1 || result.Paused != 1 {
+		t.Fatalf("relay observation result=%+v", result)
+	}
+	var reviewState string
+	if err := st.pool.QueryRow(ctx, `SELECT review_state FROM mcp_contract_state WHERE server_id=$1`, server.ID).Scan(&reviewState); err != nil {
+		t.Fatal(err)
+	}
+	if reviewState != "paused" {
+		t.Fatalf("review state=%q", reviewState)
+	}
+
+	stale := response
+	stale.RelayConfigurationRevisionID = uuid.NewString()
+	if _, err := st.ObserveRelayContracts(ctx, stale); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale relay observation returned %v", err)
+	}
+}
+
+func contractRevisionCount(t *testing.T, st *Store, serverID string) int {
+	t.Helper()
+	var count int
+	if err := st.pool.QueryRow(context.Background(), `SELECT count(*) FROM mcp_contract_revisions WHERE server_id=$1`, serverID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func TestSuspectedRenameConfirmationInheritsExplicitGovernance(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/policy"
 )
 
@@ -37,6 +38,15 @@ func TestSaveGlobalPolicyOnlyMovesDraftPointerUntilApply(t *testing.T) {
 	}
 	if current != 2 || applied != 2 {
 		t.Fatalf("applied policy pointers=%d/%d", current, applied)
+	}
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	_, manifest, err := st.ActiveDesiredManifest(ctx, relayTarget.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var routing bridgeprotocol.RoutingBundle
+	if manifest.RelayGovernance == nil || bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &routing) != nil || routing.GlobalPolicyRevisionID != created.ID {
+		t.Fatalf("active desired routing did not pin applied policy %s: %+v", created.ID, manifest.RelayGovernance)
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE global_policy_revisions SET reviewed_read_only='deny' WHERE id=$1`, created.ID); err == nil {
 		t.Fatal("global policy revision accepted mutation")

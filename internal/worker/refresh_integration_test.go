@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/url"
@@ -21,6 +22,31 @@ import (
 	"github.com/Junhao2314/toolhub/internal/security"
 	"github.com/Junhao2314/toolhub/internal/store"
 )
+
+type governanceWorkerBridge struct {
+	workerBridge
+	contracts bridgeprotocol.ContractObservationResponse
+	drain     bridgeprotocol.ObservationDrainResponse
+	gc        bridgeprotocol.BackupGCResponse
+	operation bridgeprotocol.Operation
+	err       error
+}
+
+func (fake *governanceWorkerBridge) ObserveRelayContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error) {
+	return fake.contracts, fake.err
+}
+
+func (fake *governanceWorkerBridge) DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error) {
+	return fake.drain, fake.err
+}
+
+func (fake *governanceWorkerBridge) GCBackups(context.Context, string, bridgeprotocol.BackupGCRequest) (bridgeprotocol.BackupGCResponse, error) {
+	return fake.gc, fake.err
+}
+
+func (fake *governanceWorkerBridge) Operation(context.Context, string) (bridgeprotocol.Operation, error) {
+	return fake.operation, fake.err
+}
 
 func TestFailedNodeRefreshPreservesActiveTargetsIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -60,6 +86,112 @@ func TestFailedNodeRefreshPreservesActiveTargetsIntegration(t *testing.T) {
 	if status != "online" || archived {
 		t.Fatalf("failed refresh changed node status=%q archived=%v", status, archived)
 	}
+}
+
+func TestContractObserveControlIngestsNormalizedRelayBatchIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	server, _, relayRevisionID := setupWorkerTelemetryFixture(t, st, "contract-control")
+	fake := &governanceWorkerBridge{contracts: bridgeprotocol.ContractObservationResponse{
+		RelayConfigurationRevisionID: relayRevisionID,
+		Servers: []bridgeprotocol.ContractServerObservation{{
+			ServerID: server.ID, ServerName: server.Name, MCPConfigRevisionID: server.CurrentRevisionID,
+			Tools: []bridgeprotocol.ContractToolDTO{{Name: "read_item", RuntimeName: "read_item", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "integer"}}}, OutputSchema: map[string]any{}, Annotations: map[string]any{"readOnlyHint": true}}},
+		}},
+	}}
+	w := &Worker{store: st, bridge: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now}
+	result, apiErr := w.executeControl(ctx, domain.Operation{ID: uuid.NewString(), Kind: "contract_observe"})
+	if apiErr != nil || result["observed"] != 1 || result["paused"] != 1 {
+		t.Fatalf("contract control result=%v error=%+v", result, apiErr)
+	}
+	var reviewState string
+	if err := st.Pool().QueryRow(ctx, `SELECT review_state FROM mcp_contract_state WHERE server_id=$1`, server.ID).Scan(&reviewState); err != nil {
+		t.Fatal(err)
+	}
+	if reviewState != "paused" {
+		t.Fatalf("review state=%q", reviewState)
+	}
+}
+
+func TestTelemetryPullControlAdvancesCursorAndAggregatesIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	server, profile, _ := setupWorkerTelemetryFixture(t, st, "telemetry-control")
+	var toolID string
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM mcp_tools WHERE server_id=$1 AND name='read_item'`, server.ID).Scan(&toolID); err != nil {
+		t.Fatal(err)
+	}
+	bootID := uuid.NewString()
+	fake := &governanceWorkerBridge{drain: bridgeprotocol.ObservationDrainResponse{
+		BootID: bootID, NextSequence: 1,
+		Items: []bridgeprotocol.Observation{{
+			BootID: bootID, Sequence: 1, ObservedAt: 1_786_838_400, MinuteBucket: "2026-08-16T00:00:00Z",
+			ProfileID: profile.ID, ProfileRevisionID: profile.CurrentRevisionID, ServerID: server.ID, ToolID: toolID,
+			Decision: "allow", Outcome: "executed", ErrorClass: "none", DurationBucket: "lt_100ms", ReasonCodes: []string{"reviewed-read-only"},
+		}},
+	}}
+	w := &Worker{store: st, bridge: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now}
+	result, apiErr := w.executeControl(ctx, domain.Operation{ID: uuid.NewString(), Kind: "relay_telemetry_pull"})
+	if apiErr != nil || result["accepted"] != 1 || result["nextSequence"] != int64(1) {
+		t.Fatalf("telemetry control result=%v error=%+v", result, apiErr)
+	}
+	var calls int64
+	if err := st.Pool().QueryRow(ctx, `SELECT coalesce(sum(call_count),0) FROM mcp_daily_aggregates`).Scan(&calls); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("telemetry calls=%d", calls)
+	}
+}
+
+func TestBackupGCAlsoDeletesExpiredTelemetryIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	now := time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC)
+	if _, err := st.Pool().Exec(ctx, `INSERT INTO mcp_daily_aggregates(day,client_kind,decision,outcome,call_count,error_count,duration_bucket) VALUES($1,'shared','allow','executed',1,0,'lt_10ms')`, now.AddDate(0, 0, -31)); err != nil {
+		t.Fatal(err)
+	}
+	fake := &governanceWorkerBridge{gc: bridgeprotocol.BackupGCResponse{RemovedBackupIDs: []string{}}}
+	w := &Worker{store: st, bridge: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time { return now }}
+	result, apiErr := w.executeControl(ctx, domain.Operation{ID: uuid.NewString(), Kind: "backup_gc"})
+	if apiErr != nil || result["telemetryRowsDeleted"] != int64(1) {
+		t.Fatalf("backup GC result=%v error=%+v", result, apiErr)
+	}
+}
+
+func setupWorkerTelemetryFixture(t *testing.T, st *store.Store, suffix string) (domain.MCPServer, domain.Profile, string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.BootstrapEnvironment(ctx, "worker-"+suffix, "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	server, err := st.SaveMCPServer(ctx, "", store.MCPInput{Name: "worker-" + suffix, Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := st.ObserveContracts(ctx, store.ContractObservationInput{ServerID: server.ID, Tools: []store.ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, contract.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	relay, err := st.SaveRelayConfiguration(ctx, store.RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1 WHERE singleton`, relay.ID); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), store.ProfileInput{
+		Name: "worker-" + suffix, ClientKind: "claude", Category: "coding",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []store.ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: contract.Revision.ID, VisibilityMode: "all_accepted"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server, profile, relay.ID
 }
 
 func TestProfileApplyFinalizationFailureIsPersistedIntegration(t *testing.T) {
@@ -110,6 +242,122 @@ func TestRecoverFinalizesCompletedProfileApplyIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertRecoveredProfileApply(t, st, fixture)
+	if err := w.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	assertRecoveredProfileApply(t, st, fixture)
+}
+
+func TestRecoverFinalizesRelayAndPolicyApplyExactlyOnceIntegration(t *testing.T) {
+	for _, kind := range []string{"relay_config_apply", "policy_apply"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			st := newWorkerIntegrationStore(t)
+			server, profile, appliedRelayRevisionID := setupWorkerTelemetryFixture(t, st, "recover-"+kind)
+			var relayTargetID string
+			if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/shared-relay'`).Scan(&relayTargetID); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := st.ResolveProfileManifest(ctx, profile.ID, relayTargetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metadata := map[string]any{}
+			candidate := store.RoutingBundleCandidate{}
+			revisionID := ""
+			sourceRevisionID := appliedRelayRevisionID
+			switch kind {
+			case "relay_config_apply":
+				revision, err := st.SaveRelayConfiguration(ctx, store.RelayConfigurationInput{
+					MCPServerIDs:   []string{server.ID},
+					MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+					Metadata:       map[string]any{"recovery": uuid.NewString()},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				revisionID = revision.ID
+				sourceRevisionID = revision.ID
+				candidate.RelayConfigurationRevisionID = revision.ID
+				metadata = map[string]any{
+					"revisionId": revision.ID,
+					"expectedAppliedRelayConfigurationRevisionId": appliedRelayRevisionID,
+					"affectedProfileRevisions":                    map[string]string{},
+					"expectedPublishedProfileRevisions":           map[string]string{},
+				}
+			case "policy_apply":
+				var expectedPolicyRevisionID string
+				if err := st.Pool().QueryRow(ctx, `SELECT applied_revision_id::text FROM global_policy_state WHERE singleton`).Scan(&expectedPolicyRevisionID); err != nil {
+					t.Fatal(err)
+				}
+				revision, err := st.SaveGlobalPolicy(ctx, store.GlobalPolicyInput{ExplicitOverrides: map[string]string{"recovery": "deny"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				revisionID = revision.ID
+				candidate.GlobalPolicyRevisionID = revision.ID
+				metadata = map[string]any{"revisionId": revision.ID, "expectedAppliedGlobalPolicyRevisionId": expectedPolicyRevisionID}
+			}
+			bundle, routingHash, err := st.RenderCandidateRoutingBundle(ctx, candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			routingBody, canonicalHash, err := bundle.Canonical()
+			if err != nil || canonicalHash != routingHash {
+				t.Fatalf("canonical routing bundle hash=%s want=%s err=%v", canonicalHash, routingHash, err)
+			}
+			metadata["routingHash"] = routingHash
+			manifest.RelayGovernance = &bridgeprotocol.RelayGovernanceManifest{
+				RelayConfigurationRevisionID: bundle.RelayConfigurationRevisionID,
+				RelayConfigurationHash:       bundle.RelayConfigurationHash,
+				RoutingBundle:                routingBody,
+				RoutingHash:                  routingHash,
+			}
+			if err := manifest.Validate(true); err != nil {
+				t.Fatal(err)
+			}
+
+			operationID, operationTargetID := uuid.NewString(), uuid.NewString()
+			metadataJSON, _ := json.Marshal(metadata)
+			requestJSON, _ := json.Marshal(map[string]any{"manifest": manifest, "sourceKind": "relay_config_apply", "sourceId": sourceRevisionID})
+			resultJSON, _ := json.Marshal(map[string]any{"routingReloaded": true, "routingHash": routingHash})
+			if _, err := st.Pool().Exec(ctx, `INSERT INTO operations(id,kind,status,metadata) VALUES($1,$2,'running',$3::jsonb)`, operationID, kind, string(metadataJSON)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool().Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,request,result,finished_at,governance_finalization_pending) VALUES($1,$2,$3,'succeeded',$4::jsonb,$5::jsonb,now(),true)`, operationTargetID, operationID, relayTargetID, string(requestJSON), string(resultJSON)); err != nil {
+				t.Fatal(err)
+			}
+
+			w := &Worker{store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := w.Recover(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var operationStatus, appliedRevisionID string
+			var snapshots, pending int
+			if err := st.Pool().QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, operationID).Scan(&operationStatus); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "relay_config_apply" {
+				err = st.Pool().QueryRow(ctx, `SELECT applied_revision_id::text FROM relay_configuration_state WHERE singleton`).Scan(&appliedRevisionID)
+			} else {
+				err = st.Pool().QueryRow(ctx, `SELECT applied_revision_id::text FROM global_policy_state WHERE singleton`).Scan(&appliedRevisionID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM desired_snapshots WHERE source_operation_target_id=$1`, operationTargetID).Scan(&snapshots); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM operation_targets WHERE operation_id=$1 AND governance_finalization_pending`, operationID).Scan(&pending); err != nil {
+				t.Fatal(err)
+			}
+			if operationStatus != bridgeprotocol.OperationSucceeded || appliedRevisionID != revisionID || snapshots != 1 || pending != 0 {
+				t.Fatalf("recovered %s status=%s applied=%s snapshots=%d pending=%d", kind, operationStatus, appliedRevisionID, snapshots, pending)
+			}
+		})
+	}
 }
 
 func TestRecoverContinuesAfterPersistedProfileApplyFinalizationFailureIntegration(t *testing.T) {
@@ -150,6 +398,65 @@ func TestRecoverContinuesAfterPersistedProfileApplyFinalizationFailureIntegratio
 	assertRecoveredProfileApply(t, st, validFixture)
 }
 
+func TestRecoveryLeavesRelayQueuedAfterSkillSucceededIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	if err := st.BootstrapEnvironment(ctx, "dependency-recovery-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	waiting := createProfileApplyWaitingForRelay(t, st, "claude-dependency-recovery")
+	w := &Worker{store: st, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := w.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	relayItem, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relayItem.Operation.ID != waiting.operation.ID || relayItem.Target.Runtime != domain.RuntimeSharedRelay {
+		t.Fatalf("recovered target operation=%s runtime=%s", relayItem.Operation.ID, relayItem.Target.Runtime)
+	}
+	var snapshots int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM desired_snapshots WHERE source_operation_target_id=$1`, waiting.skillTargetRowID).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 0 {
+		t.Fatalf("dependency-only recovery pinned %d snapshots before relay success", snapshots)
+	}
+}
+
+func TestRecoveryRequeuesBridgeTerminalPostgresRunningTargetIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newWorkerIntegrationStore(t)
+	if err := st.BootstrapEnvironment(ctx, "bridge-terminal-recovery-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	var targetID string
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/claude'`).Scan(&targetID); err != nil {
+		t.Fatal(err)
+	}
+	operationID, operationTargetID := uuid.NewString(), uuid.NewString()
+	if _, err := st.Pool().Exec(ctx, `INSERT INTO operations(id,kind,status,metadata,started_at) VALUES($1,'edit','running','{}',now())`, operationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool().Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,status,bridge_operation_id,started_at) VALUES($1,$2,$3,'running',$4,now())`, operationTargetID, operationID, targetID, "bridge-terminal-operation"); err != nil {
+		t.Fatal(err)
+	}
+	fake := &governanceWorkerBridge{operation: bridgeprotocol.Operation{ID: "bridge-terminal-operation", Status: bridgeprotocol.OperationSucceeded}}
+	w := &Worker{store: st, bridge: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := w.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var operationStatus, targetStatus string
+	var attempt int
+	if err := st.Pool().QueryRow(ctx, `SELECT o.status,ot.status,ot.attempt FROM operations o JOIN operation_targets ot ON ot.operation_id=o.id WHERE ot.id=$1`, operationTargetID).Scan(&operationStatus, &targetStatus, &attempt); err != nil {
+		t.Fatal(err)
+	}
+	if operationStatus != bridgeprotocol.OperationQueued || targetStatus != bridgeprotocol.OperationQueued || attempt != 2 {
+		t.Fatalf("recovered operation=%s target=%s attempt=%d", operationStatus, targetStatus, attempt)
+	}
+}
+
 type completedProfileApplyFixture struct {
 	operation        domain.Operation
 	profile          domain.Profile
@@ -157,7 +464,37 @@ type completedProfileApplyFixture struct {
 	relayTargetRowID string
 }
 
+type waitingProfileApplyFixture struct {
+	operation        domain.Operation
+	profile          domain.Profile
+	skillTargetRowID string
+}
+
 func createCompletedProfileApplyForRecovery(t *testing.T, st *store.Store, name string) completedProfileApplyFixture {
+	t.Helper()
+	waiting := createProfileApplyWaitingForRelay(t, st, name)
+	ctx := context.Background()
+	relayItem, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Manifest bridgeprotocol.DesiredManifest `json:"manifest"`
+	}
+	if err := json.Unmarshal(relayItem.OperationTarget.Request, &request); err != nil || request.Manifest.RelayGovernance == nil {
+		t.Fatalf("decode relay recovery request: %v", err)
+	}
+	if err := st.FinishOperationTarget(ctx, relayItem.OperationTarget.ID, bridgeprotocol.OperationSucceeded, map[string]any{
+		"routingReloaded": true,
+		"routingHash":     request.Manifest.RelayGovernance.RoutingHash,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	return completedProfileApplyFixture{operation: waiting.operation, profile: waiting.profile, skillTargetRowID: waiting.skillTargetRowID, relayTargetRowID: relayItem.OperationTarget.ID}
+}
+
+func createProfileApplyWaitingForRelay(t *testing.T, st *store.Store, name string) waitingProfileApplyFixture {
 	t.Helper()
 	ctx := context.Background()
 	profileID := uuid.NewString()
@@ -199,18 +536,7 @@ func createCompletedProfileApplyForRecovery(t *testing.T, st *store.Store, name 
 	if err := st.FinishOperationTarget(ctx, skillItem.OperationTarget.ID, bridgeprotocol.OperationSucceeded, bridgeprotocol.TargetResult{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	relayItem, err := st.ClaimOperationTarget(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.FinishOperationTarget(ctx, relayItem.OperationTarget.ID, bridgeprotocol.OperationSucceeded, map[string]any{
-		"routingReloaded": true,
-		"routingHash":     relayManifest.RelayGovernance.RoutingHash,
-	}, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	return completedProfileApplyFixture{operation: operation, profile: profile, skillTargetRowID: skillItem.OperationTarget.ID, relayTargetRowID: relayItem.OperationTarget.ID}
+	return waitingProfileApplyFixture{operation: operation, profile: profile, skillTargetRowID: skillItem.OperationTarget.ID}
 }
 
 func assertRecoveredProfileApply(t *testing.T, st *store.Store, fixture completedProfileApplyFixture) {

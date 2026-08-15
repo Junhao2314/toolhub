@@ -209,7 +209,7 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 	if err := upgrade.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 9 {
+	if versions != 10 {
 		t.Fatalf("migration reran or skipped: versions=%d", versions)
 	}
 }
@@ -373,8 +373,8 @@ func assertGovernanceMigrationState(t *testing.T, st *Store) {
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 9 {
-		t.Fatalf("migration versions=%d want 9", versions)
+	if versions != 10 {
+		t.Fatalf("migration versions=%d want 10", versions)
 	}
 	var generation string
 	if err := st.pool.QueryRow(ctx, `SELECT value FROM app_meta WHERE key='schema_generation'`).Scan(&generation); err != nil {

@@ -21,13 +21,29 @@ import (
 
 type Worker struct {
 	store  *store.Store
-	bridge *bridgeclient.Client
+	bridge workerBridge
 	market *market.Multi
 	logger *slog.Logger
+	now    func() time.Time
+}
+
+type workerBridge interface {
+	RefreshNodes(context.Context, string) (bridgeprotocol.RefreshNodesResponse, error)
+	Scan(context.Context, string, bridgeprotocol.ScanRequest) (bridgeprotocol.ScanResponse, error)
+	ExportLocalSkill(context.Context, bridgeprotocol.LocalSkillExportRequest) (bridgeprotocol.LocalSkillExportResponse, error)
+	ExportLocalSkillBatch(context.Context, bridgeprotocol.LocalSkillBatchExportRequest) (bridgeprotocol.LocalSkillBatchExportResponse, error)
+	CaptureLocalMCP(context.Context, bridgeprotocol.LocalMCPCaptureRequest) (bridgeprotocol.LocalMCPCaptureResponse, error)
+	Commit(context.Context, string, string, bridgeprotocol.CommitRequest) (bridgeprotocol.TargetResult, error)
+	Reconcile(context.Context, string, bridgeprotocol.ReconcileRequest) (bridgeprotocol.TargetResult, error)
+	Relay(context.Context, string, string, bridgeprotocol.RelayActionRequest) (bridgeprotocol.RelayStatus, error)
+	ObserveRelayContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error)
+	DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error)
+	GCBackups(context.Context, string, bridgeprotocol.BackupGCRequest) (bridgeprotocol.BackupGCResponse, error)
+	Operation(context.Context, string) (bridgeprotocol.Operation, error)
 }
 
 func New(st *store.Store, bridge *bridgeclient.Client, marketClient *market.Multi, logger *slog.Logger) *Worker {
-	return &Worker{store: st, bridge: bridge, market: marketClient, logger: logger}
+	return &Worker{store: st, bridge: bridge, market: marketClient, logger: logger, now: time.Now}
 }
 
 // Recover requeues interrupted control work and waits for each durable Bridge
@@ -76,18 +92,18 @@ func (w *Worker) Recover(ctx context.Context) error {
 			return fmt.Errorf("requeue recovered operation target %s: %w", item.ID, err)
 		}
 	}
-	pendingFinalizations, err := w.store.PendingProfileApplyFinalizations(ctx)
+	pendingFinalizations, err := w.store.PendingGovernanceFinalizations(ctx)
 	if err != nil {
 		return fmt.Errorf("list pending Profile Apply finalizations: %w", err)
 	}
 	for _, operation := range pendingFinalizations {
-		if err := w.finalizeProfileApplyOperation(ctx, operation); err != nil {
+		if err := w.finalizeGovernanceOperation(ctx, operation); err != nil {
 			var persisted *persistedGovernanceFinalizationError
 			if errors.As(err, &persisted) {
 				w.logger.Warn("recovered Profile Apply finalization failed safely", "operationId", operation.ID, "error", persisted.Unwrap())
 				continue
 			}
-			return fmt.Errorf("recover Profile Apply finalization %s: %w", operation.ID, err)
+			return fmt.Errorf("recover governance finalization %s: %w", operation.ID, err)
 		}
 	}
 	return nil
@@ -201,6 +217,10 @@ func (w *Worker) executeControl(ctx context.Context, operation domain.Operation)
 		}
 		return map[string]any{"discovered": len(result.Nodes), "online": online}, nil
 	case "backup_gc":
+		telemetryDeleted, err := w.store.DeleteExpiredTelemetry(ctx, w.currentTime())
+		if err != nil {
+			return nil, publicError(err)
+		}
 		result, err := w.bridge.GCBackups(ctx, "backup-gc-"+operation.ID, bridgeprotocol.BackupGCRequest{MaxAgeDays: 30, MaxPerTarget: 10})
 		if err != nil {
 			return nil, publicError(err)
@@ -209,7 +229,35 @@ func (w *Worker) executeControl(ctx context.Context, operation domain.Operation)
 		if err != nil {
 			return nil, publicError(err)
 		}
-		return map[string]any{"removed": result.Removed, "catalogRowsDeleted": deleted, "maxAgeDays": 30, "maxPerTarget": 10}, nil
+		return map[string]any{"removed": result.Removed, "catalogRowsDeleted": deleted, "telemetryRowsDeleted": telemetryDeleted, "maxAgeDays": 30, "maxPerTarget": 10}, nil
+	case "contract_observe":
+		response, err := w.bridge.ObserveRelayContracts(ctx)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		result, err := w.store.ObserveRelayContracts(ctx, response)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		return map[string]any{"relayConfigurationRevisionId": response.RelayConfigurationRevisionID, "observed": result.Observed, "changed": result.Changed, "paused": result.Paused}, nil
+	case "relay_telemetry_pull":
+		cursor, err := w.store.RelayObservationCursor(ctx)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		var afterBootID *string
+		if cursor.BootID != "" {
+			afterBootID = &cursor.BootID
+		}
+		response, err := w.bridge.DrainRelayObservations(ctx, bridgeprotocol.ObservationDrainRequest{AfterBootID: afterBootID, AfterSequence: cursor.Sequence, Limit: maxRelayObservationPull})
+		if err != nil {
+			return nil, publicError(err)
+		}
+		result, err := w.store.IngestRelayObservations(ctx, response)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		return map[string]any{"bootId": result.Cursor.BootID, "nextSequence": result.Cursor.Sequence, "accepted": result.Accepted, "duplicates": result.Duplicates}, nil
 	default:
 		return nil, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrUnsupportedOperation, Message: "Control operation kind is not supported"}
 	}
@@ -310,13 +358,13 @@ func (w *Worker) loop(ctx context.Context, index int) {
 		} else if result.Status == bridgeprotocol.OperationPartial {
 			status = bridgeprotocol.OperationPartial
 		}
-		if err := w.store.FinishOperationTarget(ctx, item.OperationTarget.ID, status, result, apiErr); err != nil {
+		if err := w.store.FinishOperationTarget(ctx, item.OperationTarget.ID, status, persistedTargetResult(item, result), apiErr); err != nil {
 			w.logger.Error("finish operation target", "operationTargetId", item.OperationTarget.ID, "error", err)
 			continue
 		}
-		if status == bridgeprotocol.OperationSucceeded && item.Operation.Kind == "apply" && item.Target.Runtime == domain.RuntimeSharedRelay {
-			if err := w.finalizeProfileApply(ctx, item); err != nil {
-				w.logger.Error("finalize Profile Apply", "operationId", item.Operation.ID, "error", err)
+		if status == bridgeprotocol.OperationSucceeded && item.Target.Runtime == domain.RuntimeSharedRelay && governanceOperationKind(item.Operation.Kind) {
+			if err := w.finalizeGovernanceOperation(ctx, item.Operation); err != nil {
+				w.logger.Error("finalize governance operation", "operationId", item.Operation.ID, "error", err)
 				continue
 			}
 		}
@@ -327,7 +375,7 @@ func (w *Worker) loop(ctx context.Context, index int) {
 }
 
 func (w *Worker) finalizeProfileApply(ctx context.Context, item store.WorkItem) error {
-	return w.finalizeProfileApplyOperation(ctx, item.Operation)
+	return w.finalizeGovernanceOperation(ctx, item.Operation)
 }
 
 type persistedGovernanceFinalizationError struct {
@@ -338,14 +386,43 @@ func (e *persistedGovernanceFinalizationError) Error() string { return e.err.Err
 func (e *persistedGovernanceFinalizationError) Unwrap() error { return e.err }
 
 func (w *Worker) finalizeProfileApplyOperation(ctx context.Context, operation domain.Operation) error {
+	return w.finalizeGovernanceOperation(ctx, operation)
+}
+
+func (w *Worker) finalizeGovernanceOperation(ctx context.Context, operation domain.Operation) error {
 	var metadata struct {
-		ProfileRevisionID string `json:"profileRevisionId"`
+		ProfileRevisionID string  `json:"profileRevisionId"`
+		RevisionID        string  `json:"revisionId"`
+		DefaultProfileID  *string `json:"defaultProfileId"`
 	}
 	var finalizationErr error
-	if err := json.Unmarshal(operation.Metadata, &metadata); err != nil || strings.TrimSpace(metadata.ProfileRevisionID) == "" {
-		finalizationErr = errors.New("Profile Apply finalization metadata is invalid")
+	if err := json.Unmarshal(operation.Metadata, &metadata); err != nil {
+		finalizationErr = errors.New("governance finalization metadata is invalid")
 	} else {
-		finalizationErr = w.store.FinalizeProfileApply(ctx, operation.ID, operation.SourceID, metadata.ProfileRevisionID)
+		switch operation.Kind {
+		case "apply":
+			if strings.TrimSpace(metadata.ProfileRevisionID) == "" {
+				finalizationErr = errors.New("Profile Apply finalization metadata is invalid")
+			} else {
+				finalizationErr = w.store.FinalizeProfileApply(ctx, operation.ID, operation.SourceID, metadata.ProfileRevisionID)
+			}
+		case "relay_config_apply":
+			if strings.TrimSpace(metadata.RevisionID) != "" {
+				finalizationErr = w.store.FinalizeRelayConfigurationApply(ctx, operation.ID, metadata.RevisionID, operationRoutingHash(operation.Metadata))
+			} else if metadata.DefaultProfileID != nil {
+				finalizationErr = w.store.FinalizeRelayDefaultProfile(ctx, operation.ID, *metadata.DefaultProfileID)
+			} else {
+				finalizationErr = errors.New("Relay Configuration finalization metadata is invalid")
+			}
+		case "policy_apply":
+			if strings.TrimSpace(metadata.RevisionID) == "" {
+				finalizationErr = errors.New("Global Policy finalization metadata is invalid")
+			} else {
+				finalizationErr = w.store.FinalizeGlobalPolicyApply(ctx, operation.ID, metadata.RevisionID)
+			}
+		default:
+			finalizationErr = errors.New("governance finalization kind is invalid")
+		}
 	}
 	if finalizationErr == nil {
 		return nil
@@ -358,6 +435,14 @@ func (w *Worker) finalizeProfileApplyOperation(ctx context.Context, operation do
 		return fmt.Errorf("%w; persist finalization failure: %v", finalizationErr, err)
 	}
 	return &persistedGovernanceFinalizationError{err: finalizationErr}
+}
+
+func operationRoutingHash(metadata json.RawMessage) string {
+	var value struct {
+		RoutingHash string `json:"routingHash"`
+	}
+	_ = json.Unmarshal(metadata, &value)
+	return value.RoutingHash
 }
 
 func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
@@ -414,7 +499,7 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 		return w.executeLocalSkillImport(ctx, item, target)
 	case "mcp_import":
 		return w.executeLocalMCPImport(ctx, item, target)
-	case "apply", "edit", "restore":
+	case "apply", "edit", "restore", "relay_config_apply", "policy_apply":
 		return w.executeCommit(ctx, item, target)
 	case "reconcile":
 		return w.executeReconcile(ctx, item, target)
@@ -574,7 +659,8 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, publicError(err)
 	}
-	request := bridgeprotocol.CommitRequest{OperationID: item.OperationTarget.ID, OperationKind: item.Operation.Kind, Target: target, ExpectedRevision: metadata.TargetRevision, Manifest: metadata.Manifest, Artifacts: artifacts, SecretValues: secrets, BackupID: metadata.BackupID}
+	commitKind := bridgeCommitKind(item.Operation.Kind)
+	request := bridgeprotocol.CommitRequest{OperationID: item.OperationTarget.ID, OperationKind: commitKind, Target: target, ExpectedRevision: metadata.TargetRevision, Manifest: metadata.Manifest, Artifacts: artifacts, SecretValues: secrets, BackupID: metadata.BackupID}
 	if item.Operation.Kind == "restore" && target.Runtime == bridgeprotocol.RuntimeSharedRelay {
 		settings, settingsErr := w.store.Settings(ctx)
 		if settingsErr != nil {
@@ -583,7 +669,7 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		}
 		request.IntentionalPaused = settings.RelayIntentionalPaused
 	}
-	result, err := w.bridge.Commit(ctx, item.Operation.Kind, item.OperationTarget.ID, request)
+	result, err := w.bridge.Commit(ctx, commitKind, item.OperationTarget.ID, request)
 	clear(secrets)
 	w.captureBridgeSaltJID(ctx, item.OperationTarget.ID)
 	if err != nil {
@@ -615,8 +701,7 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		if sourceKind == "" {
 			sourceKind = "profile_apply"
 		}
-		atomicProfileApply := item.Operation.Kind == "apply" && sourceKind == "profile_apply"
-		if !atomicProfileApply {
+		if !desiredSnapshotOwnedByFinalizer(item, sourceKind) {
 			if _, err := w.store.PinDesiredSnapshot(ctx, target.ID, sourceKind, metadata.SourceID, item.OperationTarget.ID, *result.Manifest); err != nil {
 				return bridgeprotocol.TargetResult{}, publicError(err)
 			}
@@ -641,6 +726,56 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		}
 	}
 	return result, nil
+}
+
+const maxRelayObservationPull = 1000
+
+func bridgeCommitKind(operationKind string) string {
+	if operationKind == "relay_config_apply" || operationKind == "policy_apply" {
+		return "apply"
+	}
+	return operationKind
+}
+
+func governanceOperationKind(kind string) bool {
+	return kind == "apply" || kind == "relay_config_apply" || kind == "policy_apply"
+}
+
+func desiredSnapshotOwnedByFinalizer(item store.WorkItem, sourceKind string) bool {
+	if item.Operation.Kind == "apply" {
+		return sourceKind == "profile_apply"
+	}
+	return item.Target.Runtime == domain.RuntimeSharedRelay && (item.Operation.Kind == "relay_config_apply" || item.Operation.Kind == "policy_apply")
+}
+
+func persistedTargetResult(item store.WorkItem, result bridgeprotocol.TargetResult) any {
+	if item.Target.Runtime != domain.RuntimeSharedRelay || !governanceOperationKind(item.Operation.Kind) || result.Status != bridgeprotocol.OperationSucceeded {
+		return result
+	}
+	var request struct {
+		Manifest bridgeprotocol.DesiredManifest `json:"manifest"`
+	}
+	if json.Unmarshal(item.OperationTarget.Request, &request) != nil || request.Manifest.RelayGovernance == nil || !bridgeprotocol.IsSHA256(request.Manifest.RelayGovernance.RoutingHash) {
+		return result
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return result
+	}
+	var stored map[string]any
+	if json.Unmarshal(body, &stored) != nil {
+		return result
+	}
+	stored["routingReloaded"] = true
+	stored["routingHash"] = request.Manifest.RelayGovernance.RoutingHash
+	return stored
+}
+
+func (w *Worker) currentTime() time.Time {
+	if w.now != nil {
+		return w.now()
+	}
+	return time.Now()
 }
 
 func (w *Worker) executeReconcile(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
