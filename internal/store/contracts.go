@@ -171,12 +171,27 @@ func (s *Store) ObserveContractsTx(ctx context.Context, tx pgx.Tx, input Contrac
 			if err != nil {
 				return ContractObservationResult{}, err
 			}
-			return ContractObservationResult{Revision: revision, Statuses: unchangedStatuses(input.Tools)}, nil
+			baselineID := acceptedID
+			if baselineID == "" {
+				baselineID = latestID
+			}
+			baselineTools, err := contractToolsTx(ctx, tx, baselineID)
+			if err != nil {
+				return ContractObservationResult{}, err
+			}
+			return ContractObservationResult{Revision: revision, Statuses: compareContractTools(baselineTools, input.Tools)}, nil
 		}
 	}
 	previousTools, err := contractToolsTx(ctx, tx, latestID)
 	if err != nil {
 		return ContractObservationResult{}, err
+	}
+	baselineTools := previousTools
+	if acceptedID != "" && acceptedID != latestID {
+		baselineTools, err = contractToolsTx(ctx, tx, acceptedID)
+		if err != nil {
+			return ContractObservationResult{}, err
+		}
 	}
 	var revisionNumber int64
 	if err := tx.QueryRow(ctx, `SELECT coalesce(max(revision),0)+1 FROM mcp_contract_revisions WHERE server_id=$1`, input.ServerID).Scan(&revisionNumber); err != nil {
@@ -186,7 +201,7 @@ func (s *Store) ObserveContractsTx(ctx context.Context, tx pgx.Tx, input Contrac
 	if _, err := tx.Exec(ctx, `INSERT INTO mcp_contract_revisions(id,server_id,revision,canonical_hash,normalized_contract) VALUES($1,$2,$3,$4,$5)`, revisionID, input.ServerID, revisionNumber, hash, jsonText(body)); err != nil {
 		return ContractObservationResult{}, err
 	}
-	statuses := compareContractTools(previousTools, input.Tools)
+	statuses := compareContractTools(baselineTools, input.Tools)
 	for position, tool := range normalizedToolsFromBody(body) {
 		toolID, err := stableContractToolID(ctx, tx, input.ServerID, tool.Name)
 		if err != nil {
@@ -221,7 +236,8 @@ func (s *Store) ObserveContractsTx(ctx context.Context, tx pgx.Tx, input Contrac
 	if _, err := tx.Exec(ctx, `UPDATE mcp_contract_state SET latest_revision_id=$2,review_state=$3,updated_at=now() WHERE server_id=$1`, input.ServerID, revisionID, newState); err != nil {
 		return ContractObservationResult{}, err
 	}
-	if err := createRenameProposalTx(ctx, tx, input.ServerID, latestID, revisionID, previousTools, input.Tools, statuses); err != nil {
+	renameStatuses := compareContractTools(previousTools, input.Tools)
+	if err := createRenameProposalTx(ctx, tx, input.ServerID, latestID, revisionID, previousTools, input.Tools, renameStatuses); err != nil {
 		return ContractObservationResult{}, err
 	}
 	revision, err := contractRevisionTx(ctx, tx, revisionID)

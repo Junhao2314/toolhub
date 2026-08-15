@@ -208,7 +208,7 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 	if err := upgrade.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 6 {
+	if versions != 7 {
 		t.Fatalf("migration reran or skipped: versions=%d", versions)
 	}
 }
@@ -372,8 +372,8 @@ func assertGovernanceMigrationState(t *testing.T, st *Store) {
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 6 {
-		t.Fatalf("migration versions=%d want 6", versions)
+	if versions != 7 {
+		t.Fatalf("migration versions=%d want 7", versions)
 	}
 	var generation string
 	if err := st.pool.QueryRow(ctx, `SELECT value FROM app_meta WHERE key='schema_generation'`).Scan(&generation); err != nil {
@@ -403,6 +403,13 @@ func TestGovernanceSchemaInvariantsIntegration(t *testing.T) {
 	st := newIntegrationStore(t, true)
 	if err := st.BootstrapEnvironment(ctx, "governance-integration", "runner", "UTC", 6276); err != nil {
 		t.Fatal(err)
+	}
+	var manifestSchemaConstraintValidated bool
+	if err := st.pool.QueryRow(ctx, `SELECT convalidated FROM pg_constraint WHERE conrelid='desired_snapshots'::regclass AND conname='desired_snapshots_manifest_schema_match_check'`).Scan(&manifestSchemaConstraintValidated); err != nil {
+		t.Fatal(err)
+	}
+	if !manifestSchemaConstraintValidated {
+		t.Fatal("manifest schema match constraint did not validate existing snapshots")
 	}
 	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_revisions SET metadata='{}' WHERE revision=1`); err == nil {
 		t.Fatal("relay configuration revision accepted an update")
@@ -527,6 +534,9 @@ func TestGovernanceSchemaInvariantsIntegration(t *testing.T) {
 	if _, err := st.pool.Exec(ctx, `INSERT INTO desired_snapshots(id,target_id,revision,source_kind,manifest_schema_version,manifest_hash,manifest,routing_bundle_canonical) VALUES($1,$2,23,'relay_config_apply',2,$3,$4,$5)`, uuid.NewString(), relayTarget.ID, strings.Repeat("b", 64), jsonText(v2Body), []byte(`{"schemaVersion":1}`)); err == nil {
 		t.Fatal("v2 routing hash accepted unrelated canonical bytes")
 	}
+	if _, err := st.pool.Exec(ctx, `INSERT INTO desired_snapshots(id,target_id,revision,source_kind,manifest_schema_version,manifest_hash,manifest) VALUES($1,$2,24,'relay_config_apply',1,$3,$4)`, uuid.NewString(), relayTarget.ID, v2Hash, jsonText(v2Body)); err == nil {
+		t.Fatal("v2 manifest bypassed canonical routing bytes through a v1 schema-version column")
+	}
 }
 
 func TestGovernanceRoutingValidatorMatchesRuntimeAmbiguityRulesIntegration(t *testing.T) {
@@ -576,6 +586,11 @@ func TestGovernanceRoutingValidatorMatchesRuntimeAmbiguityRulesIntegration(t *te
 	}
 	if !validate(bundle) {
 		t.Fatal("routing validator rejected the valid baseline bundle")
+	}
+	displayName := cloneJSONMap(t, bundle)
+	displayName["profiles"].([]any)[0].(map[string]any)["profileName"] = "Archive race"
+	if !validate(displayName) {
+		t.Fatal("routing validator rejected a valid Profile display name")
 	}
 
 	tests := []struct {

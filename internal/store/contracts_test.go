@@ -110,6 +110,44 @@ func TestObserveContractsCreatesImmutableRevisionAndStatusesChanges(t *testing.T
 	}
 }
 
+func TestObserveContractsRepeatedLatestRemainsIncompatibleWithAcceptedRevision(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "accepted-baseline", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{
+		Name: "lookup", InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}}}`), ReadOnlyHint: true,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, accepted.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	changedInput := ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{
+		Name: "lookup", InputSchema: json.RawMessage(`{"type":"object","properties":{"id":{"type":"integer"}}}`), ReadOnlyHint: true,
+	}}}
+	changed, err := st.ObserveContracts(ctx, changedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.Statuses["lookup"] != ContractToolPausedIncompatible {
+		t.Fatalf("first incompatible status=%q", changed.Statuses["lookup"])
+	}
+	repeated, err := st.ObserveContracts(ctx, changedInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Revision.ID != changed.Revision.ID {
+		t.Fatalf("identical latest observation created revision %s after %s", repeated.Revision.ID, changed.Revision.ID)
+	}
+	if repeated.Statuses["lookup"] != ContractToolPausedIncompatible {
+		t.Fatalf("repeated incompatible status=%q want %q", repeated.Statuses["lookup"], ContractToolPausedIncompatible)
+	}
+}
+
 func TestObserveContractsRejectsPayloadFields(t *testing.T) {
 	st := newIntegrationStore(t, true)
 	_, err := st.ObserveContracts(context.Background(), ContractObservationInput{

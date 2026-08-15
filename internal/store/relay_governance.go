@@ -337,7 +337,29 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 	if appliedRevisionID != stringMetadata(metadata, "expectedAppliedRelayConfigurationRevisionId") {
 		return ErrConflict
 	}
-	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{RelayConfigurationRevisionID: revisionID}, routingHash); err != nil {
+	affectedProfileRevisions, ok := stringMapMetadata(metadata, "affectedProfileRevisions")
+	if !ok {
+		return ErrConflict
+	}
+	expectedPublishedProfileRevisions, ok := stringMapMetadata(metadata, "expectedPublishedProfileRevisions")
+	if !ok || len(expectedPublishedProfileRevisions) != len(affectedProfileRevisions) {
+		return ErrConflict
+	}
+	profileIDs := make([]string, 0, len(affectedProfileRevisions))
+	for profileID, candidateRevisionID := range affectedProfileRevisions {
+		if uuid.Validate(profileID) != nil || uuid.Validate(candidateRevisionID) != nil || uuid.Validate(expectedPublishedProfileRevisions[profileID]) != nil {
+			return ErrConflict
+		}
+		profileIDs = append(profileIDs, profileID)
+	}
+	sort.Strings(profileIDs)
+	for _, profileID := range profileIDs {
+		if err := validatePublishedProfilePredecessorTx(ctx, tx, profileID, expectedPublishedProfileRevisions[profileID]); err != nil {
+			return err
+		}
+	}
+	candidate := RoutingBundleCandidate{RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: affectedProfileRevisions}
+	if err := s.validateCandidateRoutingHashTx(ctx, tx, candidate, routingHash); err != nil {
 		return err
 	}
 	var exists bool
@@ -347,7 +369,22 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 	if !exists {
 		return ErrNotFound
 	}
+	operationTargetID, targetID, manifest, err := relayOperationManifestTx(ctx, tx, operationID, revisionID)
+	if err != nil {
+		return err
+	}
+	if manifest.RelayGovernance == nil || manifest.RelayGovernance.RelayConfigurationRevisionID != revisionID || manifest.RelayGovernance.RoutingHash != routingHash {
+		return ErrConflict
+	}
 	if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1,updated_at=now() WHERE singleton`, revisionID); err != nil {
+		return err
+	}
+	for _, profileID := range profileIDs {
+		if err := publishProfileTx(ctx, tx, profileID, affectedProfileRevisions[profileID]); err != nil {
+			return err
+		}
+	}
+	if err := pinRelayDesiredSnapshotTx(ctx, tx, targetID, revisionID, operationTargetID, manifest); err != nil {
 		return err
 	}
 	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "relay_configuration_apply"); err != nil {
@@ -411,7 +448,37 @@ func (s *Store) PrepareAffectedProfileUpdates(ctx context.Context, relayRevision
 	if uuid.Validate(relayRevisionID) != nil {
 		return nil, ErrNotFound
 	}
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT pp.profile_id::text FROM published_profiles pp JOIN profile_revision_mcp_servers pins ON pins.profile_revision_id=pp.profile_revision_id WHERE NOT EXISTS(SELECT 1 FROM relay_configuration_revision_mcp_servers relay WHERE relay.relay_configuration_revision_id=$1 AND relay.server_id=pins.server_id AND relay.mcp_revision_id=pins.mcp_revision_id) ORDER BY pp.profile_id`, relayRevisionID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var relayExists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM relay_configuration_revisions WHERE id=$1)`, relayRevisionID).Scan(&relayExists); err != nil {
+		return nil, err
+	}
+	if !relayExists {
+		return nil, ErrNotFound
+	}
+	relayPins := map[string]string{}
+	rows, err := tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text FROM relay_configuration_revision_mcp_servers WHERE relay_configuration_revision_id=$1 ORDER BY position`, relayRevisionID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var serverID, mcpRevisionID string
+		if err := rows.Scan(&serverID, &mcpRevisionID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		relayPins[serverID] = mcpRevisionID
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT pp.profile_id::text FROM published_profiles pp WHERE EXISTS(SELECT 1 FROM profile_revision_mcp_servers pins WHERE pins.profile_revision_id=pp.profile_revision_id AND NOT EXISTS(SELECT 1 FROM relay_configuration_revision_mcp_servers relay WHERE relay.relay_configuration_revision_id=$1 AND relay.server_id=pins.server_id AND relay.mcp_revision_id=pins.mcp_revision_id)) ORDER BY pp.profile_id::text`, relayRevisionID)
 	if err != nil {
 		return nil, err
 	}
@@ -424,7 +491,135 @@ func (s *Store) PrepareAffectedProfileUpdates(ctx context.Context, relayRevision
 		}
 		result = append(result, id)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for _, profileID := range result {
+		input, currentRevisionID, err := profileInputForRelayUpdateTx(ctx, tx, profileID)
+		if err != nil {
+			return nil, err
+		}
+		changed := false
+		for _, serverID := range input.MCPServerIDs {
+			candidateRevisionID := relayPins[serverID]
+			if candidateRevisionID == "" {
+				return nil, ErrConflict
+			}
+			if input.MCPRevisionIDs[serverID] == candidateRevisionID {
+				continue
+			}
+			input.MCPRevisionIDs[serverID] = candidateRevisionID
+			for index := range input.MCPGovernance {
+				if input.MCPGovernance[index].ServerID == serverID {
+					input.MCPGovernance[index].MCPRevisionID = candidateRevisionID
+				}
+			}
+			changed = true
+		}
+		if !changed {
+			continue
+		}
+		_, candidateRevisionID, err := s.saveProfileTx(ctx, tx, profileID, input)
+		if err != nil {
+			return nil, err
+		}
+		if candidateRevisionID == currentRevisionID {
+			return nil, ErrConflict
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func profileInputForRelayUpdateTx(ctx context.Context, tx pgx.Tx, profileID string) (ProfileInput, string, error) {
+	var input ProfileInput
+	var currentRevisionID string
+	var pendingBindings, archived bool
+	if err := tx.QueryRow(ctx, `SELECT p.revision,p.current_revision_id::text,pr.name,pr.description,pr.client_kind,pr.category,pr.variant,pr.migration_state,pr.pending_bindings,p.archived_at IS NOT NULL FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1 FOR UPDATE OF p`, profileID).Scan(&input.Revision, &currentRevisionID, &input.Name, &input.Description, &input.ClientKind, &input.Category, &input.Variant, &input.MigrationState, &pendingBindings, &archived); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ProfileInput{}, "", ErrNotFound
+		}
+		return ProfileInput{}, "", err
+	}
+	if archived || pendingBindings {
+		return ProfileInput{}, "", ErrConflict
+	}
+	input.SkillVersionIDs = map[string]string{}
+	input.MCPRevisionIDs = map[string]string{}
+	rows, err := tx.Query(ctx, `SELECT skill_id::text,skill_version_id::text FROM profile_revision_skills WHERE profile_revision_id=$1 ORDER BY position`, currentRevisionID)
+	if err != nil {
+		return ProfileInput{}, "", err
+	}
+	for rows.Next() {
+		var skillID, versionID string
+		if err := rows.Scan(&skillID, &versionID); err != nil {
+			rows.Close()
+			return ProfileInput{}, "", err
+		}
+		input.SkillIDs = append(input.SkillIDs, skillID)
+		input.SkillVersionIDs[skillID] = versionID
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ProfileInput{}, "", err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text FROM profile_revision_mcp_servers WHERE profile_revision_id=$1 ORDER BY position`, currentRevisionID)
+	if err != nil {
+		return ProfileInput{}, "", err
+	}
+	for rows.Next() {
+		var serverID, revisionID string
+		if err := rows.Scan(&serverID, &revisionID); err != nil {
+			rows.Close()
+			return ProfileInput{}, "", err
+		}
+		input.MCPServerIDs = append(input.MCPServerIDs, serverID)
+		input.MCPRevisionIDs[serverID] = revisionID
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ProfileInput{}, "", err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text,coalesce(accepted_contract_revision_id::text,''),visibility_mode FROM profile_revision_mcp_governance WHERE profile_revision_id=$1 ORDER BY server_id`, currentRevisionID)
+	if err != nil {
+		return ProfileInput{}, "", err
+	}
+	for rows.Next() {
+		var item ProfileMCPGovernanceInput
+		if err := rows.Scan(&item.ServerID, &item.MCPRevisionID, &item.AcceptedContractRevisionID, &item.VisibilityMode); err != nil {
+			rows.Close()
+			return ProfileInput{}, "", err
+		}
+		input.MCPGovernance = append(input.MCPGovernance, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ProfileInput{}, "", err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT tool_id::text,visible,decision,reason_codes FROM profile_revision_tool_rules WHERE profile_revision_id=$1 ORDER BY tool_id`, currentRevisionID)
+	if err != nil {
+		return ProfileInput{}, "", err
+	}
+	for rows.Next() {
+		var item ProfileToolRuleInput
+		if err := rows.Scan(&item.ToolID, &item.Visible, &item.Decision, &item.ReasonCodes); err != nil {
+			rows.Close()
+			return ProfileInput{}, "", err
+		}
+		input.ToolRules = append(input.ToolRules, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return ProfileInput{}, "", err
+	}
+	rows.Close()
+	return input, currentRevisionID, nil
 }
 
 func (s *Store) PublishProfile(ctx context.Context, profileID, revisionID string) error {
@@ -724,6 +919,74 @@ func int64Metadata(metadata json.RawMessage, key string) (int64, bool) {
 	return result, true
 }
 
+func stringMapMetadata(metadata json.RawMessage, key string) (map[string]string, bool) {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(metadata, &values) != nil {
+		return nil, false
+	}
+	raw, found := values[key]
+	if !found {
+		return nil, false
+	}
+	var result map[string]string
+	if json.Unmarshal(raw, &result) != nil || result == nil {
+		return nil, false
+	}
+	return result, true
+}
+
+func relayOperationManifestTx(ctx context.Context, tx pgx.Tx, operationID, relayRevisionID string) (string, string, bridgeprotocol.DesiredManifest, error) {
+	var operationTargetID, targetID, runtime, sourceKind, sourceID string
+	var manifestJSON []byte
+	if err := tx.QueryRow(ctx, `SELECT ot.id::text,ot.target_id::text,t.runtime,coalesce(ot.request->>'sourceKind',''),coalesce(ot.request->>'sourceId',''),ot.request->'manifest' FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=$1 AND t.runtime='shared-relay'`, operationID).Scan(&operationTargetID, &targetID, &runtime, &sourceKind, &sourceID, &manifestJSON); err != nil {
+		return "", "", bridgeprotocol.DesiredManifest{}, err
+	}
+	manifest, err := bridgeprotocol.DecodeManifest(manifestJSON, true)
+	if err != nil || runtime != domain.RuntimeSharedRelay || sourceKind != "relay_config_apply" || sourceID != relayRevisionID || manifest.Target.ID != targetID || manifest.Target.Runtime != domain.RuntimeSharedRelay {
+		return "", "", bridgeprotocol.DesiredManifest{}, ErrConflict
+	}
+	return operationTargetID, targetID, manifest, nil
+}
+
+func pinRelayDesiredSnapshotTx(ctx context.Context, tx pgx.Tx, targetID, relayRevisionID, operationTargetID string, manifest bridgeprotocol.DesiredManifest) error {
+	body, manifestHash, err := manifest.Canonical()
+	if err != nil || manifest.SchemaVersion != bridgeprotocol.ManifestSchemaVersionV2 || manifest.RelayGovernance == nil || manifest.Target.ID != targetID {
+		return ErrConflict
+	}
+	var routingBundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &routingBundle); err != nil {
+		return err
+	}
+	routingBundleCanonical, routingHash, err := routingBundle.Canonical()
+	if err != nil || routingHash != manifest.RelayGovernance.RoutingHash {
+		return ErrConflict
+	}
+	var existing bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM desired_snapshots WHERE source_operation_target_id=$1)`, operationTargetID).Scan(&existing); err != nil {
+		return err
+	}
+	if existing {
+		return ErrConflict
+	}
+	var lockedTargetID string
+	if err := tx.QueryRow(ctx, `SELECT id::text FROM targets WHERE id=$1 FOR UPDATE`, targetID).Scan(&lockedTargetID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	var revision int64
+	if err := tx.QueryRow(ctx, `SELECT coalesce(max(revision),0)+1 FROM desired_snapshots WHERE target_id=$1`, targetID).Scan(&revision); err != nil {
+		return err
+	}
+	snapshotID := uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO desired_snapshots(id,target_id,revision,source_kind,source_id,source_operation_target_id,profile_revision,manifest_schema_version,manifest_hash,manifest,routing_bundle_canonical) VALUES($1,$2,$3,'relay_config_apply',$4,$5,$6,$7,$8,$9,$10)`, snapshotID, targetID, revision, relayRevisionID, operationTargetID, manifest.ProfileRevision, manifest.SchemaVersion, manifestHash, jsonText(body), routingBundleCanonical); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO target_desired_snapshots(target_id,snapshot_id,desired_revision,health,drift_summary,error_code,error_reason,updated_at) VALUES($1,$2,$3,'healthy','{}','','',now()) ON CONFLICT(target_id) DO UPDATE SET snapshot_id=EXCLUDED.snapshot_id,desired_revision=EXCLUDED.desired_revision,health='healthy',drift_summary='{}',error_code='',error_reason='',updated_at=now()`, targetID, snapshotID, revision)
+	return err
+}
+
 func validatePublishedProfilePredecessorTx(ctx context.Context, tx pgx.Tx, profileID, expectedRevisionID string) error {
 	var currentRevisionID string
 	if err := tx.QueryRow(ctx, `SELECT coalesce(pp.profile_revision_id::text,'') FROM profiles p LEFT JOIN published_profiles pp ON pp.profile_id=p.id WHERE p.id=$1 FOR UPDATE OF p`, profileID).Scan(&currentRevisionID); err != nil {
@@ -863,17 +1126,19 @@ func (s *Store) RenderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, c
 	rows.Close()
 	for _, entry := range serverEntries {
 		server := entry.server
+		server.Tools = []RoutingTool{}
 		server.AcceptedContractRevisionID, server.AcceptedContractHash = entry.acceptedContractRevisionID, entry.acceptedContractHash
 		if entry.acceptedContractRevisionID != nil {
-			toolRows, err := tx.Query(ctx, `SELECT t.id::text,t.name,crt.input_schema,crt.output_schema,crt.annotations,coalesce(latest.status,crt.status) FROM mcp_contract_revision_tools crt JOIN mcp_tools t ON t.id=crt.tool_id LEFT JOIN mcp_contract_state cs ON cs.server_id=t.server_id LEFT JOIN mcp_contract_revision_tools latest ON latest.contract_revision_id=cs.latest_revision_id AND latest.tool_id=crt.tool_id WHERE crt.contract_revision_id=$1 ORDER BY crt.position`, *entry.acceptedContractRevisionID)
+			toolRows, err := tx.Query(ctx, `SELECT t.id::text,t.name,crt.input_schema,crt.output_schema,crt.annotations,latest.tool_id IS NOT NULL,latest.input_schema,latest.output_schema,latest.annotations FROM mcp_contract_revision_tools crt JOIN mcp_tools t ON t.id=crt.tool_id LEFT JOIN mcp_contract_state cs ON cs.server_id=t.server_id LEFT JOIN mcp_contract_revision_tools latest ON latest.contract_revision_id=cs.latest_revision_id AND latest.tool_id=crt.tool_id WHERE crt.contract_revision_id=$1 ORDER BY crt.position`, *entry.acceptedContractRevisionID)
 			if err != nil {
 				return bundle, "", err
 			}
 			for toolRows.Next() {
 				var tool RoutingTool
 				var inputJSON, outputJSON, annotationsJSON []byte
-				var contractStatus string
-				if err := toolRows.Scan(&tool.ToolID, &tool.Name, &inputJSON, &outputJSON, &annotationsJSON, &contractStatus); err != nil {
+				var latestInputJSON, latestOutputJSON, latestAnnotationsJSON []byte
+				var latestExists bool
+				if err := toolRows.Scan(&tool.ToolID, &tool.Name, &inputJSON, &outputJSON, &annotationsJSON, &latestExists, &latestInputJSON, &latestOutputJSON, &latestAnnotationsJSON); err != nil {
 					toolRows.Close()
 					return bundle, "", err
 				}
@@ -892,7 +1157,25 @@ func (s *Store) RenderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, c
 					return bundle, "", errors.New("contract annotations are not an object")
 				}
 				tool.GlobalDecision, tool.ReasonCodes = classifyRoutingTool(global, tool)
-				tool.Paused = contractStatus == ContractToolPausedIncompatible
+				tool.Paused = !latestExists
+				if latestExists {
+					var latestInput, latestOutput, latestAnnotations map[string]any
+					if err := json.Unmarshal(latestInputJSON, &latestInput); err != nil || latestInput == nil {
+						toolRows.Close()
+						return bundle, "", errors.New("latest contract input schema is not an object")
+					}
+					if string(latestOutputJSON) != "null" {
+						if err := json.Unmarshal(latestOutputJSON, &latestOutput); err != nil {
+							toolRows.Close()
+							return bundle, "", errors.New("latest contract output schema is not an object")
+						}
+					}
+					if err := json.Unmarshal(latestAnnotationsJSON, &latestAnnotations); err != nil || latestAnnotations == nil {
+						toolRows.Close()
+						return bundle, "", errors.New("latest contract annotations are not an object")
+					}
+					tool.Paused = !equalJSONMap(tool.InputSchema, latestInput) || !equalJSONMap(tool.OutputSchema, latestOutput) || !equalJSONMap(tool.Annotations, latestAnnotations)
+				}
 				server.Tools = append(server.Tools, tool)
 			}
 			if err := toolRows.Err(); err != nil {
@@ -940,7 +1223,7 @@ func (s *Store) RenderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, c
 	}
 	sort.Strings(profileIDs)
 	for _, profileID := range profileIDs {
-		profile := RoutingProfile{ProfileID: profileID, ProfileRevisionID: profileRevisionIDs[profileID]}
+		profile := RoutingProfile{ProfileID: profileID, ProfileRevisionID: profileRevisionIDs[profileID], Servers: []RoutingProfileServer{}}
 		var owner string
 		var archived bool
 		if err := tx.QueryRow(ctx, `SELECT pr.profile_id::text,pr.canonical_hash,pr.name,pr.client_kind,p.archived_at IS NOT NULL FROM profile_revisions pr JOIN profiles p ON p.id=pr.profile_id WHERE pr.id=$1`, profile.ProfileRevisionID).Scan(&owner, &profile.ProfileRevisionHash, &profile.ProfileName, &profile.ClientKind, &archived); err != nil {
