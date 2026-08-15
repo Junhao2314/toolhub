@@ -161,6 +161,10 @@ type Profile struct {
 	CurrentRevisionID string            `json:"currentRevisionId"`
 	Name              string            `json:"name"`
 	Description       string            `json:"description,omitempty"`
+	ClientKind        string            `json:"clientKind,omitempty"`
+	Category          string            `json:"category,omitempty"`
+	Variant           string            `json:"variant,omitempty"`
+	MigrationState    string            `json:"migrationState,omitempty"`
 	Revision          int64             `json:"revision"`
 	CanonicalHash     string            `json:"canonicalHash"`
 	PendingBindings   bool              `json:"pendingBindings"`
@@ -179,12 +183,99 @@ type ProfileRevision struct {
 	Revision        int64             `json:"revision"`
 	Name            string            `json:"name"`
 	Description     string            `json:"description,omitempty"`
+	ClientKind      string            `json:"clientKind,omitempty"`
+	Category        string            `json:"category,omitempty"`
+	Variant         string            `json:"variant,omitempty"`
+	MigrationState  string            `json:"migrationState,omitempty"`
 	CanonicalHash   string            `json:"canonicalHash"`
 	PendingBindings bool              `json:"pendingBindings"`
 	ArchivedRestore bool              `json:"archivedRestore"`
 	Skills          []ProfileSkillPin `json:"skills"`
 	MCPServers      []ProfileMCPPin   `json:"mcpServers"`
 	CreatedAt       time.Time         `json:"createdAt"`
+}
+
+// RelayConfigurationRevision is an immutable ordered set of MCP revisions
+// consumed by the one shared local relay. It contains pins only, never secret
+// values or editable server configuration.
+type RelayConfigurationRevision struct {
+	ID            string                           `json:"id"`
+	Revision      int64                            `json:"revision"`
+	CanonicalHash string                           `json:"canonicalHash"`
+	MCPServers    []RelayConfigurationMCPServerPin `json:"mcpServers"`
+	Metadata      map[string]any                   `json:"metadata,omitempty"`
+	CreatedAt     time.Time                        `json:"createdAt"`
+}
+
+type RelayConfigurationMCPServerPin struct {
+	ServerID      string `json:"serverId"`
+	MCPRevisionID string `json:"mcpRevisionId"`
+	Position      int    `json:"position"`
+}
+
+// ObservedContractRevision stores normalized tool definitions, not call
+// arguments, results, prompts, or raw transport errors.
+type ObservedContractRevision struct {
+	ID                 string          `json:"id"`
+	ServerID           string          `json:"serverId"`
+	Revision           int64           `json:"revision"`
+	CanonicalHash      string          `json:"canonicalHash"`
+	NormalizedContract json.RawMessage `json:"normalizedContract"`
+	CreatedAt          time.Time       `json:"createdAt"`
+}
+
+type ContractTool struct {
+	ID           string          `json:"id"`
+	ServerID     string          `json:"serverId"`
+	Name         string          `json:"name"`
+	Position     int             `json:"position"`
+	InputSchema  json.RawMessage `json:"inputSchema"`
+	OutputSchema json.RawMessage `json:"outputSchema"`
+	Annotations  json.RawMessage `json:"annotations"`
+	Presentation json.RawMessage `json:"presentation"`
+}
+
+type PublishedProfile struct {
+	ProfileID         string    `json:"profileId"`
+	ProfileRevisionID string    `json:"profileRevisionId"`
+	ClientKind        string    `json:"clientKind"`
+	Category          string    `json:"category"`
+	Variant           string    `json:"variant"`
+	PublishedAt       time.Time `json:"publishedAt"`
+}
+
+type GlobalPolicyRevision struct {
+	ID                   string            `json:"id"`
+	Revision             int64             `json:"revision"`
+	CanonicalHash        string            `json:"canonicalHash"`
+	CatalogVersion       int               `json:"catalogVersion"`
+	ExplicitOverrides    map[string]string `json:"explicitOverrides,omitempty"`
+	UnclassifiedMutating string            `json:"unclassifiedMutating"`
+	ReviewedReadOnly     string            `json:"reviewedReadOnly"`
+	CreatedAt            time.Time         `json:"createdAt"`
+}
+
+type ToolRule struct {
+	ProfileRevisionID string   `json:"profileRevisionId"`
+	ToolID            string   `json:"toolId"`
+	Visible           bool     `json:"visible"`
+	Decision          string   `json:"decision"`
+	ReasonCodes       []string `json:"reasonCodes,omitempty"`
+}
+
+type DailyToolAggregate struct {
+	Day               string `json:"day"`
+	ProfileID         string `json:"profileId,omitempty"`
+	ProfileRevisionID string `json:"profileRevisionId,omitempty"`
+	ServerID          string `json:"serverId,omitempty"`
+	ToolID            string `json:"toolId,omitempty"`
+	ClientKind        string `json:"clientKind"`
+	Decision          string `json:"decision"`
+	Outcome           string `json:"outcome"`
+	ErrorClass        string `json:"errorClass,omitempty"`
+	CallCount         int64  `json:"callCount"`
+	ErrorCount        int64  `json:"errorCount"`
+	DurationBucket    string `json:"durationBucket,omitempty"`
 }
 
 type PendingSecretBinding struct {
