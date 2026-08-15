@@ -61,6 +61,54 @@ func TestManifestRejectsProtectedSkill(t *testing.T) {
 	}
 }
 
+func TestManifestV2SharedRelayRequiresSecretFreeGovernanceAndCanonicalRoutingHash(t *testing.T) {
+	legacy := validManifest()
+	legacy.Target = Target{ID: uuid.NewString(), NodeID: uuid.NewString(), NodeKind: NodeKindLocal, Runtime: RuntimeSharedRelay, ManagedUsername: "operator"}
+	legacy.Skills = []SkillMember{}
+	legacy.MCPServers = []MCPMember{}
+	legacy.ManagedMemberIDs = []string{}
+	legacy.RelayPort = 6276
+	legacy.SchemaVersion = 2
+	routing := RoutingBundle{SchemaVersion: 1, Mode: "compatibility", RelayConfigurationRevisionID: uuid.NewString(), RelayConfigurationHash: string(bytes.Repeat([]byte{'a'}, 64)), GlobalPolicyRevisionID: uuid.NewString(), GlobalPolicyHash: string(bytes.Repeat([]byte{'b'}, 64))}
+	routingBody, routingHash, err := routing.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.RelayGovernance = &RelayGovernanceManifest{RelayConfigurationRevisionID: routing.RelayConfigurationRevisionID, RelayConfigurationHash: routing.RelayConfigurationHash, RoutingBundle: routingBody, RoutingHash: routingHash}
+	if err := legacy.Validate(true); err != nil {
+		t.Fatalf("valid v2 rejected: %v", err)
+	}
+	legacy.RelayGovernance.RoutingHash = string(bytes.Repeat([]byte{'c'}, 64))
+	if err := legacy.Validate(true); err == nil {
+		t.Fatal("v2 accepted a mismatched routing hash")
+	}
+	nonRelay := validManifest()
+	nonRelay.SchemaVersion = 2
+	nonRelay.RelayGovernance = &RelayGovernanceManifest{RelayConfigurationRevisionID: uuid.NewString(), RelayConfigurationHash: string(bytes.Repeat([]byte{'a'}, 64)), RoutingBundle: routingBody, RoutingHash: routingHash}
+	if err := nonRelay.Validate(true); err == nil {
+		t.Fatal("non-relay v2 accepted governance")
+	}
+}
+
+func TestGovernanceDTOValidationRejectsSensitiveFieldsAndBounds(t *testing.T) {
+	unsafe := []byte(`{"challengeId":"abc","arguments":{"token":"secret"}}`)
+	if err := ValidateGovernanceBody(unsafe); err == nil {
+		t.Fatal("sensitive governance body accepted")
+	}
+	tooDeep := []byte(`{"a":{"b":{"c":{"d":{"e":{"f":true}}}}}}`)
+	if err := ValidateGovernanceBody(tooDeep); err == nil {
+		t.Fatal("deep governance body accepted")
+	}
+	response := ContractObservationResponse{ServerID: uuid.NewString(), ContractRevisionID: uuid.NewString(), Tools: []ContractToolDTO{{Name: "read_item", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{}, Presentation: map[string]any{}}}}
+	body, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateGovernanceBody(body); err != nil {
+		t.Fatalf("safe governance body rejected: %v", err)
+	}
+}
+
 func TestSignedRequestDetectsTamperingAndExpiry(t *testing.T) {
 	key := bytes.Repeat([]byte{'k'}, 32)
 	now := time.Unix(1_800_000_000, 0)

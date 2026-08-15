@@ -189,6 +189,74 @@ paths:
           description: Fixed relay unit state
           content: {application/json: {schema: {$ref: '#/components/schemas/RelayStatus'}}}
         '409': {$ref: '#/components/responses/Error'}
+  /relay/governance/capability:
+    post:
+      operationId: relayGovernanceCapability
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses:
+        '200': {description: mcpm ToolHub capability contract, content: {application/json: {schema: {$ref: '#/components/schemas/RelayCapabilityResponse'}}}}
+        '503': {$ref: '#/components/responses/Error'}
+  /relay/governance/reload:
+    post:
+      operationId: relayGovernanceReload
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RelayReloadRequest'}}}
+      responses:
+        '200': {description: Governance bundle reloaded, content: {application/json: {schema: {$ref: '#/components/schemas/RelayReloadResponse'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /relay/governance/contracts/observe:
+    post:
+      operationId: observeRelayContracts
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses:
+        '200': {description: Normalized contract observation, content: {application/json: {schema: {$ref: '#/components/schemas/ContractObservationResponse'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /relay/governance/confirmations/list:
+    post:
+      operationId: listRelayConfirmations
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses:
+        '200': {description: Safe pending confirmation summaries, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationListResponse'}}}}
+  /relay/governance/confirmations/approve:
+    post:
+      operationId: approveRelayConfirmation
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionRequest'}}}
+      responses:
+        '200': {description: Confirmation approved, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionResponse'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /relay/governance/confirmations/reject:
+    post:
+      operationId: rejectRelayConfirmation
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionRequest'}}}
+      responses:
+        '200': {description: Confirmation rejected, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionResponse'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /relay/governance/observations/drain:
+    post:
+      operationId: drainRelayObservations
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ObservationDrainRequest'}}}
+      responses:
+        '200': {description: Payload-free observations, content: {application/json: {schema: {$ref: '#/components/schemas/ObservationDrainResponse'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /native-clients/inspect:
+    post:
+      operationId: inspectNativeClients
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses:
+        '200': {description: Supported native client versions, content: {application/json: {schema: {$ref: '#/components/schemas/NativeClientInspectionResponse'}}}}
+        '503': {$ref: '#/components/responses/Error'}
   /operations/{operationID}:
     get:
       operationId: getBridgeOperation
@@ -458,7 +526,7 @@ components:
       additionalProperties: false
       required: [schemaVersion, target, skills, mcpServers, managedMemberIds]
       properties:
-        schemaVersion: {const: 1}
+        schemaVersion: {type: integer, enum: [1, 2]}
         target: {$ref: '#/components/schemas/Target'}
         profileId: {$ref: '#/components/schemas/UUID'}
         profileRevision: {type: integer, minimum: 1}
@@ -466,6 +534,173 @@ components:
         mcpServers: {type: array, items: {$ref: '#/components/schemas/MCPMember'}}
         managedMemberIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
         relayPort: {type: integer, minimum: 1, maximum: 65535}
+        relayGovernance: {$ref: '#/components/schemas/RelayGovernanceManifest'}
+    RelayGovernanceManifest:
+      type: object
+      additionalProperties: false
+      required: [relayConfigurationRevisionId, relayConfigurationHash, routingBundle, routingHash]
+      properties:
+        relayConfigurationRevisionId: {$ref: '#/components/schemas/UUID'}
+        relayConfigurationHash: {$ref: '#/components/schemas/SHA256'}
+        routingBundle: {type: object, additionalProperties: true, maxProperties: 10000}
+        routingHash: {$ref: '#/components/schemas/SHA256'}
+    RoutingBundle:
+      type: object
+      additionalProperties: false
+      required: [schemaVersion, mode, relayConfigurationRevisionId, relayConfigurationHash, globalPolicyRevisionId, globalPolicyHash, profiles]
+      properties:
+        schemaVersion: {const: 1}
+        mode: {type: string, enum: [compatibility, enforced]}
+        relayConfigurationRevisionId: {$ref: '#/components/schemas/UUID'}
+        relayConfigurationHash: {$ref: '#/components/schemas/SHA256'}
+        globalPolicyRevisionId: {$ref: '#/components/schemas/UUID'}
+        globalPolicyHash: {$ref: '#/components/schemas/SHA256'}
+        profiles: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/RoutingProfile'}}
+    RoutingProfile:
+      type: object
+      additionalProperties: false
+      required: [profileId, profileRevisionId, clientKind, category, variant, servers, toolRules]
+      properties:
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        clientKind: {type: string, enum: [claude, codex, shared]}
+        category: {type: string, maxLength: 120}
+        variant: {type: string, minLength: 1, maxLength: 64}
+        servers: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/RoutingServer'}}
+        toolRules: {type: array, maxItems: 20000, items: {$ref: '#/components/schemas/ToolRule'}}
+    RoutingServer:
+      type: object
+      additionalProperties: false
+      required: [serverId, mcpRevisionId, visibilityMode]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        mcpRevisionId: {$ref: '#/components/schemas/UUID'}
+        acceptedContractRevisionId: {$ref: '#/components/schemas/UUID'}
+        visibilityMode: {type: string, enum: [all_accepted, selected, hidden]}
+    ToolRule:
+      type: object
+      additionalProperties: false
+      required: [toolId, visible, decision]
+      properties:
+        toolId: {$ref: '#/components/schemas/UUID'}
+        visible: {type: boolean}
+        decision: {type: string, enum: [allow, confirm, deny]}
+        reasonCodes: {type: array, maxItems: 16, items: {type: string, maxLength: 64}}
+    RelayCapabilityResponse:
+      type: object
+      additionalProperties: false
+      required: [adminProtocolVersion, features, routingSchemaVersions, runtime, runtimeVersion]
+      properties:
+        adminProtocolVersion: {type: integer, const: 1}
+        features: {type: array, uniqueItems: true, maxItems: 32, items: {type: string, maxLength: 64}}
+        routingSchemaVersions: {type: array, uniqueItems: true, maxItems: 8, items: {type: integer}}
+        runtime: {const: mcpm}
+        runtimeVersion: {type: string, maxLength: 64}
+    RelayReloadRequest:
+      type: object
+      additionalProperties: false
+      required: [relayConfigurationRevisionId, routingBundleHash, routingBundle]
+      properties:
+        relayConfigurationRevisionId: {$ref: '#/components/schemas/UUID'}
+        routingBundleHash: {$ref: '#/components/schemas/SHA256'}
+        routingBundle: {$ref: '#/components/schemas/RoutingBundle'}
+    RelayReloadResponse:
+      type: object
+      additionalProperties: false
+      required: [reloaded, routingBundleHash]
+      properties:
+        reloaded: {type: boolean}
+        routingBundleHash: {$ref: '#/components/schemas/SHA256'}
+    ContractObservationResponse:
+      type: object
+      additionalProperties: false
+      required: [serverId, contractRevisionId, canonicalHash, tools]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        contractRevisionId: {$ref: '#/components/schemas/UUID'}
+        canonicalHash: {$ref: '#/components/schemas/SHA256'}
+        tools: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ContractTool'}}
+    ContractTool:
+      type: object
+      additionalProperties: false
+      required: [name, inputSchema, outputSchema, annotations, presentation]
+      properties:
+        toolId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}
+        inputSchema: {type: object, maxProperties: 256}
+        outputSchema: {type: object, maxProperties: 256}
+        annotations: {type: object, maxProperties: 64}
+        presentation: {type: object, maxProperties: 64}
+    ConfirmationListResponse:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, maxItems: 1000, items: {$ref: '#/components/schemas/ConfirmationSummary'}}
+    ConfirmationSummary:
+      type: object
+      additionalProperties: false
+      required: [challengeId, profileId, profileRevisionId, serverId, toolId, decision, argumentHash, expiresAt]
+      properties:
+        challengeId: {type: string, maxLength: 128}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        toolId: {$ref: '#/components/schemas/UUID'}
+        decision: {type: string, enum: [allow, confirm, deny]}
+        argumentHash: {$ref: '#/components/schemas/SHA256'}
+        expiresAt: {type: string, format: date-time}
+    ConfirmationDecisionRequest:
+      type: object
+      additionalProperties: false
+      required: [challengeId, profileName]
+      properties:
+        challengeId: {type: string, maxLength: 128}
+        profileName: {type: string, minLength: 1, maxLength: 120}
+    ConfirmationDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [accepted]
+      properties: {accepted: {type: boolean}}
+    ObservationDrainRequest:
+      type: object
+      additionalProperties: false
+      required: [bootId, cursor, limit]
+      properties:
+        bootId: {type: string, maxLength: 128}
+        cursor: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1, maximum: 10000}
+    ObservationDrainResponse:
+      type: object
+      additionalProperties: false
+      required: [bootId, cursor, items]
+      properties:
+        bootId: {type: string, maxLength: 128}
+        cursor: {type: integer, minimum: 0}
+        items: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/Observation'}}
+    Observation:
+      type: object
+      additionalProperties: false
+      required: [timeBucket, profileId, profileRevisionId, serverId, toolId, decision, outcome]
+      properties:
+        timeBucket: {type: string, maxLength: 64}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        toolId: {$ref: '#/components/schemas/UUID'}
+        decision: {type: string, enum: [allow, confirm, deny]}
+        outcome: {type: string, enum: [denied, confirmation_required, not_executed, executed, failed, unknown]}
+        errorClass: {type: string, maxLength: 64}
+        durationBucket: {type: string, maxLength: 32}
+    NativeClientInspectionResponse:
+      type: object
+      additionalProperties: false
+      required: [clientKind, version, supported]
+      properties:
+        clientKind: {type: string, enum: [claude, codex]}
+        version: {type: string, maxLength: 64}
+        supported: {type: boolean}
+        errorCode: {type: string, maxLength: 64}
     SkillMember:
       type: object
       additionalProperties: false

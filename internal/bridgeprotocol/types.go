@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	ManifestSchemaVersion = 1
-	MaxRequestBytes       = 64 << 20
+	ManifestSchemaVersion   = 1
+	ManifestSchemaVersionV2 = 2
+	MaxRequestBytes         = 64 << 20
 
 	RuntimeClaude      = "claude"
 	RuntimeCodex       = "codex"
@@ -151,14 +152,15 @@ type MCPMember struct {
 }
 
 type DesiredManifest struct {
-	SchemaVersion    int           `json:"schemaVersion"`
-	Target           Target        `json:"target"`
-	ProfileID        string        `json:"profileId,omitempty"`
-	ProfileRevision  int64         `json:"profileRevision,omitempty"`
-	Skills           []SkillMember `json:"skills"`
-	MCPServers       []MCPMember   `json:"mcpServers"`
-	ManagedMemberIDs []string      `json:"managedMemberIds"`
-	RelayPort        int           `json:"relayPort,omitempty"`
+	SchemaVersion    int                      `json:"schemaVersion"`
+	Target           Target                   `json:"target"`
+	ProfileID        string                   `json:"profileId,omitempty"`
+	ProfileRevision  int64                    `json:"profileRevision,omitempty"`
+	Skills           []SkillMember            `json:"skills"`
+	MCPServers       []MCPMember              `json:"mcpServers"`
+	ManagedMemberIDs []string                 `json:"managedMemberIds"`
+	RelayPort        int                      `json:"relayPort,omitempty"`
+	RelayGovernance  *RelayGovernanceManifest `json:"relayGovernance,omitempty"`
 }
 
 func (m *DesiredManifest) Normalize() {
@@ -181,8 +183,18 @@ func (m *DesiredManifest) Normalize() {
 
 func (m DesiredManifest) Validate(write bool) error {
 	m.Normalize()
-	if m.SchemaVersion != ManifestSchemaVersion {
+	if m.SchemaVersion != ManifestSchemaVersion && m.SchemaVersion != ManifestSchemaVersionV2 {
 		return fmt.Errorf("unsupported manifest schema version %d", m.SchemaVersion)
+	}
+	if m.SchemaVersion == ManifestSchemaVersionV2 {
+		if m.Target.Runtime != RuntimeSharedRelay || m.RelayGovernance == nil {
+			return errors.New("Manifest v2 governance is valid only for shared relay targets")
+		}
+		if err := m.RelayGovernance.Validate(); err != nil {
+			return err
+		}
+	} else if m.RelayGovernance != nil {
+		return errors.New("Manifest v1 cannot contain relay governance")
 	}
 	if err := m.Target.Validate(write); err != nil {
 		return err
@@ -269,6 +281,9 @@ func (m DesiredManifest) Canonical() ([]byte, string, error) {
 }
 
 func DecodeManifest(body []byte, write bool) (DesiredManifest, error) {
+	if len(body) > MaxRequestBytes {
+		return DesiredManifest{}, errors.New("manifest exceeds request limit")
+	}
 	var manifest DesiredManifest
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()

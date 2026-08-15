@@ -156,3 +156,22 @@ docker compose exec toolhub wget -qO- http://127.0.0.1:18480/healthz
 Bridge is unavailable, inspect the service, socket group/GID, key equality,
 Salt CLI availability, and recovery logs. Never relax the socket to `0666` or
 mount a managed home to work around access failures.
+
+## Relay Governance Boundary
+
+The private governance routes are typed and remain on the same HMAC Unix
+socket: capability discovery, routing-bundle reload, contract observation,
+confirmation approve/reject, payload-free observation drain, and native-client
+inspection. They do not provide a generic action or body proxy.
+
+Routing bundles contain only immutable revision IDs and hashes, accepted
+contract/tool identities, visibility/risk rules, and the applied policy
+revision. Manifest v2 is valid only for `local/shared-relay` and binds the
+canonical routing hash to the relay configuration hash. Manifest v1 remains
+readable for compatibility restores.
+
+Governance responses never contain call arguments, results, prompts, raw
+errors, persistent session IDs, Secret values, archives, or editable MCP
+configuration. Observation drain carries bounded outcome/error classes and
+time buckets only. Mutation routes retain timestamp/nonce replay protection
+and idempotency semantics.
