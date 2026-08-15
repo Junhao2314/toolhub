@@ -127,21 +127,20 @@ API capability. Restore verifies the restored pinned Skill/MCP members before
 accepting the write; a mismatch atomically rolls back to the recovery backup.
 
 The only allowed relay unit is `toolhub-mcpm-relay.service`; allowed actions are
-status, start, stop, and restart plus structured MCP protocol health. Start and
+status, start, stop, and restart plus structured relay health. Start and
 successful Apply enable the unit; Stop disables it. Restart stops the unit,
 waits for the configured port to become bindable, and starts it without MCPM
-port fallback. Full health initializes one Streamable HTTP session and discovers
-advertised tools, resources, templates, and prompts without invoking business
-tools. Each discovery request is limited to 30 seconds; a failed method is
-retried once within the 90-second total budget so MCPM can finish lazy member
-startup, and a second failure remains fail-closed. Running destructive target
-work cannot be force-cancelled.
+port fallback. Full health checks the fixed admin socket capability, exact
+routing status, and normalized upstream contract observation. It never creates
+a synthetic client session or invokes a business tool. Running destructive
+target work cannot be force-cancelled.
 
-Once backup, registry/profile writes, and integrity validation succeed, Apply
-and Restore keep the new relay configuration even if the fixed port, systemd
-process, or member namespace probe fails. The Bridge returns a successful target
-result with `health=blocked`; write or integrity failures still roll back and
-return an operation error.
+Apply and Restore back up the registry, three native anchors, environment, and
+routing bundle before any write. A routing-only change uses atomic replacement
+plus admin hot reload and does not restart upstream processes. Runtime changes
+use the fixed restart path. A reload, restart, or full-health failure restores
+the complete old file set and old process state, then returns a failed target;
+desired and Published pointers must not advance.
 
 ## Service Checks
 
@@ -164,6 +163,12 @@ socket: capability discovery, routing-bundle reload, contract observation,
 confirmation approve/reject, payload-free observation drain, and native-client
 inspection. They do not provide a generic action or body proxy.
 
+The relay admin protocol is a separate bounded one-line JSON protocol at the
+fixed `/run/toolhub-mcpm/relay.sock`. The systemd unit passes the fixed routing
+file `~/.config/mcpm/toolhub-routing.json`; neither path is caller-selectable.
+The installer requires a compatible preinstalled `/usr/bin/mcpm` contract and
+does not download, install, or update mcpm.
+
 Routing bundles contain only immutable revision IDs and hashes, accepted
 contract/tool identities, visibility/risk rules, and the applied policy
 revision. Manifest v2 is valid only for `local/shared-relay` and binds the
@@ -172,6 +177,9 @@ readable for compatibility restores.
 
 Governance responses never contain call arguments, results, prompts, raw
 errors, persistent session IDs, Secret values, archives, or editable MCP
-configuration. Observation drain carries bounded outcome/error classes and
-time buckets only. Mutation routes retain timestamp/nonce replay protection
-and idempotency semantics.
+configuration. Confirmation summaries contain only exact revision bindings,
+hashes, reason codes, and structural argument summaries. Observation drain uses
+`afterBootId`/`afterSequence`, returns at most 1000 payload-free events, and
+carries bounded outcomes, error classes, duration buckets, and minute buckets.
+Mutation routes retain timestamp/nonce replay protection and idempotency
+semantics.

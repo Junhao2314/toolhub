@@ -21,10 +21,12 @@ import (
 )
 
 type fakeAdapter struct {
-	refreshCalls int
-	commitCalls  int
-	restoreCalls int
-	relayCalls   int
+	refreshCalls         int
+	commitCalls          int
+	restoreCalls         int
+	relayCalls           int
+	relayCapabilityCalls int
+	relayGovernanceCalls int
 }
 
 func (f *fakeAdapter) Health(context.Context) error { return nil }
@@ -65,6 +67,30 @@ func (f *fakeAdapter) RemoveBackup(context.Context, bridgeprotocol.Backup) error
 func (f *fakeAdapter) Relay(context.Context, string, bridgeprotocol.RelayActionRequest) (bridgeprotocol.RelayStatus, error) {
 	f.relayCalls++
 	return bridgeprotocol.RelayStatus{State: "running", Healthy: true}, nil
+}
+func (f *fakeAdapter) RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
+	f.relayCapabilityCalls++
+	return bridgeprotocol.RelayCapabilityResponse{AdminProtocolVersion: 1, Features: []string{"tool-filtering"}, RoutingSchemaVersions: []int{1}, Runtime: "mcpm", RuntimeVersion: "2.15.0-toolhub.1"}, nil
+}
+func (f *fakeAdapter) ReloadRelayGovernance(_ context.Context, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {
+	f.relayGovernanceCalls++
+	return bridgeprotocol.RelayReloadResponse{Reloaded: true, RoutingBundleHash: input.RoutingBundleHash}, nil
+}
+func (f *fakeAdapter) ObserveRelayContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error) {
+	f.relayGovernanceCalls++
+	return bridgeprotocol.ContractObservationResponse{Servers: []bridgeprotocol.ContractServerObservation{}}, nil
+}
+func (f *fakeAdapter) ListRelayConfirmations(context.Context) (bridgeprotocol.ConfirmationListResponse, error) {
+	f.relayGovernanceCalls++
+	return bridgeprotocol.ConfirmationListResponse{Items: []bridgeprotocol.ConfirmationSummary{}}, nil
+}
+func (f *fakeAdapter) DecideRelayConfirmation(_ context.Context, _ bool, input bridgeprotocol.ConfirmationDecisionRequest) (bridgeprotocol.ConfirmationDecisionResponse, error) {
+	f.relayGovernanceCalls++
+	return bridgeprotocol.ConfirmationDecisionResponse{ChallengeID: input.ChallengeID, BindingHash: input.BindingHash}, nil
+}
+func (f *fakeAdapter) DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error) {
+	f.relayGovernanceCalls++
+	return bridgeprotocol.ObservationDrainResponse{BootID: "boot-1", Items: []bridgeprotocol.Observation{}}, nil
 }
 
 func testServer(t *testing.T) (*Server, *fakeAdapter, []byte) {
@@ -201,6 +227,108 @@ func TestRelayRejectsInvalidTargetAndPort(t *testing.T) {
 				t.Fatalf("adapter relay calls=%d; want zero", adapter.relayCalls)
 			}
 		})
+	}
+}
+
+func TestRelayGovernanceCapabilityIsTypedAndEphemeral(t *testing.T) {
+	server, adapter, key := testServer(t)
+	invalid := signedRequest(t, key, http.MethodPost, "/v1/relay/governance/capability", []byte(`{"path":"/tmp/relay.sock"}`), server.now(), "governance-capability-bad", "")
+	invalidRecorder := httptest.NewRecorder()
+	server.Router().ServeHTTP(invalidRecorder, invalid)
+	if invalidRecorder.Code != http.StatusBadRequest || adapter.relayCapabilityCalls != 0 {
+		t.Fatalf("invalid capability status=%d calls=%d body=%s", invalidRecorder.Code, adapter.relayCapabilityCalls, invalidRecorder.Body.String())
+	}
+
+	request := signedRequest(t, key, http.MethodPost, "/v1/relay/governance/capability", []byte(`{}`), server.now(), "governance-capability-ok", "")
+	recorder := httptest.NewRecorder()
+	server.Router().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || adapter.relayCapabilityCalls != 1 || !bytes.Contains(recorder.Body.Bytes(), []byte(`"adminProtocolVersion":1`)) {
+		t.Fatalf("capability status=%d calls=%d body=%s", recorder.Code, adapter.relayCapabilityCalls, recorder.Body.String())
+	}
+	assertIdempotencyJournalEmpty(t, server.journal)
+}
+
+func TestRelayGovernanceReadBatchesAreEphemeral(t *testing.T) {
+	server, adapter, key := testServer(t)
+	observed := serveSignedMutation(t, server, key, "/v1/relay/governance/contracts/observe", "governance-observe-read", "observe-read-key", map[string]any{})
+	if observed.Code != http.StatusOK || adapter.relayGovernanceCalls != 1 {
+		t.Fatalf("observe status=%d calls=%d body=%s", observed.Code, adapter.relayGovernanceCalls, observed.Body.String())
+	}
+	drained := serveSignedMutation(t, server, key, "/v1/relay/governance/observations/drain", "governance-drain-read", "drain-read-key", bridgeprotocol.ObservationDrainRequest{Limit: 1000})
+	if drained.Code != http.StatusOK || adapter.relayGovernanceCalls != 2 {
+		t.Fatalf("drain status=%d calls=%d body=%s", drained.Code, adapter.relayGovernanceCalls, drained.Body.String())
+	}
+	assertIdempotencyJournalEmpty(t, server.journal)
+}
+
+func TestRelayGovernanceReloadRequiresCanonicalBoundBundle(t *testing.T) {
+	server, adapter, key := testServer(t)
+	bundle := bridgeprotocol.RoutingBundle{
+		SchemaVersion: 1, Mode: "compatibility",
+		RelayConfigurationRevisionID: "00000000-0000-0000-0000-000000000001",
+		RelayConfigurationHash:       strings.Repeat("a", 64),
+		GlobalPolicyRevisionID:       "00000000-0000-0000-0000-000000000002",
+		GlobalPolicyHash:             strings.Repeat("b", 64),
+		Servers:                      []bridgeprotocol.ServerContractDTO{}, Profiles: []bridgeprotocol.PublishedProfileDTO{},
+	}
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := bridgeprotocol.RelayReloadRequest{RelayConfigurationRevisionID: bundle.RelayConfigurationRevisionID, RoutingBundleHash: hash, RoutingBundle: body}
+	recorder := serveSignedMutation(t, server, key, "/v1/relay/governance/reload", "governance-reload-ok", "governance-reload-key", input)
+	if recorder.Code != http.StatusOK || adapter.relayGovernanceCalls != 1 || !bytes.Contains(recorder.Body.Bytes(), []byte(hash)) {
+		t.Fatalf("reload status=%d calls=%d body=%s", recorder.Code, adapter.relayGovernanceCalls, recorder.Body.String())
+	}
+	assertJournalOmitsMarker(t, server.journal, "governance-reload-key", strings.Repeat("b", 64))
+
+	input.RoutingBundleHash = strings.Repeat("c", 64)
+	bad := serveSignedMutation(t, server, key, "/v1/relay/governance/reload", "governance-reload-bad", "governance-reload-bad-key", input)
+	if bad.Code != http.StatusBadRequest || adapter.relayGovernanceCalls != 1 {
+		t.Fatalf("invalid reload status=%d calls=%d body=%s", bad.Code, adapter.relayGovernanceCalls, bad.Body.String())
+	}
+}
+
+func TestRelayGovernanceDrainRejectsCompanionLimitOverflow(t *testing.T) {
+	server, adapter, key := testServer(t)
+	input := bridgeprotocol.ObservationDrainRequest{AfterSequence: 0, Limit: 1001}
+	recorder := serveSignedMutation(t, server, key, "/v1/relay/governance/observations/drain", "governance-drain-bad", "governance-drain-key", input)
+	if recorder.Code != http.StatusBadRequest || adapter.relayGovernanceCalls != 0 {
+		t.Fatalf("drain status=%d calls=%d body=%s", recorder.Code, adapter.relayGovernanceCalls, recorder.Body.String())
+	}
+	invalidBootID := "not-a-uuid"
+	input = bridgeprotocol.ObservationDrainRequest{AfterBootID: &invalidBootID, Limit: 1000}
+	recorder = serveSignedMutation(t, server, key, "/v1/relay/governance/observations/drain", "governance-drain-boot", "governance-drain-boot-key", input)
+	if recorder.Code != http.StatusBadRequest || adapter.relayGovernanceCalls != 0 {
+		t.Fatalf("drain boot status=%d calls=%d body=%s", recorder.Code, adapter.relayGovernanceCalls, recorder.Body.String())
+	}
+}
+
+func assertIdempotencyJournalEmpty(t *testing.T, journal *Journal) {
+	t.Helper()
+	if err := journal.db.View(func(tx *bolt.Tx) error {
+		if tx.Bucket(bucketIdempotency).Stats().KeyN != 0 {
+			return errors.New("ephemeral governance read entered the idempotency journal")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertJournalOmitsMarker(t *testing.T, journal *Journal, key, marker string) {
+	t.Helper()
+	if err := journal.db.View(func(tx *bolt.Tx) error {
+		value := tx.Bucket(bucketIdempotency).Get([]byte(key))
+		if value == nil {
+			return errors.New("governance mutation omitted its idempotency record")
+		}
+		if bytes.Contains(value, []byte(marker)) {
+			return errors.New("governance mutation persisted request content")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

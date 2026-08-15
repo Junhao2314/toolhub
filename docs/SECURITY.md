@@ -102,20 +102,27 @@ read-only for Skills and inventory.
 
 ## MCP Scope
 
-Local MCP requires a compatible preinstalled `mcpm`. ToolHub manages one profile
-named `toolhub`, one fixed relay unit, and one `toolhub-relay` user-scope anchor in
+Local MCP requires a compatible preinstalled `/usr/bin/mcpm` whose machine-
+readable ToolHub contract advertises admin protocol 1, routing schema 1, and all
+required governance features. The installer and runtime fail closed; neither
+auto-finds, installs, upgrades, nor falls back to native per-server local
+delivery. ToolHub manages one profile named `toolhub`, one fixed relay unit, one
+atomic routing file at `~/.config/mcpm/toolhub-routing.json`, one admin socket at
+`/run/toolhub-mcpm/relay.sock`, and one `toolhub-relay` user-scope anchor in
 `~/.claude.json`, `~/.codex/config.toml`, and `~/.hermes/config.yaml`. Local
 Hermes' existing `mcp_servers` map is collapsed on Apply; reconcile preserves
-later unmanaged entries. ToolHub does not auto-find, install, upgrade, or fall
-back to native per-server local delivery.
+later unmanaged entries.
 
 The relay unit hides all homes with a private tmpfs and binds back only the
-selected canonical managed home as writable. `ProtectSystem=strict`, an empty
-capability bounding set, private devices, kernel/control-group protections, and
-the address-family allowlist remain active. `MemoryDenyWriteExecute` is not used
-because supported Node/V8 MCPs require JIT memory. A managed user with Docker
-socket access, including a root managed user, is equivalent to host control;
-this is an accepted operational trust boundary, not strong process isolation.
+selected canonical managed home as writable. Its private runtime directory,
+admin socket, and files are created under a `UMask=0077`; the socket protocol is
+one-line, size/deadline bounded, and exposes fixed typed operations only.
+`ProtectSystem=strict`, an empty capability bounding set, private devices,
+kernel/control-group protections, and the address-family allowlist remain
+active. `MemoryDenyWriteExecute` is not used because supported Node/V8 MCPs
+require JIT memory. A managed user with Docker socket access, including a root
+managed user, is equivalent to host control; this is an accepted operational
+trust boundary, not strong process isolation.
 
 Each managed mcpm registry entry carries its Library content hash plus a runtime
 integrity hash. Relay scans project the Library hash only while the actual entry,

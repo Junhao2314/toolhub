@@ -23,6 +23,51 @@ canonical_home="$(readlink -f -- "$managed_home")"
 [ -n "$canonical_home" ] && [ "$canonical_home" = "$managed_home" ] || { printf '%s\n' 'managed user home must be canonical and must not be a symlink' >&2; exit 1; }
 managed_home="$canonical_home"
 [ -x /usr/local/sbin/toolhub-bridge ] || { printf '%s\n' '/usr/local/sbin/toolhub-bridge is missing' >&2; exit 1; }
+[ -x /usr/bin/mcpm ] || { printf '%s\n' '/usr/bin/mcpm is missing; install a compatible ToolHub mcpm build before running this installer' >&2; exit 1; }
+[ -x /usr/bin/python3 ] && [ -x /usr/bin/timeout ] && [ -x /usr/sbin/runuser ] || { printf '%s\n' 'python3, timeout, and runuser are required to validate mcpm' >&2; exit 1; }
+
+if ! /usr/bin/timeout 5s /usr/sbin/runuser -u "$managed_user" -- /usr/bin/mcpm toolhub contract --json \
+    | /usr/bin/python3 -c '
+import json
+import sys
+
+required_features = {
+    "profile-session-binding",
+    "tool-filtering",
+    "call-policy",
+    "one-shot-confirmation",
+    "payload-free-observations",
+    "routing-hot-reload",
+}
+expected_fields = {
+    "adminProtocolVersion",
+    "features",
+    "routingSchemaVersions",
+    "runtime",
+    "runtimeVersion",
+}
+try:
+    contract = json.load(sys.stdin)
+    valid = (
+        isinstance(contract, dict)
+        and set(contract) == expected_fields
+        and contract.get("adminProtocolVersion") == 1
+        and contract.get("runtime") == "mcpm"
+        and isinstance(contract.get("runtimeVersion"), str)
+        and 0 < len(contract["runtimeVersion"]) <= 64
+        and isinstance(contract.get("features"), list)
+        and all(isinstance(value, str) for value in contract["features"])
+        and required_features.issubset(set(contract["features"]))
+        and isinstance(contract.get("routingSchemaVersions"), list)
+        and 1 in contract["routingSchemaVersions"]
+    )
+except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    valid = False
+raise SystemExit(0 if valid else 1)
+'; then
+    printf '%s\n' '/usr/bin/mcpm does not provide the required ToolHub routing/admin contract; no package was installed or updated' >&2
+    exit 1
+fi
 
 install -d -m 0700 /etc/toolhub-bridge /var/lib/toolhub-bridge
 if [ ! -f /etc/toolhub-bridge/hmac.key ]; then

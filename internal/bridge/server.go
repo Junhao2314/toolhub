@@ -14,6 +14,7 @@ import (
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/skills"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 const authWindow = 30 * time.Second
@@ -32,6 +33,12 @@ type Adapter interface {
 	Restore(context.Context, bridgeprotocol.CommitRequest) (bridgeprotocol.TargetResult, error)
 	RemoveBackup(context.Context, bridgeprotocol.Backup) error
 	Relay(context.Context, string, bridgeprotocol.RelayActionRequest) (bridgeprotocol.RelayStatus, error)
+	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
+	ReloadRelayGovernance(context.Context, bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error)
+	ObserveRelayContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error)
+	ListRelayConfirmations(context.Context) (bridgeprotocol.ConfirmationListResponse, error)
+	DecideRelayConfirmation(context.Context, bool, bridgeprotocol.ConfirmationDecisionRequest) (bridgeprotocol.ConfirmationDecisionResponse, error)
+	DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error)
 }
 
 type Server struct {
@@ -91,6 +98,17 @@ func (s *Server) Router() http.Handler {
 		action := action
 		router.Post("/v1/relay/"+action, s.mutation(func(ctx context.Context, body []byte) (int, any, error) { return s.relay(ctx, action, body) }))
 	}
+	router.Post("/v1/relay/governance/capability", s.ephemeral(s.relayGovernanceCapability))
+	router.Post("/v1/relay/governance/reload", s.mutation(s.reloadRelayGovernance))
+	router.Post("/v1/relay/governance/contracts/observe", s.ephemeral(s.observeRelayContracts))
+	router.Post("/v1/relay/governance/confirmations/list", s.ephemeral(s.listRelayConfirmations))
+	router.Post("/v1/relay/governance/confirmations/approve", s.mutation(func(ctx context.Context, body []byte) (int, any, error) {
+		return s.decideRelayConfirmation(ctx, true, body)
+	}))
+	router.Post("/v1/relay/governance/confirmations/reject", s.mutation(func(ctx context.Context, body []byte) (int, any, error) {
+		return s.decideRelayConfirmation(ctx, false, body)
+	}))
+	router.Post("/v1/relay/governance/observations/drain", s.ephemeral(s.drainRelayObservations))
 	router.Get("/v1/operations/{operationID}", s.operation)
 	router.Post("/v1/operations/{operationID}/cancel", s.mutation(s.cancelOperation))
 	return router
@@ -392,6 +410,76 @@ func (s *Server) relay(ctx context.Context, action string, body []byte) (int, an
 	}
 	result, err := s.adapter.Relay(ctx, action, input)
 	return http.StatusOK, result, err
+}
+
+func (s *Server) relayGovernanceCapability(ctx context.Context, body []byte) (int, any, error) {
+	if err := decodeEmptyObject(body); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	result, err := s.adapter.RelayCapability(ctx)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) reloadRelayGovernance(ctx context.Context, body []byte) (int, any, error) {
+	var input bridgeprotocol.RelayReloadRequest
+	if err := bridgeprotocol.DecodeGovernanceBody(body, &input); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	var bundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(input.RoutingBundle, &bundle); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	_, hash, err := bundle.Canonical()
+	if err != nil || hash != input.RoutingBundleHash || bundle.RelayConfigurationRevisionID != input.RelayConfigurationRevisionID {
+		return 0, nil, invalidRequest(errors.New("relay reload bundle binding is invalid"))
+	}
+	result, err := s.adapter.ReloadRelayGovernance(ctx, input)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) observeRelayContracts(ctx context.Context, body []byte) (int, any, error) {
+	if err := decodeEmptyObject(body); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	result, err := s.adapter.ObserveRelayContracts(ctx)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) listRelayConfirmations(ctx context.Context, body []byte) (int, any, error) {
+	if err := decodeEmptyObject(body); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	result, err := s.adapter.ListRelayConfirmations(ctx)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) decideRelayConfirmation(ctx context.Context, approve bool, body []byte) (int, any, error) {
+	var input bridgeprotocol.ConfirmationDecisionRequest
+	if err := bridgeprotocol.DecodeGovernanceBody(body, &input); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	if !bridgeprotocol.IsSHA256(input.ChallengeID) || !bridgeprotocol.IsSHA256(input.BindingHash) {
+		return 0, nil, invalidRequest(errors.New("confirmation challenge and binding hashes are invalid"))
+	}
+	result, err := s.adapter.DecideRelayConfirmation(ctx, approve, input)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) drainRelayObservations(ctx context.Context, body []byte) (int, any, error) {
+	var input bridgeprotocol.ObservationDrainRequest
+	if err := bridgeprotocol.DecodeGovernanceBody(body, &input); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	if input.AfterSequence < 0 || input.Limit < 1 || input.Limit > 1000 || (input.AfterBootID != nil && uuid.Validate(*input.AfterBootID) != nil) {
+		return 0, nil, invalidRequest(errors.New("observation cursor or limit is invalid"))
+	}
+	result, err := s.adapter.DrainRelayObservations(ctx, input)
+	return http.StatusOK, result, err
+}
+
+func decodeEmptyObject(body []byte) error {
+	var input struct{}
+	return decodeStrict(body, &input)
 }
 
 func (s *Server) operation(w http.ResponseWriter, r *http.Request) {

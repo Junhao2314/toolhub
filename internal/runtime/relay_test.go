@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,10 +20,10 @@ import (
 )
 
 type fakeRelayController struct {
-	state       string
-	enabled     bool
-	failRestart bool
-	actions     []string
+	state      string
+	enabled    bool
+	failStarts int
+	actions    []string
 }
 
 func (f *fakeRelayController) Action(_ context.Context, action string) (string, error) {
@@ -42,7 +43,8 @@ func (f *fakeRelayController) Action(_ context.Context, action string) (string, 
 		f.enabled = true
 		return "enabled", nil
 	case "restart", "start", "start-unit":
-		if f.failRestart {
+		if f.failStarts > 0 {
+			f.failStarts--
 			return f.state, errors.New("injected restart failure")
 		}
 		if action == "start" {
@@ -58,6 +60,88 @@ func (f *fakeRelayController) Action(_ context.Context, action string) (string, 
 		return f.state, nil
 	default:
 		return "", errors.New("unsupported action")
+	}
+}
+
+type fakeMCPMAdmin struct {
+	reloadStatuses []bridgeprotocol.RelayAdminStatus
+	reloadErrors   []error
+	reloadCalls    int
+	capability     *bridgeprotocol.RelayCapabilityResponse
+	capabilityErr  error
+	status         bridgeprotocol.RelayAdminStatus
+	statusErr      error
+	observation    bridgeprotocol.ContractObservationResponse
+	observationErr error
+	autoManifest   bool
+}
+
+func (f *fakeMCPMAdmin) Capability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
+	if f.capabilityErr != nil {
+		return bridgeprotocol.RelayCapabilityResponse{}, f.capabilityErr
+	}
+	if f.capability != nil {
+		return *f.capability, nil
+	}
+	return bridgeprotocol.RelayCapabilityResponse{AdminProtocolVersion: 1, Features: append([]string(nil), requiredMCPMFeatures...), RoutingSchemaVersions: []int{1}, Runtime: "mcpm", RuntimeVersion: "1.0.0-toolhub.1"}, nil
+}
+func (f *fakeMCPMAdmin) ReloadRouting(context.Context) (bridgeprotocol.RelayAdminStatus, error) {
+	index := f.reloadCalls
+	f.reloadCalls++
+	if index < len(f.reloadErrors) && f.reloadErrors[index] != nil {
+		return bridgeprotocol.RelayAdminStatus{}, f.reloadErrors[index]
+	}
+	if index < len(f.reloadStatuses) {
+		return f.reloadStatuses[index], nil
+	}
+	return f.status, nil
+}
+func (f *fakeMCPMAdmin) Status(context.Context) (bridgeprotocol.RelayAdminStatus, error) {
+	if f.statusErr != nil {
+		return bridgeprotocol.RelayAdminStatus{}, f.statusErr
+	}
+	if len(f.reloadStatuses) == 0 {
+		return f.status, nil
+	}
+	return f.reloadStatuses[len(f.reloadStatuses)-1], nil
+}
+func (f *fakeMCPMAdmin) ObserveContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error) {
+	return f.observation, f.observationErr
+}
+func (f *fakeMCPMAdmin) ListConfirmations(context.Context) (bridgeprotocol.ConfirmationListResponse, error) {
+	return bridgeprotocol.ConfirmationListResponse{Items: []bridgeprotocol.ConfirmationSummary{}}, nil
+}
+func (f *fakeMCPMAdmin) DecideConfirmation(context.Context, bool, bridgeprotocol.ConfirmationDecisionRequest) (bridgeprotocol.ConfirmationDecisionResponse, error) {
+	return bridgeprotocol.ConfirmationDecisionResponse{}, nil
+}
+func (f *fakeMCPMAdmin) DrainObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error) {
+	return bridgeprotocol.ObservationDrainResponse{Items: []bridgeprotocol.Observation{}}, nil
+}
+
+func (f *fakeMCPMAdmin) configureManifest(t *testing.T, manifest bridgeprotocol.DesiredManifest) {
+	t.Helper()
+	f.status = bridgeprotocol.RelayAdminStatus{PublishedProfileRevisions: []bridgeprotocol.RelayAdminProfileRevision{}}
+	f.observation = bridgeprotocol.ContractObservationResponse{Servers: make([]bridgeprotocol.ContractServerObservation, 0, len(manifest.MCPServers))}
+	configRevisions := map[string]string{}
+	if manifest.RelayGovernance != nil {
+		var bundle bridgeprotocol.RoutingBundle
+		if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &bundle); err != nil {
+			t.Fatal(err)
+		}
+		f.status.Mode = bundle.Mode
+		f.status.RelayConfigurationRevisionID = bundle.RelayConfigurationRevisionID
+		f.status.GlobalPolicyRevisionID = bundle.GlobalPolicyRevisionID
+		f.status.RoutingBundleHash = manifest.RelayGovernance.RoutingHash
+		f.observation.RelayConfigurationRevisionID = bundle.RelayConfigurationRevisionID
+		for _, server := range bundle.Servers {
+			configRevisions[server.ServerID] = server.MCPConfigRevisionID
+		}
+		for _, profile := range bundle.Profiles {
+			f.status.PublishedProfileRevisions = append(f.status.PublishedProfileRevisions, bridgeprotocol.RelayAdminProfileRevision{ProfileID: profile.ProfileID, ProfileRevisionID: profile.ProfileRevisionID, ProfileRevisionHash: profile.ProfileRevisionHash})
+		}
+	}
+	for _, member := range manifest.MCPServers {
+		f.observation.Servers = append(f.observation.Servers, bridgeprotocol.ContractServerObservation{ServerID: member.ServerID, ServerName: member.Name, MCPConfigRevisionID: configRevisions[member.ServerID], Tools: []bridgeprotocol.ContractToolDTO{}})
 	}
 }
 
@@ -108,43 +192,144 @@ func TestRelayPausedReconcileRepairsConfigWithoutRestart(t *testing.T) {
 	}
 }
 
-func TestRelayApplyRuntimeFailureKeepsValidatedConfiguration(t *testing.T) {
+func TestRelayApplyRuntimeFailureRollsBackFilesAndOldProcess(t *testing.T) {
 	manager, controller, user, target, port := relayFixture(t, true)
-	firstManifest := relayManifest(target, port, "https://example.invalid/one")
+	firstManifest := relayManifestV2(t, target, port, "https://example.invalid/one")
 	applyRelay(t, manager, user, firstManifest, "apply", false)
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
-	files := []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, manager.EnvironmentFile}
+	files := []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.RoutingFile, manager.EnvironmentFile}
 	before := map[string][]byte{}
 	for _, path := range files {
 		before[path], _ = os.ReadFile(path)
 	}
-	controller.failRestart = true
+	controller.failStarts = 1
 	current, _ := (&Manager{}).scanRelay(paths)
-	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: relayManifest(target, port, "https://example.invalid/two")}
-	result, err := manager.Apply(context.Background(), user, request)
-	if err != nil || result.Status != bridgeprotocol.OperationSucceeded || result.Health != bridgeprotocol.HealthBlocked || result.Error == nil || result.Error.Code != bridgeprotocol.ErrRelayUnhealthy {
+	changed := firstManifest
+	changed.MCPServers = append([]bridgeprotocol.MCPMember(nil), firstManifest.MCPServers...)
+	changed.MCPServers[0].URL = "https://example.invalid/two"
+	changed = withRelayGovernance(t, changed, "00000000-0000-0000-0000-000000000010", strings.Repeat("c", 64), "00000000-0000-0000-0000-000000000020", strings.Repeat("d", 64))
+	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: changed}
+	if result, err := manager.Apply(context.Background(), user, request); err == nil || result.Status == bridgeprotocol.OperationSucceeded {
 		t.Fatalf("Apply result=%+v error=%v", result, err)
 	}
-	after, readErr := os.ReadFile(paths.MCPMRegistry)
-	if readErr != nil || string(after) == string(before[paths.MCPMRegistry]) || !strings.Contains(string(after), "https://example.invalid/two") {
-		t.Fatalf("validated registry was not retained: %s err=%v", after, readErr)
+	for _, path := range files {
+		after, readErr := os.ReadFile(path)
+		if readErr != nil || string(after) != string(before[path]) {
+			t.Fatalf("rollback mismatch for %s: err=%v body=%s", path, readErr, after)
+		}
+	}
+	if controller.state != "active" || !controller.enabled {
+		t.Fatalf("old relay process was not restored: state=%q enabled=%v actions=%v", controller.state, controller.enabled, controller.actions)
 	}
 }
 
-func TestRelayApplyMCPMContractFailureKeepsValidatedConfiguration(t *testing.T) {
+func TestRelayApplyMCPMContractFailureDoesNotWriteConfiguration(t *testing.T) {
 	manager, _, user, target, port := relayFixture(t, false)
 	manager.MCPMPath = filepath.Join(t.TempDir(), "missing-mcpm")
-	manifest := relayManifest(target, port, "https://example.invalid/one")
-	result := applyRelay(t, manager, user, manifest, "apply", false)
-	if result.Status != bridgeprotocol.OperationSucceeded || result.Health != bridgeprotocol.HealthBlocked || result.BackupID == "" || result.Manifest == nil {
-		t.Fatalf("Apply result=%+v", result)
+	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	current, _ := (&Manager{}).scanRelay(paths)
+	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: relayManifestV2(t, target, port, "https://example.invalid/one")}
+	_, err := manager.Apply(context.Background(), user, request)
+	var apiErr *bridgeprotocol.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrMCPMMissing {
+		t.Fatalf("Apply contract error=%v", err)
 	}
-	if result.Error == nil || result.Error.Code != bridgeprotocol.ErrMCPMMissing || result.Relay == nil || result.Relay.ErrorCode != bridgeprotocol.ErrMCPMMissing {
-		t.Fatalf("Apply did not project the MCPM contract failure: %+v", result)
+	for _, path := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.RoutingFile, manager.EnvironmentFile} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("contract failure wrote %s: %v", path, statErr)
+		}
+	}
+}
+
+func TestRelayProfileOnlyApplyHotReloadsWithoutRestart(t *testing.T) {
+	manager, controller, user, target, port := relayFixture(t, true)
+	first := relayManifestV2(t, target, port, "https://example.invalid/one")
+	applyRelay(t, manager, user, first, "apply", false)
+	second := withRelayGovernance(t, first, first.RelayGovernance.RelayConfigurationRevisionID, first.RelayGovernance.RelayConfigurationHash, "00000000-0000-0000-0000-000000000099", strings.Repeat("e", 64))
+	admin := &fakeMCPMAdmin{reloadStatuses: []bridgeprotocol.RelayAdminStatus{{Mode: "compatibility", RelayConfigurationRevisionID: second.RelayGovernance.RelayConfigurationRevisionID, GlobalPolicyRevisionID: "00000000-0000-0000-0000-000000000099", RoutingBundleHash: second.RelayGovernance.RoutingHash, PublishedProfileRevisions: []bridgeprotocol.RelayAdminProfileRevision{}}}}
+	manager.Admin = admin
+	controller.actions = nil
+	result := applyRelay(t, manager, user, second, "apply", false)
+	if result.Status != bridgeprotocol.OperationSucceeded || result.Health != bridgeprotocol.HealthHealthy || admin.reloadCalls != 1 {
+		t.Fatalf("profile-only result=%+v reloadCalls=%d", result, admin.reloadCalls)
+	}
+	for _, action := range controller.actions {
+		if action == "stop" || action == "stop-unit" || action == "start" || action == "start-unit" {
+			t.Fatalf("profile-only Apply restarted relay: %v", controller.actions)
+		}
 	}
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
-	if matches, err := relayConfigurationMatches(paths, manager.EnvironmentFile, manifest, nil, false); err != nil || !matches {
-		t.Fatalf("validated configuration was not retained: matches=%v err=%v", matches, err)
+	body, err := os.ReadFile(paths.RoutingFile)
+	if err != nil || string(body) != string(second.RelayGovernance.RoutingBundle) {
+		t.Fatalf("routing file=%s err=%v", body, err)
+	}
+}
+
+func TestRelayFirstGovernanceDeliveryRestartsInsteadOfHotReload(t *testing.T) {
+	manager, controller, user, target, port := relayFixture(t, true)
+	legacy := relayManifest(target, port, "https://example.invalid/one")
+	applyRelay(t, manager, user, legacy, "apply", false)
+	governed := withRelayGovernance(t, legacy, "00000000-0000-0000-0000-000000000010", strings.Repeat("c", 64), "00000000-0000-0000-0000-000000000020", strings.Repeat("d", 64))
+	admin := manager.Admin.(*fakeMCPMAdmin)
+	controller.actions = nil
+	admin.reloadCalls = 0
+	result := applyRelay(t, manager, user, governed, "apply", false)
+	if result.Status != bridgeprotocol.OperationSucceeded || result.Health != bridgeprotocol.HealthHealthy {
+		t.Fatalf("first governed Apply result=%+v", result)
+	}
+	if admin.reloadCalls != 0 {
+		t.Fatalf("first governed Apply hot reloaded without an old routing bundle: reloadCalls=%d", admin.reloadCalls)
+	}
+	actions := strings.Join(controller.actions, ",")
+	if !strings.Contains(actions, "enable,stop-unit,start-unit") {
+		t.Fatalf("first governed Apply did not use fixed restart: actions=%v", controller.actions)
+	}
+}
+
+func TestRelayProfileOnlyReloadFailureRestoresOldRoutingBundle(t *testing.T) {
+	manager, controller, user, target, port := relayFixture(t, true)
+	first := relayManifestV2(t, target, port, "https://example.invalid/one")
+	applyRelay(t, manager, user, first, "apply", false)
+	second := withRelayGovernance(t, first, first.RelayGovernance.RelayConfigurationRevisionID, first.RelayGovernance.RelayConfigurationHash, "00000000-0000-0000-0000-000000000099", strings.Repeat("e", 64))
+	manager.Admin = &fakeMCPMAdmin{
+		reloadErrors:   []error{errors.New("injected reload failure"), nil},
+		reloadStatuses: []bridgeprotocol.RelayAdminStatus{{}, {Mode: "compatibility", RelayConfigurationRevisionID: first.RelayGovernance.RelayConfigurationRevisionID, RoutingBundleHash: first.RelayGovernance.RoutingHash, PublishedProfileRevisions: []bridgeprotocol.RelayAdminProfileRevision{}}},
+	}
+	controller.actions = nil
+	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	current, _ := (&Manager{}).scanRelay(paths)
+	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: second}
+	if _, err := manager.Apply(context.Background(), user, request); err == nil {
+		t.Fatal("profile-only reload failure unexpectedly succeeded")
+	}
+	body, err := os.ReadFile(paths.RoutingFile)
+	if err != nil || string(body) != string(first.RelayGovernance.RoutingBundle) {
+		t.Fatalf("old routing bundle was not restored: body=%s err=%v", body, err)
+	}
+	for _, action := range controller.actions {
+		if action == "stop" || action == "stop-unit" || action == "start" || action == "start-unit" {
+			t.Fatalf("recoverable hot reload failure restarted relay: %v", controller.actions)
+		}
+	}
+}
+
+func TestRelayBackupRecordsRoutingFileMetadata(t *testing.T) {
+	manager, _, user, target, port := relayFixture(t, true)
+	first := relayManifestV2(t, target, port, "https://example.invalid/one")
+	applyRelay(t, manager, user, first, "apply", false)
+	changed := first
+	changed.MCPServers = append([]bridgeprotocol.MCPMember(nil), first.MCPServers...)
+	changed.MCPServers[0].URL = "https://example.invalid/two"
+	changed = withRelayGovernance(t, changed, "00000000-0000-0000-0000-000000000010", strings.Repeat("c", 64), "00000000-0000-0000-0000-000000000020", strings.Repeat("d", 64))
+	result := applyRelay(t, manager, user, changed, "apply", false)
+	backupDirectory := filepath.Join(manager.BackupRoot, target.ID, result.BackupID)
+	routing, err := os.ReadFile(filepath.Join(backupDirectory, "routing"))
+	if err != nil || string(routing) != string(first.RelayGovernance.RoutingBundle) {
+		t.Fatalf("routing backup=%s err=%v", routing, err)
+	}
+	state, err := os.ReadFile(filepath.Join(backupDirectory, "state.json"))
+	if err != nil || !bytes.Contains(state, []byte(`"routing":{"exists":true,"mode":384`)) || !bytes.Contains(state, []byte(first.RelayGovernance.RoutingHash)) {
+		t.Fatalf("routing backup metadata=%s err=%v", state, err)
 	}
 }
 
@@ -211,6 +396,7 @@ func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 		}
 		return healthyRelayResponse(request)
 	})}
+	manager.Admin.(*fakeMCPMAdmin).configureManifest(t, firstManifest)
 	result, err := manager.Restore(context.Background(), user, bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "restore", Target: target, ExpectedRevision: current.Revision, BackupID: second.BackupID, Manifest: firstManifest})
 	if err != nil || result.BackupID == "" {
 		t.Fatalf("Restore result=%+v err=%v", result, err)
@@ -225,6 +411,38 @@ func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	}
 	if readinessAttempts != 3 {
 		t.Fatalf("Restore health attempts=%d", readinessAttempts)
+	}
+}
+
+func TestRelayRestoreRuntimeFailureRollsBackFilesAndOldProcess(t *testing.T) {
+	manager, controller, user, target, port := relayFixture(t, true)
+	first := relayManifestV2(t, target, port, "https://example.invalid/one")
+	applyRelay(t, manager, user, first, "apply", false)
+	second := first
+	second.MCPServers = append([]bridgeprotocol.MCPMember(nil), first.MCPServers...)
+	second.MCPServers[0].URL = "https://example.invalid/two"
+	second = withRelayGovernance(t, second, "00000000-0000-0000-0000-000000000010", strings.Repeat("c", 64), "00000000-0000-0000-0000-000000000020", strings.Repeat("d", 64))
+	secondResult := applyRelay(t, manager, user, second, "apply", false)
+	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	files := []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.RoutingFile, manager.EnvironmentFile}
+	before := map[string][]byte{}
+	for _, path := range files {
+		before[path], _ = os.ReadFile(path)
+	}
+	controller.failStarts = 1
+	current, _ := (&Manager{}).scanRelay(paths)
+	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "restore", Target: target, ExpectedRevision: current.Revision, BackupID: secondResult.BackupID, Manifest: first}
+	if result, err := manager.Restore(context.Background(), user, request); err == nil || result.Status == bridgeprotocol.OperationSucceeded {
+		t.Fatalf("Restore result=%+v err=%v", result, err)
+	}
+	for _, path := range files {
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != string(before[path]) {
+			t.Fatalf("restore rollback mismatch for %s: err=%v body=%s", path, err, after)
+		}
+	}
+	if controller.state != "active" || !controller.enabled {
+		t.Fatalf("old relay process was not restored: state=%q enabled=%v actions=%v", controller.state, controller.enabled, controller.actions)
 	}
 }
 
@@ -325,15 +543,51 @@ func TestValidateMCPMRejectsUnparseableVersion(t *testing.T) {
 	}
 }
 
-func TestValidateMCPMReturnsCanonicalVersionOnly(t *testing.T) {
+func TestValidateMCPMRejectsPlainUpstreamVersionWithoutToolHubContract(t *testing.T) {
 	mcpm := filepath.Join(t.TempDir(), "mcpm")
-	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf 'mcpm v12.3.4 build=private-output\\n'\n"), 0700); err != nil {
+	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'mcpm 2.15.0\\n'; exit 0; fi\nprintf 'No such command toolhub\\n' >&2\nexit 2\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewRelayManager(&fakeRelayController{}, t.TempDir())
+	manager.MCPMPath = mcpm
+	_, err := manager.ValidateMCPM(context.Background())
+	var apiErr *bridgeprotocol.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
+		t.Fatalf("plain mcpm contract error=%v", err)
+	}
+}
+
+func TestValidateMCPMRequiresCompleteToolHubCapabilityContract(t *testing.T) {
+	contract := `{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"2.15.0-toolhub.1"}`
+	mcpm := filepath.Join(t.TempDir(), "mcpm")
+	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf '%s\\n' '"+contract+"'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	manager := NewRelayManager(&fakeRelayController{}, t.TempDir())
 	manager.MCPMPath = mcpm
 	version, err := manager.ValidateMCPM(context.Background())
-	if err != nil || version != "12.3.4" {
+	if err != nil || version != "2.15.0-toolhub.1" {
+		t.Fatalf("ToolHub capability version=%q err=%v", version, err)
+	}
+
+	missingFeature := strings.Replace(contract, `,"routing-hot-reload"`, "", 1)
+	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf '%s\\n' '"+missingFeature+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.ValidateMCPM(context.Background())
+	var apiErr *bridgeprotocol.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
+		t.Fatalf("incomplete ToolHub capability error=%v", err)
+	}
+}
+
+func TestValidateMCPMReturnsContractRuntimeVersion(t *testing.T) {
+	mcpm := filepath.Join(t.TempDir(), "mcpm")
+	writeCompatibleMCPM(t, mcpm, "12.3.4-toolhub.1")
+	manager := NewRelayManager(&fakeRelayController{}, t.TempDir())
+	manager.MCPMPath = mcpm
+	version, err := manager.ValidateMCPM(context.Background())
+	if err != nil || version != "12.3.4-toolhub.1" {
 		t.Fatalf("ValidateMCPM version=%q err=%v", version, err)
 	}
 }
@@ -440,9 +694,7 @@ func relayFixture(t *testing.T, healthy bool) (*RelayManager, *fakeRelayControll
 	t.Helper()
 	bin := t.TempDir()
 	mcpm := filepath.Join(bin, "mcpm")
-	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf 'mcpm 1.0\\n'\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
+	writeCompatibleMCPM(t, mcpm, "1.0.0-toolhub.1")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	home := t.TempDir()
 	user := ManagedUser{Name: "test", Home: home, UID: os.Getuid(), GID: os.Getgid()}
@@ -456,6 +708,7 @@ func relayFixture(t *testing.T, healthy bool) (*RelayManager, *fakeRelayControll
 	manager.MCPMPath = mcpm
 	manager.EnvironmentFile = filepath.Join(t.TempDir(), "mcpm-relay.env")
 	manager.portAvailable = func(int) error { return nil }
+	manager.Admin = &fakeMCPMAdmin{autoManifest: true}
 	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		return healthyRelayResponse(request)
 	})}
@@ -463,13 +716,54 @@ func relayFixture(t *testing.T, healthy bool) (*RelayManager, *fakeRelayControll
 	return manager, controller, user, target, port
 }
 
+func writeCompatibleMCPM(t *testing.T, path, version string) {
+	t.Helper()
+	contract := `{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"` + version + `"}`
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+contract+"'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func relayManifest(target bridgeprotocol.Target, port int, endpoint string) bridgeprotocol.DesiredManifest {
 	memberID := uuid.NewString()
 	return bridgeprotocol.DesiredManifest{SchemaVersion: bridgeprotocol.ManifestSchemaVersion, Target: target, MCPServers: []bridgeprotocol.MCPMember{{MemberID: memberID, ServerID: uuid.NewString(), Revision: 1, Name: "server", Transport: "http", URL: endpoint, ContentHash: strings.Repeat("a", 64)}}, Skills: []bridgeprotocol.SkillMember{}, ManagedMemberIDs: []string{memberID}, RelayPort: port}
 }
 
+func relayManifestV2(t *testing.T, target bridgeprotocol.Target, port int, endpoint string) bridgeprotocol.DesiredManifest {
+	t.Helper()
+	return withRelayGovernance(t, relayManifest(target, port, endpoint), "00000000-0000-0000-0000-000000000001", strings.Repeat("a", 64), "00000000-0000-0000-0000-000000000002", strings.Repeat("b", 64))
+}
+
+func withRelayGovernance(t *testing.T, manifest bridgeprotocol.DesiredManifest, relayRevisionID, relayHash, policyRevisionID, policyHash string) bridgeprotocol.DesiredManifest {
+	t.Helper()
+	manifest.SchemaVersion = bridgeprotocol.ManifestSchemaVersionV2
+	servers := make([]bridgeprotocol.ServerContractDTO, 0, len(manifest.MCPServers))
+	for index, server := range manifest.MCPServers {
+		servers = append(servers, bridgeprotocol.ServerContractDTO{
+			ServerID: server.ServerID, ServerName: server.Name,
+			MCPConfigRevisionID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(server.ServerID+strconv.Itoa(index))).String(),
+			Tools:               []bridgeprotocol.RoutingToolDTO{},
+		})
+	}
+	bundle := bridgeprotocol.RoutingBundle{
+		SchemaVersion: 1, Mode: "compatibility",
+		RelayConfigurationRevisionID: relayRevisionID, RelayConfigurationHash: relayHash,
+		GlobalPolicyRevisionID: policyRevisionID, GlobalPolicyHash: policyHash,
+		Servers: servers, Profiles: []bridgeprotocol.PublishedProfileDTO{},
+	}
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.RelayGovernance = &bridgeprotocol.RelayGovernanceManifest{RelayConfigurationRevisionID: relayRevisionID, RelayConfigurationHash: relayHash, RoutingBundle: body, RoutingHash: hash}
+	return manifest
+}
+
 func applyRelay(t *testing.T, manager *RelayManager, user ManagedUser, manifest bridgeprotocol.DesiredManifest, kind string, paused bool) bridgeprotocol.TargetResult {
 	t.Helper()
+	if admin, ok := manager.Admin.(*fakeMCPMAdmin); ok && admin.autoManifest {
+		admin.configureManifest(t, manifest)
+	}
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
 	current, err := (&Manager{}).scanRelay(paths)
 	if err != nil {

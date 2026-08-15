@@ -57,6 +57,7 @@ type TargetPaths struct {
 	CodexConfig  string
 	HermesConfig string
 	MCPMRegistry string
+	RoutingFile  string
 }
 
 func PathsFor(user ManagedUser, runtime string) (TargetPaths, error) {
@@ -69,6 +70,7 @@ func PathsFor(user ManagedUser, runtime string) (TargetPaths, error) {
 		CodexConfig:  filepath.Join(user.Home, ".codex", "config.toml"),
 		HermesConfig: filepath.Join(user.Home, ".hermes", "config.yaml"),
 		MCPMRegistry: filepath.Join(user.Home, ".config", "mcpm", "servers.json"),
+		RoutingFile:  filepath.Join(user.Home, ".config", "mcpm", "toolhub-routing.json"),
 	}
 	switch runtime {
 	case bridgeprotocol.RuntimeClaude:
@@ -81,7 +83,7 @@ func PathsFor(user ManagedUser, runtime string) (TargetPaths, error) {
 	default:
 		return TargetPaths{}, errors.New("unsupported target runtime")
 	}
-	for _, candidate := range []string{paths.SkillsRoot, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.MCPMRegistry} {
+	for _, candidate := range []string{paths.SkillsRoot, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.MCPMRegistry, paths.RoutingFile} {
 		if candidate == "" {
 			continue
 		}

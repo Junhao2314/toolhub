@@ -118,8 +118,9 @@ func TestGovernanceCapabilityDTOHasNoPayloadFields(t *testing.T) {
 }
 
 func TestObservationDrainAndConfirmationDTOsRoundTrip(t *testing.T) {
-	observation := Observation{ProfileID: uuid.NewString(), ProfileRevisionID: uuid.NewString(), ServerID: uuid.NewString(), ToolID: uuid.NewString(), Decision: "confirm", Outcome: "confirmation_required", ErrorClass: "timeout", DurationBucket: "100-250ms"}
-	body, err := json.Marshal(ObservationDrainResponse{BootID: "boot-1", Cursor: 4, Items: []Observation{observation}})
+	bootID := uuid.NewString()
+	observation := Observation{BootID: bootID, Sequence: 4, ObservedAt: 1_786_838_400, MinuteBucket: "2026-08-16T00:00:00Z", ProfileID: uuid.NewString(), ProfileRevisionID: uuid.NewString(), ServerID: uuid.NewString(), ToolID: uuid.NewString(), Decision: "confirm", ReasonCodes: []string{"mutating"}, Outcome: "confirmation_required", ErrorClass: "timeout", DurationBucket: "lt_1s"}
+	body, err := json.Marshal(ObservationDrainResponse{BootID: bootID, NextSequence: 4, Items: []Observation{observation}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +128,7 @@ func TestObservationDrainAndConfirmationDTOsRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Cursor != 4 || len(decoded.Items) != 1 || decoded.Items[0].ToolID != observation.ToolID {
+	if decoded.NextSequence != 4 || len(decoded.Items) != 1 || decoded.Items[0].ToolID != observation.ToolID || decoded.Items[0].BootID != bootID {
 		t.Fatalf("decoded=%+v", decoded)
 	}
 	if err := ValidateGovernanceBody(body); err != nil {

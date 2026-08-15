@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,9 +35,18 @@ const (
 	relayReadinessTimeout  = 15 * time.Second
 	relayContentHashField  = "toolhub_content_hash"
 	relayIntegrityField    = "toolhub_runtime_integrity"
+	mcpmContractMaxBytes   = 64 << 10
+	mcpmContractTimeout    = 5 * time.Second
 )
 
-var mcpmVersionPattern = regexp.MustCompile(`(?i)\b(?:v)?([0-9]+)\.([0-9]+)(?:\.([0-9]+))?\b`)
+var requiredMCPMFeatures = []string{
+	"profile-session-binding",
+	"tool-filtering",
+	"call-policy",
+	"one-shot-confirmation",
+	"payload-free-observations",
+	"routing-hot-reload",
+}
 
 type RelayController interface {
 	Action(context.Context, string) (string, error)
@@ -69,6 +78,7 @@ func (SystemdRelayController) Action(ctx context.Context, action string) (string
 
 type RelayManager struct {
 	Controller        RelayController
+	Admin             MCPMAdmin
 	HTTPClient        *http.Client
 	BackupRoot        string
 	EnvironmentFile   string
@@ -82,6 +92,7 @@ type RelayManager struct {
 func NewRelayManager(controller RelayController, backupRoot string) *RelayManager {
 	return &RelayManager{
 		Controller:        controller,
+		Admin:             NewMCPMAdminClient(),
 		HTTPClient:        &http.Client{Timeout: relayProbePerRequestTimeout},
 		BackupRoot:        backupRoot,
 		EnvironmentFile:   "/var/lib/toolhub-bridge/mcpm-relay.env",
@@ -102,24 +113,63 @@ func (r *RelayManager) ValidateMCPM(ctx context.Context) (string, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
 		return "", &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMMissing, Message: "mcpm is not installed"}
 	}
-	output, err := exec.CommandContext(ctx, path, "--version").Output()
+	contractCtx, cancel := context.WithTimeout(ctx, mcpmContractTimeout)
+	defer cancel()
+	command := exec.CommandContext(contractCtx, path, "toolhub", "contract", "--json")
+	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return "", &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm version could not be verified"}
+		return "", incompatibleMCPMError()
 	}
-	version := strings.TrimSpace(string(output))
-	match := mcpmVersionPattern.FindStringSubmatch(version)
-	major := 0
-	if len(match) > 1 {
-		major, _ = strconv.Atoi(match[1])
+	command.Stderr = io.Discard
+	if err := command.Start(); err != nil {
+		return "", incompatibleMCPMError()
 	}
-	if major < 1 {
-		return "", &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm version is incompatible"}
+	output, readErr := io.ReadAll(io.LimitReader(stdout, mcpmContractMaxBytes+1))
+	waitErr := command.Wait()
+	if readErr != nil || waitErr != nil || len(output) == 0 || len(output) > mcpmContractMaxBytes || output[len(output)-1] != '\n' || bytes.Count(output, []byte{'\n'}) != 1 {
+		return "", incompatibleMCPMError()
 	}
-	version = match[1] + "." + match[2]
-	if match[3] != "" {
-		version += "." + match[3]
+	var contract bridgeprotocol.RelayCapabilityResponse
+	body := bytes.TrimSuffix(output, []byte{'\n'})
+	if err := bridgeprotocol.ValidateGovernanceBody(body); err != nil || decodeStrictAdminJSON(body, &contract) != nil {
+		return "", incompatibleMCPMError()
 	}
-	return version, nil
+	if err := validateMCPMCapability(contract); err != nil {
+		return "", err
+	}
+	return contract.RuntimeVersion, nil
+}
+
+func validateMCPMCapability(contract bridgeprotocol.RelayCapabilityResponse) error {
+	if contract.AdminProtocolVersion != 1 || contract.Runtime != "mcpm" || strings.TrimSpace(contract.RuntimeVersion) == "" || len(contract.RuntimeVersion) > 64 || !containsInt(contract.RoutingSchemaVersions, 1) {
+		return incompatibleMCPMError()
+	}
+	features := make(map[string]struct{}, len(contract.Features))
+	for _, feature := range contract.Features {
+		if strings.TrimSpace(feature) == "" || len(feature) > 64 {
+			return incompatibleMCPMError()
+		}
+		features[feature] = struct{}{}
+	}
+	for _, required := range requiredMCPMFeatures {
+		if _, ok := features[required]; !ok {
+			return incompatibleMCPMError()
+		}
+	}
+	return nil
+}
+
+func containsInt(values []int, expected int) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func incompatibleMCPMError() error {
+	return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm ToolHub capability contract is incompatible"}
 }
 
 func ScanSharedRelay(paths TargetPaths) ([]bridgeprotocol.InventoryMember, error) {
@@ -164,10 +214,15 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Relay configuration changed after preflight"}
 	}
 	preserveUnmanaged := request.OperationKind == "reconcile"
-	matches, err := relayConfigurationMatches(paths, r.EnvironmentFile, request.Manifest, request.SecretValues, preserveUnmanaged)
+	runtimeMatches, err := relayRuntimeConfigurationMatches(paths, r.EnvironmentFile, request.Manifest, request.SecretValues, preserveUnmanaged)
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, err
 	}
+	routingMatches, err := relayRoutingMatches(paths, request.Manifest)
+	if err != nil {
+		return bridgeprotocol.TargetResult{}, err
+	}
+	matches := runtimeMatches && routingMatches
 	if preserveUnmanaged && matches {
 		if request.IntentionalPaused {
 			status, repaired := r.EnsurePaused(ctx, request.Manifest.RelayPort, &request.Manifest)
@@ -189,6 +244,15 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 		}
 		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: current.Revision, Repaired: true, Relay: &relayStatus}, nil
 	}
+	if !request.IntentionalPaused {
+		if _, err := r.ValidateMCPM(ctx); err != nil {
+			return bridgeprotocol.TargetResult{}, err
+		}
+	}
+	var process relayProcessSnapshot
+	if !runtimeMatches || !routingMatches {
+		process = r.captureRelayProcess(ctx)
+	}
 	backup, err := r.backup(user, request.Target, paths, request.OperationID, current.Revision)
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrBackup, Message: "Could not back up relay configuration"}
@@ -197,13 +261,21 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, err
 	}
-	if err := writeRelayConfiguration(paths, request.Manifest, request.SecretValues, user, preserveUnmanaged); err != nil {
-		_ = restoreRelayFiles(rollback)
-		return bridgeprotocol.TargetResult{}, err
+	if !runtimeMatches {
+		if err := writeRelayConfiguration(paths, request.Manifest, request.SecretValues, user, preserveUnmanaged); err != nil {
+			_ = restoreRelayFiles(rollback)
+			return bridgeprotocol.TargetResult{}, err
+		}
+		if err := writeRelayEnvironment(r.EnvironmentFile, request.Manifest.RelayPort); err != nil {
+			_ = restoreRelayFiles(rollback)
+			return bridgeprotocol.TargetResult{}, err
+		}
 	}
-	if err := writeRelayEnvironment(r.EnvironmentFile, request.Manifest.RelayPort); err != nil {
-		_ = restoreRelayFiles(rollback)
-		return bridgeprotocol.TargetResult{}, err
+	if !routingMatches {
+		if err := writeRelayRouting(paths, request.Manifest, user); err != nil {
+			_ = restoreRelayFiles(rollback)
+			return bridgeprotocol.TargetResult{}, err
+		}
 	}
 	if matches, err := relayConfigurationMatches(paths, r.EnvironmentFile, request.Manifest, request.SecretValues, preserveUnmanaged); err != nil || !matches {
 		_ = restoreRelayFiles(rollback)
@@ -227,12 +299,34 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 		_ = restoreRelayFiles(rollback)
 		return bridgeprotocol.TargetResult{}, err
 	}
-	relayStatus := r.RestartAndCheck(ctx, request.Manifest.RelayPort, &request.Manifest)
-	health := bridgeprotocol.HealthHealthy
-	if !relayStatus.Healthy {
-		health = bridgeprotocol.HealthBlocked
+	if runtimeMatches && !routingMatches && rollback[paths.RoutingFile].Exists {
+		if err := r.reloadRoutingAndCheck(ctx, request.Manifest); err != nil {
+			rollbackErr := restoreRelayFiles(rollback)
+			recoveryErr := r.recoverPreviousRouting(ctx, rollback[paths.RoutingFile])
+			if rollbackErr != nil || recoveryErr != nil {
+				return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay routing reload failed and the previous bundle could not be restored", Retryable: true}
+			}
+			return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay routing reload failed; the previous bundle was restored", Retryable: true}
+		}
+		relayStatus, _ := r.Status(ctx, request.Manifest.RelayPort, false)
+		if !relayStatus.Healthy {
+			_ = restoreRelayFiles(rollback)
+			_ = r.recoverPreviousRouting(ctx, rollback[paths.RoutingFile])
+			return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay routing reload did not preserve runtime health", Retryable: true}
+		}
+		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: true, Relay: &relayStatus}, nil
 	}
-	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: preserveUnmanaged || !matches, Relay: &relayStatus, Error: relayStatusError(relayStatus)}, nil
+	relayStatus := r.RestartAndCheck(ctx, request.Manifest.RelayPort, &request.Manifest)
+	if !relayStatus.Healthy {
+		oldPort := relayPortFromBackup(rollback[r.EnvironmentFile], request.Manifest.RelayPort)
+		rollbackErr := restoreRelayFiles(rollback)
+		recoveryErr := r.restoreRelayProcess(ctx, process, oldPort)
+		if rollbackErr != nil || recoveryErr != nil {
+			return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay update failed and the previous runtime could not be restored", Retryable: true}
+		}
+		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: relayStatus.ErrorCode, Message: "Relay update failed; the previous runtime was restored", Retryable: true}
+	}
+	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: preserveUnmanaged || !matches, Relay: &relayStatus}, nil
 }
 
 func (r *RelayManager) RestartAndCheck(ctx context.Context, port int, manifest *bridgeprotocol.DesiredManifest) bridgeprotocol.RelayStatus {
@@ -380,6 +474,7 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 	if request.ExpectedRevision != "" && current.Revision != request.ExpectedRevision {
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Relay changed before restore"}
 	}
+	process := r.captureRelayProcess(ctx)
 	recovery, err := r.backup(user, request.Target, paths, request.OperationID, current.Revision)
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrBackup, Message: "Could not back up relay before restore"}
@@ -416,6 +511,19 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 		relayStatus, _ = r.EnsurePaused(ctx, request.Manifest.RelayPort, &request.Manifest)
 	} else {
 		relayStatus = r.RestartAndCheck(ctx, request.Manifest.RelayPort, &request.Manifest)
+	}
+	if !relayStatus.Healthy {
+		oldPort := relayPortFromBackup(rollback[r.EnvironmentFile], request.Manifest.RelayPort)
+		rollbackErr := restoreRelayFiles(rollback)
+		recoveryErr := r.restoreRelayProcess(ctx, process, oldPort)
+		if rollbackErr != nil || recoveryErr != nil {
+			return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay restore failed and the previous runtime could not be recovered", Retryable: true}
+		}
+		code := relayStatus.ErrorCode
+		if code == "" {
+			code = bridgeprotocol.ErrRelayUnhealthy
+		}
+		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: code, Message: "Relay restore failed; the previous runtime was recovered", Retryable: true}
 	}
 	health := relayProjectedHealth(relayStatus)
 	return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: after.Revision, BackupID: recovery.Backup.ID, Manifest: &request.Manifest, Relay: &relayStatus, Error: relayStatusError(relayStatus)}, nil
@@ -480,6 +588,102 @@ func relayStateRunning(state string) bool {
 	}
 }
 
+type relayProcessSnapshot struct {
+	Running bool
+	Enabled bool
+}
+
+func (r *RelayManager) captureRelayProcess(ctx context.Context) relayProcessSnapshot {
+	state, _ := r.Controller.Action(ctx, "status")
+	enabled, _ := r.Controller.Action(ctx, "is-enabled")
+	return relayProcessSnapshot{Running: relayStateRunning(state), Enabled: strings.TrimSpace(enabled) == "enabled"}
+}
+
+func (r *RelayManager) reloadRoutingAndCheck(ctx context.Context, manifest bridgeprotocol.DesiredManifest) error {
+	if manifest.RelayGovernance == nil {
+		return errors.New("relay routing governance is required for hot reload")
+	}
+	status, err := r.adminClient().ReloadRouting(ctx)
+	if err != nil {
+		return err
+	}
+	if !relayAdminStatusMatches(status, *manifest.RelayGovernance) {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Relay loaded a different routing bundle"}
+	}
+	capability, err := r.adminClient().Capability(ctx)
+	if err != nil {
+		return err
+	}
+	if err := validateMCPMCapability(capability); err != nil {
+		return err
+	}
+	observed, err := r.adminClient().Status(ctx)
+	if err != nil {
+		return err
+	}
+	if !relayAdminStatusMatches(observed, *manifest.RelayGovernance) {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "Relay status does not match the requested routing bundle"}
+	}
+	return nil
+}
+
+func relayAdminStatusMatches(status bridgeprotocol.RelayAdminStatus, governance bridgeprotocol.RelayGovernanceManifest) bool {
+	return status.RelayConfigurationRevisionID == governance.RelayConfigurationRevisionID && status.RoutingBundleHash == governance.RoutingHash
+}
+
+func (r *RelayManager) recoverPreviousRouting(ctx context.Context, previous relayFileState) error {
+	if !previous.Exists {
+		return nil
+	}
+	var bundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(previous.Body, &bundle); err != nil {
+		return err
+	}
+	_, hash, err := bundle.Canonical()
+	if err != nil {
+		return err
+	}
+	status, err := r.adminClient().ReloadRouting(ctx)
+	if err != nil {
+		return err
+	}
+	if status.RelayConfigurationRevisionID != bundle.RelayConfigurationRevisionID || status.RoutingBundleHash != hash {
+		return errors.New("previous relay routing bundle was not restored")
+	}
+	return nil
+}
+
+func relayPortFromBackup(environment relayFileState, fallback int) int {
+	if !environment.Exists {
+		return fallback
+	}
+	value := strings.TrimSpace(string(environment.Body))
+	port, err := strconv.Atoi(strings.TrimPrefix(value, "TOOLHUB_RELAY_PORT="))
+	if err != nil || port < 1 || port > 65535 {
+		return fallback
+	}
+	return port
+}
+
+func (r *RelayManager) restoreRelayProcess(ctx context.Context, previous relayProcessSnapshot, port int) error {
+	if previous.Running {
+		if err := r.RestartFixed(ctx, port); err != nil {
+			return err
+		}
+		status, _ := r.Status(ctx, port, false)
+		if !status.Healthy {
+			return errors.New("previous relay process did not recover")
+		}
+		return nil
+	}
+	if !previous.Enabled {
+		_, err := r.Controller.Action(ctx, "stop")
+		return err
+	}
+	_, err := r.Controller.Action(ctx, "stop-unit")
+	return err
+}
+
 func relayProjectedHealth(status bridgeprotocol.RelayStatus) string {
 	if status.Healthy {
 		return bridgeprotocol.HealthHealthy
@@ -539,7 +743,7 @@ func backupRelayFiles(paths TargetPaths, extra ...string) (relayFileBackup, erro
 		return nil, err
 	}
 	result := relayFileBackup{}
-	files := append([]string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig}, extra...)
+	files := append([]string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.RoutingFile}, extra...)
 	for _, path := range files {
 		if path == "" {
 			continue
@@ -566,12 +770,21 @@ func backupRelayFiles(paths TargetPaths, extra ...string) (relayFileBackup, erro
 }
 
 type relayBackupState struct {
-	Version           int  `json:"version"`
-	RegistryExists    bool `json:"registryExists"`
-	ClaudeExists      bool `json:"claudeExists"`
-	CodexExists       bool `json:"codexExists"`
-	HermesExists      bool `json:"hermesExists"`
-	EnvironmentExists bool `json:"environmentExists"`
+	Version           int                                `json:"version"`
+	RegistryExists    bool                               `json:"registryExists"`
+	ClaudeExists      bool                               `json:"claudeExists"`
+	CodexExists       bool                               `json:"codexExists"`
+	HermesExists      bool                               `json:"hermesExists"`
+	EnvironmentExists bool                               `json:"environmentExists"`
+	Files             map[string]relayBackupFileMetadata `json:"files,omitempty"`
+}
+
+type relayBackupFileMetadata struct {
+	Exists bool   `json:"exists"`
+	Mode   uint32 `json:"mode,omitempty"`
+	UID    int    `json:"uid,omitempty"`
+	GID    int    `json:"gid,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 func (r *RelayManager) backup(user ManagedUser, target bridgeprotocol.Target, paths TargetPaths, operationID, revision string) (backupRecord, error) {
@@ -592,21 +805,34 @@ func (r *RelayManager) backup(user ManagedUser, target bridgeprotocol.Target, pa
 	if err := os.MkdirAll(destination, 0700); err != nil {
 		return backupRecord{}, err
 	}
-	state := relayBackupState{Version: 2}
+	state := relayBackupState{Version: 3, Files: map[string]relayBackupFileMetadata{}}
 	items := []struct {
 		path string
 		name string
 		has  *bool
-	}{{paths.MCPMRegistry, "registry", &state.RegistryExists}, {paths.ClaudeConfig, "claude", &state.ClaudeExists}, {paths.CodexConfig, "codex", &state.CodexExists}, {paths.HermesConfig, "hermes", &state.HermesExists}, {r.EnvironmentFile, "environment", &state.EnvironmentExists}}
+	}{{paths.MCPMRegistry, "registry", &state.RegistryExists}, {paths.ClaudeConfig, "claude", &state.ClaudeExists}, {paths.CodexConfig, "codex", &state.CodexExists}, {paths.HermesConfig, "hermes", &state.HermesExists}, {paths.RoutingFile, "routing", nil}, {r.EnvironmentFile, "environment", &state.EnvironmentExists}}
 	for _, item := range items {
 		body, err := readSafeConfig(item.path)
 		if errors.Is(err, os.ErrNotExist) {
+			state.Files[item.name] = relayBackupFileMetadata{}
 			continue
 		}
 		if err != nil {
 			return backupRecord{}, err
 		}
-		*item.has = true
+		if item.has != nil {
+			*item.has = true
+		}
+		info, err := os.Lstat(item.path)
+		if err != nil {
+			return backupRecord{}, err
+		}
+		sum := sha256.Sum256(body)
+		metadata := relayBackupFileMetadata{Exists: true, Mode: uint32(info.Mode().Perm()), SHA256: hex.EncodeToString(sum[:])}
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			metadata.UID, metadata.GID = int(stat.Uid), int(stat.Gid)
+		}
+		state.Files[item.name] = metadata
 		if err := atomicWrite(filepath.Join(destination, item.name), body, 0600); err != nil {
 			return backupRecord{}, err
 		}
@@ -631,6 +857,38 @@ func restoreRelayBackup(source string, paths TargetPaths, environmentFile string
 	var state relayBackupState
 	if err := json.Unmarshal(stateBody, &state); err != nil {
 		return errors.New("relay backup state is invalid")
+	}
+	if state.Version >= 3 {
+		items := map[string]string{"registry": paths.MCPMRegistry, "claude": paths.ClaudeConfig, "codex": paths.CodexConfig, "hermes": paths.HermesConfig, "routing": paths.RoutingFile, "environment": environmentFile}
+		for name, destination := range items {
+			metadata, ok := state.Files[name]
+			if !ok {
+				return errors.New("relay backup state is incomplete")
+			}
+			if !metadata.Exists {
+				if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				continue
+			}
+			body, err := readSafeConfig(filepath.Join(source, name))
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(body)
+			if hex.EncodeToString(sum[:]) != metadata.SHA256 || metadata.Mode == 0 {
+				return errors.New("relay backup content hash or mode is invalid")
+			}
+			if err := atomicWrite(destination, body, os.FileMode(metadata.Mode)); err != nil {
+				return err
+			}
+			if os.Geteuid() == 0 {
+				if err := os.Chown(destination, metadata.UID, metadata.GID); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	}
 	items := []struct {
 		destination string
@@ -731,6 +989,22 @@ func writeRelayConfiguration(paths TargetPaths, manifest bridgeprotocol.DesiredM
 	return nil
 }
 
+func writeRelayRouting(paths TargetPaths, manifest bridgeprotocol.DesiredManifest, user ManagedUser) error {
+	if manifest.SchemaVersion < bridgeprotocol.ManifestSchemaVersionV2 || manifest.RelayGovernance == nil {
+		return nil
+	}
+	if err := manifest.RelayGovernance.Validate(); err != nil {
+		return err
+	}
+	if err := atomicWrite(paths.RoutingFile, manifest.RelayGovernance.RoutingBundle, 0600); err != nil {
+		return err
+	}
+	if err := os.Chown(paths.RoutingFile, user.UID, user.GID); err != nil && os.Geteuid() == 0 {
+		return err
+	}
+	return nil
+}
+
 func expectedRelayEntry(server bridgeprotocol.MCPMember, secrets map[string]string) map[string]any {
 	entry := map[string]any{"name": server.Name, "profile_tags": []string{RelayProfile}, "toolhub_member_id": server.MemberID, relayContentHashField: server.ContentHash}
 	if server.Transport == "stdio" {
@@ -760,7 +1034,7 @@ func relayEntryHash(entry map[string]any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func relayConfigurationMatches(paths TargetPaths, environmentFile string, manifest bridgeprotocol.DesiredManifest, secrets map[string]string, preserveUnmanaged bool) (bool, error) {
+func relayRuntimeConfigurationMatches(paths TargetPaths, environmentFile string, manifest bridgeprotocol.DesiredManifest, secrets map[string]string, preserveUnmanaged bool) (bool, error) {
 	registry, err := readJSONMap(paths.MCPMRegistry)
 	if err != nil {
 		return false, err
@@ -837,6 +1111,28 @@ func relayConfigurationMatches(paths TargetPaths, environmentFile string, manife
 		return false, err
 	}
 	return string(environment) == "TOOLHUB_RELAY_PORT="+strconv.Itoa(manifest.RelayPort)+"\n", nil
+}
+
+func relayRoutingMatches(paths TargetPaths, manifest bridgeprotocol.DesiredManifest) (bool, error) {
+	if manifest.SchemaVersion < bridgeprotocol.ManifestSchemaVersionV2 || manifest.RelayGovernance == nil {
+		return true, nil
+	}
+	body, err := readSafeConfig(paths.RoutingFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(body, manifest.RelayGovernance.RoutingBundle), nil
+}
+
+func relayConfigurationMatches(paths TargetPaths, environmentFile string, manifest bridgeprotocol.DesiredManifest, secrets map[string]string, preserveUnmanaged bool) (bool, error) {
+	runtimeMatches, err := relayRuntimeConfigurationMatches(paths, environmentFile, manifest, secrets, preserveUnmanaged)
+	if err != nil || !runtimeMatches {
+		return runtimeMatches, err
+	}
+	return relayRoutingMatches(paths, manifest)
 }
 
 func jsonEqual(left, right any) bool {
@@ -1096,7 +1392,7 @@ func atomicWrite(path string, body []byte, mode os.FileMode) error {
 }
 
 func guardRelayPaths(paths TargetPaths) error {
-	for _, candidate := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig} {
+	for _, candidate := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig, paths.RoutingFile} {
 		if err := rejectSymlinkComponents(paths.Home, candidate); err != nil {
 			return err
 		}

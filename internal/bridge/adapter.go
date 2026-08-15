@@ -680,3 +680,27 @@ func (a *CompositeAdapter) Relay(ctx context.Context, action string, input bridg
 	}
 	return a.RelayManager.Status(ctx, input.Port, true)
 }
+
+func (a *CompositeAdapter) RelayCapability(ctx context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
+	return a.RelayManager.RelayCapability(ctx)
+}
+
+func (a *CompositeAdapter) ReloadRelayGovernance(ctx context.Context, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {
+	return a.RelayManager.ReloadRelayGovernance(ctx, input)
+}
+
+func (a *CompositeAdapter) ObserveRelayContracts(ctx context.Context) (bridgeprotocol.ContractObservationResponse, error) {
+	return a.RelayManager.ObserveRelayContracts(ctx)
+}
+
+func (a *CompositeAdapter) ListRelayConfirmations(ctx context.Context) (bridgeprotocol.ConfirmationListResponse, error) {
+	return a.RelayManager.ListRelayConfirmations(ctx)
+}
+
+func (a *CompositeAdapter) DecideRelayConfirmation(ctx context.Context, approve bool, input bridgeprotocol.ConfirmationDecisionRequest) (bridgeprotocol.ConfirmationDecisionResponse, error) {
+	return a.RelayManager.DecideRelayConfirmation(ctx, approve, input)
+}
+
+func (a *CompositeAdapter) DrainRelayObservations(ctx context.Context, input bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error) {
+	return a.RelayManager.DrainRelayObservations(ctx, input)
+}

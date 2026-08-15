@@ -320,31 +320,76 @@ type RelayReloadRequest struct {
 	RoutingBundle                json.RawMessage `json:"routingBundle"`
 }
 
+type RelayReloadResponse struct {
+	Reloaded          bool   `json:"reloaded"`
+	RoutingBundleHash string `json:"routingBundleHash"`
+}
+
+type RelayAdminProfileRevision struct {
+	ProfileID           string `json:"profileId"`
+	ProfileRevisionID   string `json:"profileRevisionId"`
+	ProfileRevisionHash string `json:"profileRevisionHash"`
+}
+
+type RelayAdminStatus struct {
+	Mode                         string                      `json:"mode"`
+	RelayConfigurationRevisionID string                      `json:"relayConfigurationRevisionId"`
+	GlobalPolicyRevisionID       string                      `json:"globalPolicyRevisionId"`
+	RoutingBundleHash            string                      `json:"routingBundleHash"`
+	PublishedProfileRevisions    []RelayAdminProfileRevision `json:"publishedProfileRevisions"`
+}
+
 type ContractToolDTO struct {
-	ToolID       string         `json:"toolId,omitempty"`
 	Name         string         `json:"name"`
+	RuntimeName  string         `json:"runtimeName"`
+	Title        *string        `json:"title"`
+	Description  *string        `json:"description"`
 	InputSchema  map[string]any `json:"inputSchema"`
 	OutputSchema map[string]any `json:"outputSchema"`
 	Annotations  map[string]any `json:"annotations"`
-	Presentation map[string]any `json:"presentation"`
+}
+
+type ContractServerObservation struct {
+	ServerID            string            `json:"serverId"`
+	ServerName          string            `json:"serverName"`
+	MCPConfigRevisionID string            `json:"mcpConfigRevisionId"`
+	Tools               []ContractToolDTO `json:"tools"`
 }
 
 type ContractObservationResponse struct {
-	ServerID           string            `json:"serverId"`
-	ContractRevisionID string            `json:"contractRevisionId"`
-	CanonicalHash      string            `json:"canonicalHash"`
-	Tools              []ContractToolDTO `json:"tools"`
+	RelayConfigurationRevisionID string                      `json:"relayConfigurationRevisionId"`
+	Servers                      []ContractServerObservation `json:"servers"`
+}
+
+type ArgumentSummary struct {
+	Pointer      string `json:"pointer"`
+	ValueType    string `json:"valueType"`
+	ArrayLength  *int   `json:"arrayLength"`
+	StringLength *int   `json:"stringLength"`
+	Sensitive    bool   `json:"sensitive"`
 }
 
 type ConfirmationSummary struct {
-	ChallengeID       string `json:"challengeId"`
-	ProfileID         string `json:"profileId"`
-	ProfileRevisionID string `json:"profileRevisionId"`
-	ServerID          string `json:"serverId"`
-	ToolID            string `json:"toolId"`
-	Decision          string `json:"decision"`
-	ArgumentHash      string `json:"argumentHash"`
-	ExpiresAt         string `json:"expiresAt"`
+	ChallengeID            string            `json:"challengeId"`
+	BindingHash            string            `json:"bindingHash"`
+	ArgumentHash           string            `json:"argumentHash"`
+	CreatedAt              float64           `json:"createdAt"`
+	ExpiresAt              float64           `json:"expiresAt"`
+	ProfileID              string            `json:"profileId"`
+	ProfileRevisionID      string            `json:"profileRevisionId"`
+	ProfileName            string            `json:"profileName"`
+	ClientKind             string            `json:"clientKind"`
+	ServerID               string            `json:"serverId"`
+	ServerName             string            `json:"serverName"`
+	ToolID                 string            `json:"toolId"`
+	ToolName               string            `json:"toolName"`
+	RuntimeName            string            `json:"runtimeName"`
+	MCPConfigRevisionID    string            `json:"mcpConfigRevisionId"`
+	ContractRevisionID     string            `json:"contractRevisionId"`
+	GlobalPolicyRevisionID string            `json:"globalPolicyRevisionId"`
+	Decision               string            `json:"decision"`
+	ReasonCodes            []string          `json:"reasonCodes"`
+	ArgumentSummary        []ArgumentSummary `json:"argumentSummary"`
 }
 
 type ConfirmationListResponse struct {
@@ -353,30 +398,40 @@ type ConfirmationListResponse struct {
 
 type ConfirmationDecisionRequest struct {
 	ChallengeID string `json:"challengeId"`
-	ProfileName string `json:"profileName"`
+	BindingHash string `json:"bindingHash"`
+}
+
+type ConfirmationDecisionResponse struct {
+	ChallengeID    string   `json:"challengeId"`
+	BindingHash    string   `json:"bindingHash"`
+	GrantExpiresAt *float64 `json:"grantExpiresAt,omitempty"`
 }
 
 type Observation struct {
-	TimeBucket        string `json:"timeBucket"`
-	ProfileID         string `json:"profileId"`
-	ProfileRevisionID string `json:"profileRevisionId"`
-	ServerID          string `json:"serverId"`
-	ToolID            string `json:"toolId"`
-	Decision          string `json:"decision"`
-	Outcome           string `json:"outcome"`
-	ErrorClass        string `json:"errorClass,omitempty"`
-	DurationBucket    string `json:"durationBucket,omitempty"`
+	BootID            string   `json:"bootId"`
+	Sequence          int64    `json:"sequence"`
+	ObservedAt        float64  `json:"observedAt"`
+	MinuteBucket      string   `json:"minuteBucket"`
+	ProfileID         string   `json:"profileId"`
+	ProfileRevisionID string   `json:"profileRevisionId"`
+	ServerID          string   `json:"serverId"`
+	ToolID            string   `json:"toolId"`
+	Decision          string   `json:"decision"`
+	ReasonCodes       []string `json:"reasonCodes"`
+	Outcome           string   `json:"outcome"`
+	ErrorClass        string   `json:"errorClass,omitempty"`
+	DurationBucket    string   `json:"durationBucket,omitempty"`
 }
 
 type ObservationDrainRequest struct {
-	BootID string `json:"bootId"`
-	Cursor int64  `json:"cursor"`
-	Limit  int    `json:"limit"`
+	AfterBootID   *string `json:"afterBootId"`
+	AfterSequence int64   `json:"afterSequence"`
+	Limit         int     `json:"limit"`
 }
 type ObservationDrainResponse struct {
-	BootID string        `json:"bootId"`
-	Cursor int64         `json:"cursor"`
-	Items  []Observation `json:"items"`
+	BootID       string        `json:"bootId"`
+	Items        []Observation `json:"items"`
+	NextSequence int64         `json:"nextSequence"`
 }
 
 type NativeClientInspectionResponse struct {
@@ -478,5 +533,6 @@ func isRoutingGovernanceValue(value any) bool {
 	}
 	_, hasSchema := object["schemaVersion"]
 	_, hasServers := object["servers"]
-	return hasSchema && hasServers
+	_, hasRelayRevision := object["relayConfigurationRevisionId"]
+	return hasServers && (hasSchema || hasRelayRevision)
 }

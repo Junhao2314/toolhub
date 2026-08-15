@@ -1,13 +1,9 @@
 package runtime
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,227 +14,119 @@ import (
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 )
 
-func TestRelayProbeDiscoversJSONSSEPaginationAndSessionCapabilities(t *testing.T) {
+func TestRelayFullProbeUsesAdminContractObservationWithoutMCPToolCalls(t *testing.T) {
 	manager := probeManager(t)
-	manifest := probeManifest("alpha", "alpha_extra", "resource", "prompt")
-	seenSession := 0
-	seenSecondPage := false
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		var input struct {
-			Method string         `json:"method"`
-			Params map[string]any `json:"params"`
-		}
-		if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-			return nil, err
-		}
-		if input.Method != "initialize" {
-			if request.Header.Get("Mcp-Session-Id") != "probe-session" {
-				t.Fatalf("method %s omitted session header", input.Method)
-			}
-			seenSession++
-		}
-		if input.Method == "notifications/initialized" {
-			return probeHTTPResponse(http.StatusAccepted, "application/json", "", nil), nil
-		}
-		result := `{}`
-		contentType := "application/json"
-		headers := make(http.Header)
-		switch input.Method {
-		case "initialize":
-			result = `{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{},"prompts":{}}}`
-			contentType = "text/event-stream"
-			headers.Set("Mcp-Session-Id", "probe-session")
-		case "tools/list":
-			if input.Params["cursor"] == "tools-2" {
-				seenSecondPage = true
-				result = `{"tools":[{"name":"alpha_status"}]}`
-			} else {
-				result = `{"tools":[{"name":"alpha_extra_status"}],"nextCursor":"tools-2"}`
-			}
-		case "resources/list":
-			result = `{"resources":[{"name":"legacy","uri":"mcp://resource/info"}]}`
-		case "resources/templates/list":
-			result = `{"resourceTemplates":[{"name":"path","uriTemplate":"/resource/{id}"}]}`
-			contentType = "text/event-stream"
-		case "prompts/list":
-			result = `{"prompts":[{"name":"prompt_summary"}]}`
-		}
-		body := `{"jsonrpc":"2.0","id":"` + input.Method + `","result":` + result + `}`
-		if contentType == "text/event-stream" {
-			body = "event: ping\ndata: not-json\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\nevent: message\ndata: " + body + "\n\n"
-		}
-		return probeHTTPResponse(http.StatusOK, contentType, body, headers), nil
+	manifest := probeManifestV2(t, "server")
+	admin := &fakeMCPMAdmin{autoManifest: true}
+	admin.configureManifest(t, manifest)
+	admin.observation.Servers[0].Tools = []bridgeprotocol.ContractToolDTO{{
+		Name: "search", RuntimeName: "search", InputSchema: map[string]any{"type": "object"}, Annotations: map[string]any{},
+	}}
+	manager.Admin = admin
+	httpCalls := 0
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		httpCalls++
+		return nil, errors.New("full probe must use the admin socket")
 	})}
 
 	status, err := manager.ProbeMembers(context.Background(), 6276, manifest)
-	if err != nil || !status.Healthy || status.Contract != "verified" || !seenSecondPage || seenSession != 6 {
-		t.Fatalf("probe status=%+v err=%v secondPage=%v sessionRequests=%d", status, err, seenSecondPage, seenSession)
+	if err != nil || !status.Healthy || status.Contract != "verified" || len(status.MemberStatuses) != 1 || status.MemberStatuses[0].Capabilities.Tools != 1 {
+		t.Fatalf("admin full probe status=%+v err=%v", status, err)
 	}
-	if status.Version != "1.2.3" {
-		t.Fatalf("probe exposed non-canonical version %q", status.Version)
-	}
-	byName := map[string]bridgeprotocol.RelayMemberStatus{}
-	for _, member := range status.MemberStatuses {
-		byName[member.Name] = member
-	}
-	if byName["alpha"].Capabilities.Tools != 1 || byName["alpha_extra"].Capabilities.Tools != 1 {
-		t.Fatalf("longest namespace attribution failed: %+v", byName)
-	}
-	if byName["resource"].Capabilities.Resources != 1 || byName["resource"].Capabilities.ResourceTemplates != 1 {
-		t.Fatalf("resource attribution failed: %+v", byName["resource"])
-	}
-	if byName["prompt"].Capabilities.Prompts != 1 || len(byName["prompt"].CapabilityKinds) != 1 {
-		t.Fatalf("prompt attribution failed: %+v", byName["prompt"])
+	if httpCalls != 0 {
+		t.Fatalf("full probe sent %d synthetic MCP calls", httpCalls)
 	}
 }
 
-func TestRelayProbeFailsClosedForPartialMemberProjection(t *testing.T) {
-	manager := probeManager(t)
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		var input struct {
-			Method string `json:"method"`
-		}
-		_ = json.NewDecoder(request.Body).Decode(&input)
-		if input.Method == "notifications/initialized" {
-			return probeHTTPResponse(http.StatusAccepted, "application/json", "", nil), nil
-		}
-		result := `{"tools":[{"name":"ready_status"}]}`
-		if input.Method == "initialize" {
-			result = `{"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}`
-		}
-		return probeHTTPResponse(http.StatusOK, "application/json", `{"jsonrpc":"2.0","id":"`+input.Method+`","result":`+result+`}`, nil), nil
-	})}
-	status, err := manager.ProbeMembers(context.Background(), 6276, probeManifest("ready", "missing"))
-	if err != nil || status.Healthy || status.Contract != "incompatible" || status.ErrorCode != bridgeprotocol.ErrMCPMIncompatible {
-		t.Fatalf("partial status=%+v err=%v", status, err)
+func TestRelayObservedContractsRequireExactDesiredMembersAndRevisions(t *testing.T) {
+	manifest := probeManifestV2(t, "alpha", "beta")
+	admin := &fakeMCPMAdmin{autoManifest: true}
+	admin.configureManifest(t, manifest)
+	valid := admin.observation
+	checkedAt := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name   string
+		mutate func(*bridgeprotocol.ContractObservationResponse)
+	}{
+		{name: "missing server", mutate: func(value *bridgeprotocol.ContractObservationResponse) { value.Servers = value.Servers[:1] }},
+		{name: "extra server", mutate: func(value *bridgeprotocol.ContractObservationResponse) {
+			value.Servers = append(value.Servers, value.Servers[0])
+		}},
+		{name: "duplicate server", mutate: func(value *bridgeprotocol.ContractObservationResponse) { value.Servers[1] = value.Servers[0] }},
+		{name: "wrong relay revision", mutate: func(value *bridgeprotocol.ContractObservationResponse) {
+			value.RelayConfigurationRevisionID = uuid.NewString()
+		}},
+		{name: "wrong config revision", mutate: func(value *bridgeprotocol.ContractObservationResponse) {
+			value.Servers[0].MCPConfigRevisionID = uuid.NewString()
+		}},
+		{name: "wrong server name", mutate: func(value *bridgeprotocol.ContractObservationResponse) { value.Servers[0].ServerName = "renamed" }},
 	}
-	if status.MemberStatuses[0].Status != "unavailable" && status.MemberStatuses[1].Status != "unavailable" {
-		t.Fatalf("partial member projection omitted unavailable status: %+v", status.MemberStatuses)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			candidate.Servers = append([]bridgeprotocol.ContractServerObservation(nil), valid.Servers...)
+			test.mutate(&candidate)
+			if statuses, err := attributeObservedRelayContracts(manifest, candidate, checkedAt); err == nil {
+				t.Fatalf("mismatched observation was accepted: %+v", statuses)
+			}
+		})
 	}
 }
 
-func TestRelayProbeFailsClosedWhenAdvertisedDiscoveryFails(t *testing.T) {
-	manager := probeManager(t)
-	resourceAttempts := 0
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		var input struct {
-			Method string `json:"method"`
-		}
-		_ = json.NewDecoder(request.Body).Decode(&input)
-		if input.Method == "notifications/initialized" {
-			return probeHTTPResponse(http.StatusAccepted, "application/json", "", nil), nil
-		}
-		if input.Method == "initialize" {
-			return probeHTTPResponse(http.StatusOK, "application/json", `{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{},"resources":{}}}}`, nil), nil
-		}
-		if input.Method == "resources/list" {
-			resourceAttempts++
-			return probeHTTPResponse(http.StatusInternalServerError, "application/json", `{}`, nil), nil
-		}
-		result := `{"tools":[{"name":"ready_status"}]}`
-		if input.Method == "resources/templates/list" {
-			result = `{"resourceTemplates":[]}`
-		}
-		return probeHTTPResponse(http.StatusOK, "application/json", `{"jsonrpc":"2.0","id":"`+input.Method+`","result":`+result+`}`, nil), nil
-	})}
-	status, err := manager.ProbeMembers(context.Background(), 6276, probeManifest("ready"))
-	if err != nil || status.Healthy || status.Contract != "incompatible" || status.ErrorCode != bridgeprotocol.ErrMCPMIncompatible {
-		t.Fatalf("discovery failure status=%+v err=%v", status, err)
-	}
-	if resourceAttempts != 2 {
-		t.Fatalf("permanent discovery failure attempts=%d", resourceAttempts)
+func TestRelayObservedServerWithNoToolsIsReady(t *testing.T) {
+	manifest := probeManifestV2(t, "empty")
+	admin := &fakeMCPMAdmin{autoManifest: true}
+	admin.configureManifest(t, manifest)
+	statuses, err := attributeObservedRelayContracts(manifest, admin.observation, time.Unix(1, 0).UTC())
+	if err != nil || len(statuses) != 1 || statuses[0].Status != "ready" || len(statuses[0].CapabilityKinds) != 0 || statuses[0].Capabilities.Tools != 0 {
+		t.Fatalf("zero-tool server status=%+v err=%v", statuses, err)
 	}
 }
 
-func TestRelayProbeRetriesColdDiscoveryWithinTotalBudget(t *testing.T) {
-	manager := probeManager(t)
-	toolAttempts := 0
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		var input struct {
-			Method string `json:"method"`
-		}
-		_ = json.NewDecoder(request.Body).Decode(&input)
-		if input.Method == "notifications/initialized" {
-			return probeHTTPResponse(http.StatusAccepted, "application/json", "", nil), nil
-		}
-		if input.Method == "initialize" {
-			return probeHTTPResponse(http.StatusOK, "application/json", `{"jsonrpc":"2.0","id":"initialize","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}}}}`, nil), nil
-		}
-		toolAttempts++
-		if toolAttempts == 1 {
-			return nil, context.DeadlineExceeded
-		}
-		return probeHTTPResponse(http.StatusOK, "application/json", `{"jsonrpc":"2.0","id":"tools/list","result":{"tools":[{"name":"cold_status"}]}}`, nil), nil
-	})}
-
-	status, err := manager.ProbeMembers(context.Background(), 6276, probeManifest("cold"))
-	if err != nil || !status.Healthy || status.Contract != "verified" || toolAttempts != 2 {
-		t.Fatalf("cold discovery status=%+v err=%v attempts=%d", status, err, toolAttempts)
+func TestRelayProbeFailsClosedForAdminContractFailures(t *testing.T) {
+	manifest := probeManifestV2(t, "server")
+	tests := []struct {
+		name   string
+		mutate func(*fakeMCPMAdmin)
+		code   string
+	}{
+		{name: "capability transport", mutate: func(admin *fakeMCPMAdmin) { admin.capabilityErr = context.DeadlineExceeded }, code: bridgeprotocol.ErrRelayUnhealthy},
+		{name: "capability incompatible", mutate: func(admin *fakeMCPMAdmin) {
+			admin.capability = &bridgeprotocol.RelayCapabilityResponse{AdminProtocolVersion: 2, Runtime: "mcpm"}
+		}, code: bridgeprotocol.ErrMCPMIncompatible},
+		{name: "status mismatch", mutate: func(admin *fakeMCPMAdmin) { admin.status.RoutingBundleHash = strings.Repeat("f", 64) }, code: bridgeprotocol.ErrRevisionConflict},
+		{name: "observation unavailable", mutate: func(admin *fakeMCPMAdmin) { admin.observationErr = errors.New("upstream marker must not escape") }, code: bridgeprotocol.ErrRelayUnhealthy},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager := probeManager(t)
+			admin := &fakeMCPMAdmin{autoManifest: true}
+			admin.configureManifest(t, manifest)
+			test.mutate(admin)
+			manager.Admin = admin
+			status, err := manager.ProbeMembers(context.Background(), 6276, manifest)
+			if err == nil || status.Healthy || status.ErrorCode != test.code {
+				t.Fatalf("admin failure status=%+v err=%v", status, err)
+			}
+			if strings.Contains(status.ErrorReason, "marker") {
+				t.Fatalf("admin error leaked into status reason %q", status.ErrorReason)
+			}
+		})
 	}
 }
 
-func TestRelayResourcePrefixesSupportPathAndLegacyProtocolStyles(t *testing.T) {
-	manifest := probeManifest("path", "legacy", "mcpstyle")
-	statuses := attributeRelayCapabilities(manifest, []mcpCapability{
-		{Kind: "resource", URI: "/path/item"},
-		{Kind: "resource", URI: "legacy://item"},
-		{Kind: "resource_template", URI: "mcp://mcpstyle/{id}"},
-	}, time.Unix(1, 0).UTC())
-	for _, status := range statuses {
-		if status.Status != "ready" {
-			t.Fatalf("resource prefix status=%+v", statuses)
-		}
-	}
-}
-
-func TestRelayProbeTimeoutAndReasonRedaction(t *testing.T) {
-	manager := probeManager(t)
-	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		<-request.Context().Done()
-		return nil, request.Context().Err()
-	})}
-	// Leave enough budget for the race-instrumented mcpm --version subprocess
-	// before exercising the transport timeout. A 5ms deadline can expire during
-	// process startup and report mcpm_incompatible instead of relay_unhealthy.
-	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
-	defer cancel()
-	status, err := manager.ProbeMembers(ctx, 6276, probeManifest("server"))
-	if err == nil || status.ErrorCode != bridgeprotocol.ErrRelayUnhealthy || status.Healthy {
-		t.Fatalf("timeout status=%+v err=%v", status, err)
-	}
+func TestRelayProbeReasonIsBoundedAndSingleLine(t *testing.T) {
 	reason := safeRelayReason(errors.New(strings.Repeat("x", 230) + "\nsecret-line"))
 	if len(reason) != 200 || strings.Contains(reason, "\n") || strings.Contains(reason, "secret-line") {
 		t.Fatalf("unsafe relay reason %q", reason)
 	}
 }
 
-func TestRelaySSEProbeReturnsBeforeStreamCloses(t *testing.T) {
-	reader, writer := io.Pipe()
-	done := make(chan struct{})
-	release := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = io.WriteString(writer, "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":\"tools/list\",\"result\":{\"tools\":[]}}\n\n")
-		<-release
-		_ = writer.Close()
-	}()
-	response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: reader}
-	started := time.Now()
-	payload, err := readMCPResponse(response, "tools/list")
-	_ = reader.Close()
-	close(release)
-	if err != nil || !bytes.Contains(payload, []byte(`"id":"tools/list"`)) || time.Since(started) > 100*time.Millisecond {
-		t.Fatalf("streaming SSE payload=%s err=%v elapsed=%s", payload, err, time.Since(started))
-	}
-	<-done
-}
-
 func probeManager(t *testing.T) *RelayManager {
 	t.Helper()
 	mcpm := filepath.Join(t.TempDir(), "mcpm")
-	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf 'mcpm 1.2.3\\n'\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
+	writeCompatibleMCPM(t, mcpm, "1.2.3-toolhub.1")
 	manager := NewRelayManager(&fakeRelayController{state: "active", enabled: true}, t.TempDir())
 	manager.MCPMPath = mcpm
 	manager.now = func() time.Time { return time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC) }
@@ -256,12 +144,7 @@ func probeManifest(names ...string) bridgeprotocol.DesiredManifest {
 	return manifest
 }
 
-func probeHTTPResponse(status int, contentType, body string, headers http.Header) *http.Response {
-	if headers == nil {
-		headers = make(http.Header)
-	}
-	if contentType != "" {
-		headers.Set("Content-Type", contentType)
-	}
-	return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(body))}
+func probeManifestV2(t *testing.T, names ...string) bridgeprotocol.DesiredManifest {
+	t.Helper()
+	return withRelayGovernance(t, probeManifest(names...), "00000000-0000-0000-0000-000000000001", strings.Repeat("a", 64), "00000000-0000-0000-0000-000000000002", strings.Repeat("b", 64))
 }

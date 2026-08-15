@@ -139,7 +139,13 @@ func TestGovernanceDTOValidationRejectsSensitiveFieldsAndBounds(t *testing.T) {
 	if err := ValidateGovernanceBody(tooDeep); err == nil {
 		t.Fatal("deep governance body accepted")
 	}
-	response := ContractObservationResponse{ServerID: uuid.NewString(), ContractRevisionID: uuid.NewString(), Tools: []ContractToolDTO{{Name: "read_item", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{}, Presentation: map[string]any{}}}}
+	response := ContractObservationResponse{
+		RelayConfigurationRevisionID: uuid.NewString(),
+		Servers: []ContractServerObservation{{
+			ServerID: uuid.NewString(), ServerName: "inventory", MCPConfigRevisionID: uuid.NewString(),
+			Tools: []ContractToolDTO{{Name: "read_item", RuntimeName: "read_item", InputSchema: map[string]any{}, Annotations: map[string]any{}}},
+		}},
+	}
 	body, err := json.Marshal(response)
 	if err != nil {
 		t.Fatal(err)

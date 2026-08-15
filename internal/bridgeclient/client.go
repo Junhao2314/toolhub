@@ -156,6 +156,46 @@ func (c *Client) Relay(ctx context.Context, action, key string, input bridgeprot
 	return result, err
 }
 
+func (c *Client) RelayCapability(ctx context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
+	var result bridgeprotocol.RelayCapabilityResponse
+	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/capability", "", map[string]any{}, &result)
+	return result, err
+}
+
+func (c *Client) ReloadRelayGovernance(ctx context.Context, key string, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {
+	var result bridgeprotocol.RelayReloadResponse
+	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/reload", key, input, &result)
+	return result, err
+}
+
+func (c *Client) ObserveRelayContracts(ctx context.Context) (bridgeprotocol.ContractObservationResponse, error) {
+	var result bridgeprotocol.ContractObservationResponse
+	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/contracts/observe", "", map[string]any{}, &result)
+	return result, err
+}
+
+func (c *Client) ListRelayConfirmations(ctx context.Context) (bridgeprotocol.ConfirmationListResponse, error) {
+	var result bridgeprotocol.ConfirmationListResponse
+	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/confirmations/list", "", map[string]any{}, &result)
+	return result, err
+}
+
+func (c *Client) DecideRelayConfirmation(ctx context.Context, approve bool, key string, input bridgeprotocol.ConfirmationDecisionRequest) (bridgeprotocol.ConfirmationDecisionResponse, error) {
+	action := "reject"
+	if approve {
+		action = "approve"
+	}
+	var result bridgeprotocol.ConfirmationDecisionResponse
+	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/confirmations/"+action, key, input, &result)
+	return result, err
+}
+
+func (c *Client) DrainRelayObservations(ctx context.Context, input bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error) {
+	var result bridgeprotocol.ObservationDrainResponse
+	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/observations/drain", "", input, &result)
+	return result, err
+}
+
 func (c *Client) GCBackups(ctx context.Context, key string, input bridgeprotocol.BackupGCRequest) (bridgeprotocol.BackupGCResponse, error) {
 	var result bridgeprotocol.BackupGCResponse
 	err := c.call(ctx, http.MethodPost, "/v1/backups/gc", key, input, &result)
