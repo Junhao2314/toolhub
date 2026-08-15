@@ -193,11 +193,19 @@ func decodeMCPMAdminEnvelope(body []byte, output any) error {
 	if envelope.Error == nil || len(envelope.Data) != 0 || !mcpmAdminErrorCodePattern.MatchString(envelope.Error.Code) {
 		return errors.New("mcpm admin error response is invalid")
 	}
-	message := safeRelayReason(errors.New(envelope.Error.Message))
-	if message == "" {
-		message = "mcpm admin operation failed"
+	return boundedMCPMAdminError(envelope.Error.Code)
+}
+
+func boundedMCPMAdminError(code string) *bridgeprotocol.APIError {
+	switch code {
+	case "challenge_expired", "challenge_unknown", "binding_mismatch":
+		return bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict}, bridgeprotocol.ErrRevisionConflict)
+	case "request_invalid", "operation_invalid", "request_fields_invalid", "challenge_id_invalid", "binding_hash_invalid",
+		"observation_cursor_invalid", "observation_limit_invalid", "observation_request_invalid":
+		return bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: bridgeprotocol.ErrInvalidRequest}, bridgeprotocol.ErrInvalidRequest)
+	default:
+		return bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy}, bridgeprotocol.ErrRelayUnhealthy)
 	}
-	return &bridgeprotocol.APIError{Code: envelope.Error.Code, Message: message}
 }
 
 func decodeStrictAdminJSON(body []byte, output any) error {

@@ -79,6 +79,7 @@ func (s *Store) IngestRelayObservations(ctx context.Context, response bridgeprot
 	if err != nil {
 		return TelemetryIngestResult{}, err
 	}
+	initialCursors := make(map[string]RelayObservationCursor, len(serverIDs))
 	cursors := make(map[string]RelayObservationCursor, len(serverIDs))
 	for serverID := range serverIDs {
 		if _, err := tx.Exec(ctx, `INSERT INTO relay_observation_cursors(server_id) VALUES($1) ON CONFLICT(server_id) DO NOTHING`, serverID); err != nil {
@@ -88,6 +89,10 @@ func (s *Store) IngestRelayObservations(ctx context.Context, response bridgeprot
 		if err := tx.QueryRow(ctx, `SELECT boot_id,cursor FROM relay_observation_cursors WHERE server_id=$1 FOR UPDATE`, serverID).Scan(&cursor.BootID, &cursor.Sequence); err != nil {
 			return TelemetryIngestResult{}, err
 		}
+		if cursor.BootID == response.BootID && response.NextSequence < cursor.Sequence {
+			return TelemetryIngestResult{}, ErrConflict
+		}
+		initialCursors[serverID] = cursor
 		cursors[serverID] = cursor
 	}
 
@@ -142,6 +147,10 @@ func (s *Store) IngestRelayObservations(ctx context.Context, response bridgeprot
 	}
 
 	for serverID := range serverIDs {
+		cursor := initialCursors[serverID]
+		if cursor.BootID == response.BootID && cursor.Sequence == response.NextSequence {
+			continue
+		}
 		if _, err := tx.Exec(ctx, `UPDATE relay_observation_cursors SET boot_id=$2,cursor=$3,updated_at=now() WHERE server_id=$1`, serverID, response.BootID, response.NextSequence); err != nil {
 			return TelemetryIngestResult{}, err
 		}

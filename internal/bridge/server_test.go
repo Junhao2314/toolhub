@@ -208,7 +208,7 @@ func TestRestoreRequiresSHA256ExpectedRevision(t *testing.T) {
 	server, adapter, key := testServer(t)
 	input := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "restore", Target: validLocalTarget(bridgeprotocol.RuntimeClaude), BackupID: uuid.NewString()}
 	recorder := serveSignedMutation(t, server, key, "/v1/targets/restore", "restore-nonce-000001", "restore-no-revision", input)
-	if recorder.Code != http.StatusBadRequest || !bytes.Contains(recorder.Body.Bytes(), []byte("expectedRevision")) {
+	if recorder.Code != http.StatusBadRequest || !bytes.Contains(recorder.Body.Bytes(), []byte(bridgeprotocol.ErrInvalidRequest)) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if adapter.restoreCalls != 0 {

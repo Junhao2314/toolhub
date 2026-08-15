@@ -404,6 +404,10 @@ func hasSensitiveValue(value any) bool {
 }
 
 func journalSafeTargetResult(result bridgeprotocol.TargetResult) bridgeprotocol.TargetResult {
+	var safeError *bridgeprotocol.APIError
+	if result.Error != nil {
+		safeError = bridgeprotocol.BoundedAPIError(result.Error, bridgeprotocol.ErrInvalidRequest)
+	}
 	return bridgeprotocol.TargetResult{
 		Status:         result.Status,
 		Health:         result.Health,
@@ -411,7 +415,7 @@ func journalSafeTargetResult(result bridgeprotocol.TargetResult) bridgeprotocol.
 		BackupID:       result.BackupID,
 		Repaired:       result.Repaired,
 		Relay:          journalSafeRelayStatus(result.Relay),
-		Error:          result.Error,
+		Error:          safeError,
 	}
 }
 
@@ -420,11 +424,17 @@ func journalSafeRelayStatus(status *bridgeprotocol.RelayStatus) *bridgeprotocol.
 		return nil
 	}
 	safe := *status
-	safe.ErrorReason = truncateJournalReason(safe.ErrorReason)
+	if safe.ErrorCode != "" {
+		bounded := bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: safe.ErrorCode}, bridgeprotocol.ErrRelayUnhealthy)
+		safe.ErrorCode, safe.ErrorReason = bounded.Code, bounded.Message
+	}
 	safe.MemberStatuses = append([]bridgeprotocol.RelayMemberStatus(nil), status.MemberStatuses...)
 	for index := range safe.MemberStatuses {
 		safe.MemberStatuses[index].CapabilityKinds = append([]string(nil), safe.MemberStatuses[index].CapabilityKinds...)
-		safe.MemberStatuses[index].ErrorReason = truncateJournalReason(safe.MemberStatuses[index].ErrorReason)
+		if safe.MemberStatuses[index].ErrorCode != "" {
+			bounded := bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: safe.MemberStatuses[index].ErrorCode}, bridgeprotocol.ErrRelayUnhealthy)
+			safe.MemberStatuses[index].ErrorCode, safe.MemberStatuses[index].ErrorReason = bounded.Code, bounded.Message
+		}
 	}
 	return &safe
 }

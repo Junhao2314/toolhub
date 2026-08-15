@@ -618,11 +618,7 @@ func invalidRequest(err error) *bridgeprotocol.APIError {
 	return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrInvalidRequest, Message: err.Error()}
 }
 func asAPIError(err error) *bridgeprotocol.APIError {
-	var target *bridgeprotocol.APIError
-	if errors.As(err, &target) {
-		return target
-	}
-	return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrInvalidRequest, Message: "Bridge operation failed"}
+	return bridgeprotocol.BoundedAPIError(err, bridgeprotocol.ErrInvalidRequest)
 }
 func statusForBridgeError(err *bridgeprotocol.APIError) int {
 	switch err.Code {

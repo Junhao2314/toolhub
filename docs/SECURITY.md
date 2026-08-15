@@ -70,7 +70,9 @@ hash, rechecks the current Profile revision, and sends only the challenge ID and
 binding hash across the Bridge. It requires session authentication and CSRF but
 not password reauthentication. The synchronous audit record is payload-free and
 limited to challenge/binding/argument hashes, Profile/revision/server/tool IDs,
-reason codes, and the decision outcome. A post-dispatch transport failure or a
+reason codes, and the decision outcome. A successful Relay decision is withheld
+from the Browser if that synchronous audit record cannot be persisted. A
+post-dispatch transport failure or a
 decision response whose challenge/binding does not match is audited and returned
 as an unknown outcome, never retried automatically.
 

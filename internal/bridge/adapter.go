@@ -543,11 +543,7 @@ func (a *CompositeAdapter) decodeSaltResult(raw json.RawMessage) (bridgeprotocol
 }
 
 func publicBridgeError(err error) *bridgeprotocol.APIError {
-	var apiErr *bridgeprotocol.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr
-	}
-	return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrInvalidRequest, Message: "Salt target operation failed", Retryable: true}
+	return bridgeprotocol.BoundedAPIError(err, bridgeprotocol.ErrTargetUnavailable)
 }
 
 func (a *CompositeAdapter) finishSaltOperation(operationID, function, targetID, status string, result bridgeprotocol.TargetResult, apiErr *bridgeprotocol.APIError) error {

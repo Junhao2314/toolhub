@@ -220,8 +220,11 @@ Published revision and that immutable revision's name before sending only
 a running Published session, while an unpublished or superseded revision cannot
 be approved. Rejection requires the binding hash. Both decisions require an
 authenticated session and CSRF token but not a password. Challenges and
-60-second one-shot grants are ephemeral and are not durable operations. A
-transport failure or mismatched decision response returns
+60-second one-shot grants are ephemeral and are not durable operations. An
+approval response must contain a finite future expiry no more than 60 seconds
+away; a rejection response must omit the grant expiry. A successful Relay
+decision is not reported as `200` unless its synchronous audit row was
+persisted. A transport failure or mismatched decision response returns
 `confirmation_outcome_unknown`; clients must not retry or claim the tool was not
 executed.
 

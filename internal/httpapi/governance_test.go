@@ -261,6 +261,23 @@ func TestValidBrowserPreflightResponseRejectsUnboundOrUnsafeDiff(t *testing.T) {
 	if !validBrowserPreflightResponse(manifest, valid()) {
 		t.Fatal("valid preflight response was rejected")
 	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*bridgeprotocol.PreflightResponse)
+	}{
+		{name: "overlong manageable delete", mutate: func(item *bridgeprotocol.PreflightResponse) {
+			item.Diff.Add = []bridgeprotocol.DiffItem{}
+			item.Diff.Delete = []bridgeprotocol.DiffItem{{Kind: "skill", Name: strings.Repeat("x", 129)}}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := valid()
+			test.mutate(&response)
+			if validBrowserPreflightResponse(manifest, response) {
+				t.Fatal("overlong manageable preflight item was accepted")
+			}
+		})
+	}
 	for _, nameLength := range []int{129, 255} {
 		response := valid()
 		response.Diff.Add = []bridgeprotocol.DiffItem{}
@@ -366,10 +383,11 @@ func TestGovernanceContractRoutesValidateAndQueueObservation(t *testing.T) {
 func TestGovernanceConfirmationDecisionIsProfileBoundAndPayloadFree(t *testing.T) {
 	const challengeID = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	const bindingHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	grantExpiresAt := float64(time.Now().Add(30*time.Second).UnixNano()) / float64(time.Second)
 	var summary bridgeprotocol.ConfirmationSummary
 	decisionCalls := 0
 	decisionStatus := http.StatusOK
-	decisionResponse := bridgeprotocol.ConfirmationDecisionResponse{ChallengeID: challengeID, BindingHash: bindingHash}
+	decisionResponse := bridgeprotocol.ConfirmationDecisionResponse{ChallengeID: challengeID, BindingHash: bindingHash, GrantExpiresAt: &grantExpiresAt}
 	harness := newGovernanceHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/relay/governance/confirmations/list":
@@ -411,7 +429,7 @@ func TestGovernanceConfirmationDecisionIsProfileBoundAndPayloadFree(t *testing.T
 		ProfileID: profile.ID, ProfileRevisionID: profile.CurrentRevisionID, ProfileName: profile.Name, ClientKind: profile.ClientKind,
 		ServerID: "22222222-2222-4222-8222-222222222222", ServerName: "acemcp", ToolID: "33333333-3333-4333-8333-333333333333", ToolName: "search", RuntimeName: "search",
 		MCPConfigRevisionID: "44444444-4444-4444-8444-444444444444", ContractRevisionID: "55555555-5555-4555-8555-555555555555", GlobalPolicyRevisionID: "66666666-6666-4666-8666-666666666666",
-		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "string", Sensitive: true}},
+		Decision: "confirm", ReasonCodes: []string{"annotation_mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "string", Sensitive: true}},
 	}
 
 	listed := harness.request(t, http.MethodGet, "/api/v1/relay/confirmations", "")
@@ -432,6 +450,7 @@ func TestGovernanceConfirmationDecisionIsProfileBoundAndPayloadFree(t *testing.T
 	if approved.Code != http.StatusOK || decisionCalls != 1 {
 		t.Fatalf("approve status=%d calls=%d body=%s", approved.Code, decisionCalls, approved.Body.String())
 	}
+	decisionResponse.GrantExpiresAt = nil
 	rejected := harness.request(t, http.MethodPost, "/api/v1/relay/confirmations/"+challengeID+"/reject", `{"bindingHash":"`+bindingHash+`"}`)
 	if rejected.Code != http.StatusOK || decisionCalls != 2 {
 		t.Fatalf("reject status=%d calls=%d body=%s", rejected.Code, decisionCalls, rejected.Body.String())
@@ -473,6 +492,83 @@ func TestGovernanceConfirmationDecisionIsProfileBoundAndPayloadFree(t *testing.T
 	}
 }
 
+func TestValidConfirmationDecisionResponseEnforcesGrantTTL(t *testing.T) {
+	const challengeID = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	const bindingHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	now := float64(time.Now().UnixNano()) / float64(time.Second)
+	validExpiry := now + 30
+	expired := now - 1
+	overlong := now + 61
+	nan := math.NaN()
+	positiveInfinity := math.Inf(1)
+	summary := bridgeprotocol.ConfirmationSummary{ChallengeID: challengeID, BindingHash: bindingHash}
+	tests := []struct {
+		name    string
+		approve bool
+		expires *float64
+		want    bool
+	}{
+		{name: "approval requires expiry", approve: true, want: false},
+		{name: "approval accepts finite grant within ttl", approve: true, expires: &validExpiry, want: true},
+		{name: "approval rejects expired grant", approve: true, expires: &expired, want: false},
+		{name: "approval rejects grant beyond ttl", approve: true, expires: &overlong, want: false},
+		{name: "approval rejects NaN expiry", approve: true, expires: &nan, want: false},
+		{name: "approval rejects infinite expiry", approve: true, expires: &positiveInfinity, want: false},
+		{name: "rejection omits expiry", approve: false, want: true},
+		{name: "rejection forbids expiry", approve: false, expires: &validExpiry, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := bridgeprotocol.ConfirmationDecisionResponse{ChallengeID: challengeID, BindingHash: bindingHash, GrantExpiresAt: test.expires}
+			if got := validConfirmationDecisionResponse(response, summary, test.approve); got != test.want {
+				t.Fatalf("validConfirmationDecisionResponse()=%t want=%t expiry=%v", got, test.want, test.expires)
+			}
+		})
+	}
+}
+
+func TestGovernanceConfirmationDecisionFailsClosedWhenAuditCannotPersist(t *testing.T) {
+	const challengeID = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	const bindingHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	grantExpiresAt := float64(time.Now().Add(30*time.Second).UnixNano()) / float64(time.Second)
+	var summary bridgeprotocol.ConfirmationSummary
+	decisionCalls := 0
+	harness := newGovernanceHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/relay/governance/confirmations/list":
+			writeJSON(w, http.StatusOK, bridgeprotocol.ConfirmationListResponse{Items: []bridgeprotocol.ConfirmationSummary{summary}})
+		case "/v1/relay/governance/confirmations/approve":
+			decisionCalls++
+			writeJSON(w, http.StatusOK, bridgeprotocol.ConfirmationDecisionResponse{ChallengeID: challengeID, BindingHash: bindingHash, GrantExpiresAt: &grantExpiresAt})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	profile, err := harness.store.SaveProfile(context.Background(), "11111111-1111-4111-8111-111111111111", store.ProfileInput{Name: "claude-audit-failure", ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.store.Pool().Exec(context.Background(), `INSERT INTO published_profiles(profile_id,profile_revision_id) VALUES($1,$2)`, profile.ID, profile.CurrentRevisionID); err != nil {
+		t.Fatal(err)
+	}
+	summary = bridgeprotocol.ConfirmationSummary{
+		ChallengeID: challengeID, BindingHash: bindingHash, ArgumentHash: strings.Repeat("a", 64), CreatedAt: 1, ExpiresAt: 2,
+		ProfileID: profile.ID, ProfileRevisionID: profile.CurrentRevisionID, ProfileName: profile.Name, ClientKind: profile.ClientKind,
+		ServerID: "22222222-2222-4222-8222-222222222222", ServerName: "acemcp", ToolID: "33333333-3333-4333-8333-333333333333", ToolName: "search", RuntimeName: "search",
+		MCPConfigRevisionID: "44444444-4444-4444-8444-444444444444", ContractRevisionID: "55555555-5555-4555-8555-555555555555", GlobalPolicyRevisionID: "66666666-6666-4666-8666-666666666666",
+		Decision: "confirm", ReasonCodes: []string{"annotation_mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{},
+	}
+	if _, err := harness.store.Pool().Exec(context.Background(), `DROP TABLE audit_events`); err != nil {
+		t.Fatal(err)
+	}
+
+	response := harness.request(t, http.MethodPost, "/api/v1/relay/confirmations/"+challengeID+"/approve", `{"profileName":"claude-audit-failure","bindingHash":"`+bindingHash+`"}`)
+	assertGovernanceError(t, response, http.StatusInternalServerError, "audit_persistence_failed")
+	if decisionCalls != 1 {
+		t.Fatalf("decision calls=%d want=1", decisionCalls)
+	}
+}
+
 func TestGovernanceConfirmationApprovalRejectsUnpublishedProfile(t *testing.T) {
 	const challengeID = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	const bindingHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -498,7 +594,7 @@ func TestGovernanceConfirmationApprovalRejectsUnpublishedProfile(t *testing.T) {
 		ProfileID: profile.ID, ProfileRevisionID: profile.CurrentRevisionID, ProfileName: profile.Name, ClientKind: profile.ClientKind,
 		ServerID: "22222222-2222-4222-8222-222222222222", ServerName: "acemcp", ToolID: "33333333-3333-4333-8333-333333333333", ToolName: "search", RuntimeName: "search",
 		MCPConfigRevisionID: "44444444-4444-4444-8444-444444444444", ContractRevisionID: "55555555-5555-4555-8555-555555555555", GlobalPolicyRevisionID: "66666666-6666-4666-8666-666666666666",
-		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{},
+		Decision: "confirm", ReasonCodes: []string{"annotation_mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{},
 	}
 
 	response := harness.request(t, http.MethodPost, "/api/v1/relay/confirmations/"+challengeID+"/approve", `{"profileName":"claude-unpublished","bindingHash":"`+bindingHash+`"}`)
@@ -526,7 +622,7 @@ func TestGovernanceRejectsInvalidSafeRelayDTOs(t *testing.T) {
 		ProfileID: "11111111-1111-4111-8111-111111111111", ProfileRevisionID: "22222222-2222-4222-8222-222222222222", ProfileName: "claude-coding", ClientKind: "claude",
 		ServerID: "33333333-3333-4333-8333-333333333333", ServerName: "acemcp", ToolID: "44444444-4444-4444-8444-444444444444", ToolName: "search", RuntimeName: "search",
 		MCPConfigRevisionID: "55555555-5555-4555-8555-555555555555", ContractRevisionID: "66666666-6666-4666-8666-666666666666", GlobalPolicyRevisionID: "77777777-7777-4777-8777-777777777777",
-		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "string", StringLength: &stringLength}},
+		Decision: "confirm", ReasonCodes: []string{"annotation_mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "string", StringLength: &stringLength}},
 	}
 	if !validConfirmationSummaries([]bridgeprotocol.ConfirmationSummary{validConfirmation}) {
 		t.Fatal("valid confirmation summary was rejected")
@@ -541,6 +637,7 @@ func TestGovernanceRejectsInvalidSafeRelayDTOs(t *testing.T) {
 		{name: "invalid client", mutate: func(item *bridgeprotocol.ConfirmationSummary) { item.ClientKind = "shared" }},
 		{name: "invalid decision", mutate: func(item *bridgeprotocol.ConfirmationSummary) { item.Decision = "allow" }},
 		{name: "empty reason", mutate: func(item *bridgeprotocol.ConfirmationSummary) { item.ReasonCodes = []string{""} }},
+		{name: "untrusted reason", mutate: func(item *bridgeprotocol.ConfirmationSummary) { item.ReasonCodes = []string{"raw-upstream-marker"} }},
 		{name: "overlong pointer", mutate: func(item *bridgeprotocol.ConfirmationSummary) {
 			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: strings.Repeat("/", 513), ValueType: "string"}}
 		}},
@@ -590,6 +687,7 @@ func TestGovernanceRejectsInvalidSafeRelayDTOs(t *testing.T) {
 		{name: "invalid outcome", mutate: func(item *bridgeprotocol.Observation) { item.Outcome = "ok" }},
 		{name: "invalid error class", mutate: func(item *bridgeprotocol.Observation) { item.ErrorClass = "rawError" }},
 		{name: "invalid duration bucket", mutate: func(item *bridgeprotocol.Observation) { item.DurationBucket = "1ms" }},
+		{name: "untrusted reason", mutate: func(item *bridgeprotocol.Observation) { item.ReasonCodes = []string{"raw-upstream-marker"} }},
 		{name: "timestamp bucket mismatch", mutate: func(item *bridgeprotocol.Observation) { item.MinuteBucket = "1970-01-01T00:01:00Z" }},
 	}
 	for _, test := range invalidObservations {

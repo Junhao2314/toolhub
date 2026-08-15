@@ -73,7 +73,7 @@ func (c *Client) call(ctx context.Context, method, path, idempotency string, inp
 			Error *bridgeprotocol.APIError `json:"error"`
 		}
 		if json.Unmarshal(responseBody, &envelope) == nil && envelope.Error != nil {
-			return envelope.Error
+			return bridgeprotocol.BoundedAPIError(envelope.Error, bridgeprotocol.ErrTargetUnavailable)
 		}
 		return fmt.Errorf("Bridge returned HTTP %d", response.StatusCode)
 	}

@@ -446,6 +446,53 @@ func TestRelayRestoreRuntimeFailureRollsBackFilesAndOldProcess(t *testing.T) {
 	}
 }
 
+func TestRelayRestorePostWriteScanFailureRestoresOldProcessAndPort(t *testing.T) {
+	manager, controller, user, target, requestedPort := relayFixture(t, true)
+	first := relayManifest(target, requestedPort, "https://example.invalid/one")
+	applyRelay(t, manager, user, first, "apply", false)
+	oldPort := requestedPort + 1
+	second := relayManifest(target, oldPort, "https://example.invalid/two")
+	selected := applyRelay(t, manager, user, second, "apply", false)
+	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := (&Manager{}).scanRelay(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	portChecks := []int{}
+	manager.portAvailable = func(port int) error {
+		portChecks = append(portChecks, port)
+		return nil
+	}
+	scans := 0
+	manager.scanRelayState = func(paths TargetPaths) (ScanResult, error) {
+		scans++
+		if scans == 2 {
+			return ScanResult{}, errors.New("injected post-write scan failure")
+		}
+		return (&Manager{}).scanRelay(paths)
+	}
+	request := bridgeprotocol.CommitRequest{
+		OperationID: uuid.NewString(), OperationKind: "restore", Target: target, ExpectedRevision: current.Revision,
+		BackupID: selected.BackupID, Manifest: first, IntentionalPaused: true,
+	}
+	if result, err := manager.Restore(context.Background(), user, request); err == nil || result.Status == bridgeprotocol.OperationSucceeded {
+		t.Fatalf("Restore result=%+v err=%v", result, err)
+	}
+	if controller.state != "active" || !controller.enabled {
+		t.Fatalf("old relay process was not restored: state=%q enabled=%v actions=%v", controller.state, controller.enabled, controller.actions)
+	}
+	if len(portChecks) != 1 || portChecks[0] != oldPort {
+		t.Fatalf("process recovery ports=%v want [%d]", portChecks, oldPort)
+	}
+	environment, err := os.ReadFile(manager.EnvironmentFile)
+	if err != nil || string(environment) != "TOOLHUB_RELAY_PORT="+strconv.Itoa(oldPort)+"\n" {
+		t.Fatalf("old relay environment was not restored: body=%s err=%v", environment, err)
+	}
+}
+
 func TestRelayApplyReplacesHermesMCPWithSharedAnchor(t *testing.T) {
 	manager, _, user, target, port := relayFixture(t, false)
 	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)

@@ -486,6 +486,29 @@ func TestCancelOperationOnlyStopsUndispatchedWorkIntegration(t *testing.T) {
 	}
 }
 
+func TestFinishControlOperationPersistsOnlyBoundedErrorClassIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	operation, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "refresh", Request: map[string]any{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ClaimControlOperation(ctx); err != nil {
+		t.Fatal(err)
+	}
+	raw := &bridgeprotocol.APIError{Code: "upstream_secret_code", Message: "raw upstream marker", Details: map[string]any{"rawOutput": "secret"}}
+	if err := st.FinishControlOperation(ctx, operation.ID, bridgeprotocol.OperationFailed, nil, raw); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := st.Operation(ctx, operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finished.ErrorCode != bridgeprotocol.ErrInvalidRequest || finished.ErrorReason != "Request is invalid" || strings.Contains(string(finished.Metadata), "marker") {
+		t.Fatalf("persisted operation error was not bounded: %+v", finished)
+	}
+}
+
 func TestDiscoveredNodeArchiveRestoreLifecycleIntegration(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)

@@ -111,6 +111,92 @@ func TestTelemetryIngestRollsBackCursorAndAggregatesTogether(t *testing.T) {
 	}
 }
 
+func TestTelemetryIngestRejectsSameBootCursorRewind(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, _, profile, _ := setupPublishedRelayProfile(t, st, "telemetry-rewind")
+	toolID := integrationToolID(t, st, server.ID, "read_item")
+	bootID := uuid.NewString()
+	observedAt := time.Date(2026, 8, 16, 5, 0, 0, 0, time.UTC)
+	baseline := bridgeprotocol.ObservationDrainResponse{
+		BootID: bootID,
+		Items: []bridgeprotocol.Observation{
+			telemetryObservation(bootID, 5, observedAt, profile.ID, profile.CurrentRevisionID, server.ID, toolID, "allow", "executed", "none", "lt_10ms"),
+		},
+		NextSequence: 5,
+	}
+	if _, err := st.IngestRelayObservations(ctx, baseline); err != nil {
+		t.Fatal(err)
+	}
+	var updatedBefore time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT updated_at FROM relay_observation_cursors WHERE server_id=$1`, server.ID).Scan(&updatedBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.IngestRelayObservations(ctx, bridgeprotocol.ObservationDrainResponse{BootID: bootID, NextSequence: 4, Items: []bridgeprotocol.Observation{}}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same-boot cursor rewind returned %v", err)
+	}
+	cursor, err := st.RelayObservationCursor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updatedAfter time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT updated_at FROM relay_observation_cursors WHERE server_id=$1`, server.ID).Scan(&updatedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if cursor.BootID != bootID || cursor.Sequence != 5 || !updatedAfter.Equal(updatedBefore) || aggregateCallCount(t, st) != 1 {
+		t.Fatalf("rewind changed durable telemetry: cursor=%+v updatedBefore=%s updatedAfter=%s calls=%d", cursor, updatedBefore, updatedAfter, aggregateCallCount(t, st))
+	}
+}
+
+func TestTelemetryIngestTreatsEqualCursorAsNoOpAndAllowsNewBootReset(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, _, profile, _ := setupPublishedRelayProfile(t, st, "telemetry-noop-reset")
+	toolID := integrationToolID(t, st, server.ID, "read_item")
+	bootID := uuid.NewString()
+	observedAt := time.Date(2026, 8, 16, 6, 0, 0, 0, time.UTC)
+	baseline := bridgeprotocol.ObservationDrainResponse{
+		BootID: bootID,
+		Items: []bridgeprotocol.Observation{
+			telemetryObservation(bootID, 5, observedAt, profile.ID, profile.CurrentRevisionID, server.ID, toolID, "allow", "executed", "none", "lt_10ms"),
+		},
+		NextSequence: 5,
+	}
+	if _, err := st.IngestRelayObservations(ctx, baseline); err != nil {
+		t.Fatal(err)
+	}
+	fixedUpdatedAt := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_observation_cursors SET updated_at=$2 WHERE server_id=$1`, server.ID, fixedUpdatedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := st.IngestRelayObservations(ctx, bridgeprotocol.ObservationDrainResponse{BootID: bootID, NextSequence: 5, Items: []bridgeprotocol.Observation{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updatedAfterNoOp time.Time
+	if err := st.pool.QueryRow(ctx, `SELECT updated_at FROM relay_observation_cursors WHERE server_id=$1`, server.ID).Scan(&updatedAfterNoOp); err != nil {
+		t.Fatal(err)
+	}
+	if result.Accepted != 0 || result.Duplicates != 0 || !updatedAfterNoOp.Equal(fixedUpdatedAt) {
+		t.Fatalf("equal cursor was not a no-op: result=%+v updatedAt=%s", result, updatedAfterNoOp)
+	}
+
+	newBootID := uuid.NewString()
+	result, err = st.IngestRelayObservations(ctx, bridgeprotocol.ObservationDrainResponse{BootID: newBootID, NextSequence: 0, Items: []bridgeprotocol.Observation{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := st.RelayObservationCursor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Cursor.BootID != newBootID || result.Cursor.Sequence != 0 || cursor != result.Cursor {
+		t.Fatalf("new boot did not reset cursor: result=%+v durable=%+v", result.Cursor, cursor)
+	}
+}
+
 func TestTelemetryRetentionDeletesOnlyBucketsOlderThanThirtyDays(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)

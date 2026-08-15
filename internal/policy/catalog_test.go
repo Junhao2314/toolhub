@@ -83,6 +83,17 @@ func TestDecisionCannotLowerGlobalCeiling(t *testing.T) {
 	}
 }
 
+func TestValidateReasonCodeIncludesRuntimeGovernanceCodes(t *testing.T) {
+	for _, code := range []string{ReasonAnnotationMutating, ReasonCompatibilityMode, ReasonProfileRule} {
+		if !ValidateReasonCode(code) {
+			t.Fatalf("known reason code %q was rejected", code)
+		}
+	}
+	if ValidateReasonCode("raw-upstream-marker") {
+		t.Fatal("untrusted reason code was accepted")
+	}
+}
+
 func hasReason(result Classification, code string) bool {
 	for _, reason := range result.Reasons {
 		if reason.Code == code {

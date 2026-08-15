@@ -108,7 +108,7 @@ func TestFailGovernanceFinalizationMarksOperationFailedAndReleasesOwnership(t *t
 	if err := st.pool.QueryRow(ctx, `SELECT o.status,o.error_code,o.error_reason,bool_or(ot.governance_finalization_pending) FROM operations o JOIN operation_targets ot ON ot.operation_id=o.id WHERE o.id=$1 GROUP BY o.id`, operation.ID).Scan(&status, &errorCode, &errorReason, &pending); err != nil {
 		t.Fatal(err)
 	}
-	if status != bridgeprotocol.OperationFailed || errorCode != bridgeprotocol.ErrRevisionConflict || errorReason != finalizationError.Message || pending {
+	if status != bridgeprotocol.OperationFailed || errorCode != bridgeprotocol.ErrRevisionConflict || errorReason != "Runtime revision conflicts with the request" || pending {
 		t.Fatalf("finalization failure status=%s code=%s reason=%q pending=%v", status, errorCode, errorReason, pending)
 	}
 	if _, err := st.CreateOperation(ctx, CreateOperationInput{Kind: "scan", TargetIDs: []string{target.ID}, TargetRequests: map[string]any{target.ID: map[string]any{}}}); err != nil {

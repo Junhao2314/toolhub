@@ -468,6 +468,7 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 			if statusErr != nil {
 				return bridgeprotocol.TargetResult{}, publicError(statusErr)
 			}
+			status = boundedRelayStatus(status)
 			response.Relay = &status
 		}
 		if err := w.store.ReplaceRuntimeSnapshot(ctx, item.Target.ID, response.TargetRevision, map[string]any{"members": response.Members, "relay": response.Relay}); err != nil {
@@ -519,6 +520,7 @@ func (w *Worker) execute(ctx context.Context, item store.WorkItem) (bridgeprotoc
 		if err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
+		status = boundedRelayStatus(status)
 		if action == "stop" {
 			if err := w.store.SetRelayIntentionalPaused(ctx, true); err != nil {
 				return bridgeprotocol.TargetResult{}, publicError(err)
@@ -677,7 +679,8 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
 		return bridgeprotocol.TargetResult{}, apiErr
 	}
-	if target.Runtime == bridgeprotocol.RuntimeSharedRelay && (item.Operation.Kind == "apply" || item.Operation.Kind == "edit") {
+	result = boundedTargetResult(result)
+	if target.Runtime == bridgeprotocol.RuntimeSharedRelay && (commitKind == "apply" || commitKind == "edit") {
 		if err := w.store.SetRelayIntentionalPaused(ctx, false); err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
@@ -749,6 +752,7 @@ func desiredSnapshotOwnedByFinalizer(item store.WorkItem, sourceKind string) boo
 }
 
 func persistedTargetResult(item store.WorkItem, result bridgeprotocol.TargetResult) any {
+	result = boundedTargetResult(result)
 	if item.Target.Runtime != domain.RuntimeSharedRelay || !governanceOperationKind(item.Operation.Kind) || result.Status != bridgeprotocol.OperationSucceeded {
 		return result
 	}
@@ -817,6 +821,7 @@ func (w *Worker) executeReconcile(ctx context.Context, item store.WorkItem, targ
 		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
 		return bridgeprotocol.TargetResult{}, apiErr
 	}
+	result = boundedTargetResult(result)
 	if err := w.refreshRuntimeSnapshot(ctx, item.OperationTarget.ID, target, result); err != nil && w.logger != nil {
 		w.logger.Warn("refresh runtime inventory after reconcile", "targetId", target.ID, "error", err)
 	}
@@ -887,10 +892,12 @@ func relayProjectedHealth(status bridgeprotocol.RelayStatus) string {
 
 func resultProjectionError(result bridgeprotocol.TargetResult) (string, string) {
 	if result.Error != nil {
-		return result.Error.Code, result.Error.Message
+		bounded := bridgeprotocol.BoundedAPIError(result.Error, bridgeprotocol.ErrInvalidRequest)
+		return bounded.Code, bounded.Message
 	}
 	if result.Relay != nil {
-		return result.Relay.ErrorCode, result.Relay.ErrorReason
+		status := boundedRelayStatus(*result.Relay)
+		return status.ErrorCode, status.ErrorReason
 	}
 	return "", ""
 }
@@ -899,11 +906,34 @@ func relayProjectionError(status bridgeprotocol.RelayStatus) *bridgeprotocol.API
 	if status.Healthy || status.ErrorCode == "" {
 		return nil
 	}
-	message := status.ErrorReason
-	if message == "" {
-		message = "Relay runtime is blocked"
+	return bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: status.ErrorCode}, bridgeprotocol.ErrRelayUnhealthy)
+}
+
+func boundedTargetResult(result bridgeprotocol.TargetResult) bridgeprotocol.TargetResult {
+	if result.Error != nil {
+		result.Error = bridgeprotocol.BoundedAPIError(result.Error, bridgeprotocol.ErrInvalidRequest)
 	}
-	return &bridgeprotocol.APIError{Code: status.ErrorCode, Message: message, Retryable: true}
+	if result.Relay != nil {
+		status := boundedRelayStatus(*result.Relay)
+		result.Relay = &status
+	}
+	return result
+}
+
+func boundedRelayStatus(status bridgeprotocol.RelayStatus) bridgeprotocol.RelayStatus {
+	if status.ErrorCode != "" {
+		bounded := bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: status.ErrorCode}, bridgeprotocol.ErrRelayUnhealthy)
+		status.ErrorCode, status.ErrorReason = bounded.Code, bounded.Message
+	}
+	status.MemberStatuses = append([]bridgeprotocol.RelayMemberStatus(nil), status.MemberStatuses...)
+	for index := range status.MemberStatuses {
+		if status.MemberStatuses[index].ErrorCode == "" {
+			continue
+		}
+		bounded := bridgeprotocol.BoundedAPIError(&bridgeprotocol.APIError{Code: status.MemberStatuses[index].ErrorCode}, bridgeprotocol.ErrRelayUnhealthy)
+		status.MemberStatuses[index].ErrorCode, status.MemberStatuses[index].ErrorReason = bounded.Code, bounded.Message
+	}
+	return status
 }
 
 func (w *Worker) captureBridgeSaltJID(ctx context.Context, operationTargetID string) {
@@ -1118,11 +1148,7 @@ func validateTargetBinding(target bridgeprotocol.Target, manifest bridgeprotocol
 }
 
 func publicError(err error) *bridgeprotocol.APIError {
-	var apiErr *bridgeprotocol.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr
-	}
-	return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrInvalidRequest, Message: "Operation failed"}
+	return bridgeprotocol.BoundedAPIError(err, bridgeprotocol.ErrInvalidRequest)
 }
 
 func healthForError(err *bridgeprotocol.APIError) string {

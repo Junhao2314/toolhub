@@ -203,5 +203,7 @@ configuration. Confirmation summaries contain only exact revision bindings,
 hashes, reason codes, and structural argument summaries. Observation drain uses
 `afterBootId`/`afterSequence`, returns at most 1000 payload-free events, and
 carries bounded outcomes, error classes, duration buckets, and minute buckets.
+Confirmation approval returns a finite grant expiry no more than 60 seconds in
+the future; rejection omits the grant expiry entirely.
 Mutation routes retain timestamp/nonce replay protection and idempotency
 semantics.

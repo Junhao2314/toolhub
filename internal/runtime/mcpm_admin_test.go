@@ -109,8 +109,21 @@ func TestMCPMAdminConfirmationRequiresExactBindingHash(t *testing.T) {
 	})
 	_, err := client.DecideConfirmation(context.Background(), true, bridgeprotocol.ConfirmationDecisionRequest{ChallengeID: challengeID, BindingHash: bindingHash})
 	var apiErr *bridgeprotocol.APIError
-	if !errors.As(err, &apiErr) || apiErr.Code != "binding_mismatch" {
+	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrRevisionConflict || apiErr.Message != "Runtime revision conflicts with the request" {
 		t.Fatalf("confirmation error=%v", err)
+	}
+}
+
+func TestMCPMAdminErrorIsReducedToBoundedPublicClass(t *testing.T) {
+	client := serveAdminResponse(t, func(connection net.Conn) {
+		defer connection.Close()
+		_, _ = bufio.NewReader(connection).ReadBytes('\n')
+		_, _ = connection.Write([]byte("{\"ok\":false,\"error\":{\"code\":\"upstream_secret_code\",\"message\":\"raw upstream marker\"}}\n"))
+	})
+	_, err := client.Capability(context.Background())
+	var apiErr *bridgeprotocol.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrRelayUnhealthy || apiErr.Message != "Relay runtime is unhealthy" || strings.Contains(apiErr.Message, "marker") {
+		t.Fatalf("mcpm admin error was not bounded: %+v", apiErr)
 	}
 }
 

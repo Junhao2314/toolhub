@@ -85,6 +85,7 @@ type RelayManager struct {
 	MCPMPath          string
 	now               func() time.Time
 	portAvailable     func(int) error
+	scanRelayState    func(TargetPaths) (ScanResult, error)
 	readinessInterval time.Duration
 	readinessTimeout  time.Duration
 }
@@ -206,7 +207,7 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, err
 	}
-	current, err := (&Manager{}).scanRelay(paths)
+	current, err := r.scanRelay(paths)
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, err
 	}
@@ -285,7 +286,7 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrAtomicWrite, Message: "Relay configuration integrity validation failed"}
 	}
 	if preserveUnmanaged && request.IntentionalPaused {
-		after, scanErr := (&Manager{}).scanRelay(paths)
+		after, scanErr := r.scanRelay(paths)
 		if scanErr != nil {
 			_ = restoreRelayFiles(rollback)
 			return bridgeprotocol.TargetResult{}, scanErr
@@ -294,7 +295,7 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 		health := relayProjectedHealth(relayStatus)
 		return bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: health, TargetRevision: after.Revision, BackupID: backup.Backup.ID, Manifest: &request.Manifest, Repaired: true, Relay: &relayStatus, Error: relayStatusError(relayStatus)}, nil
 	}
-	after, err := (&Manager{}).scanRelay(paths)
+	after, err := r.scanRelay(paths)
 	if err != nil {
 		_ = restoreRelayFiles(rollback)
 		return bridgeprotocol.TargetResult{}, err
@@ -448,6 +449,13 @@ func (r *RelayManager) checkPortAvailable(port int) error {
 	return r.portAvailable(port)
 }
 
+func (r *RelayManager) scanRelay(paths TargetPaths) (ScanResult, error) {
+	if r.scanRelayState != nil {
+		return r.scanRelayState(paths)
+	}
+	return (&Manager{}).scanRelay(paths)
+}
+
 func (r *RelayManager) EnsurePaused(ctx context.Context, port int, manifest *bridgeprotocol.DesiredManifest) (bridgeprotocol.RelayStatus, bool) {
 	status, _ := r.Status(ctx, port, true)
 	if status.Healthy {
@@ -467,7 +475,7 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, err
 	}
-	current, err := (&Manager{}).scanRelay(paths)
+	current, err := r.scanRelay(paths)
 	if err != nil {
 		return bridgeprotocol.TargetResult{}, err
 	}
@@ -496,13 +504,13 @@ func (r *RelayManager) Restore(ctx context.Context, user ManagedUser, request br
 		_ = restoreRelayFiles(rollback)
 		return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrBackup, Message: "Restored relay configuration does not match the pinned backup manifest"}
 	}
-	after, err := (&Manager{}).scanRelay(paths)
+	after, err := r.scanRelay(paths)
 	if err != nil {
-		_ = restoreRelayFiles(rollback)
-		if request.IntentionalPaused {
-			_, _ = r.EnsurePaused(ctx, request.Manifest.RelayPort, &request.Manifest)
-		} else {
-			_ = r.RestartFixed(ctx, request.Manifest.RelayPort)
+		oldPort := relayPortFromBackup(rollback[r.EnvironmentFile], request.Manifest.RelayPort)
+		rollbackErr := restoreRelayFiles(rollback)
+		recoveryErr := r.restoreRelayProcess(ctx, process, oldPort)
+		if rollbackErr != nil || recoveryErr != nil {
+			return bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRelayUnhealthy, Message: "Relay restore scan failed and the previous runtime could not be recovered", Retryable: true}
 		}
 		return bridgeprotocol.TargetResult{}, err
 	}

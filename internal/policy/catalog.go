@@ -31,6 +31,8 @@ const (
 	ReasonReviewedReadOnly       = "reviewed_read_only"
 	ReasonUnclassified           = "unclassified"
 	ReasonOperatorReview         = "operator_review"
+	ReasonCompatibilityMode      = "compatibility-mode"
+	ReasonProfileRule            = "profile-rule"
 )
 
 var validReasonCodes = map[string]struct{}{
@@ -39,6 +41,7 @@ var validReasonCodes = map[string]struct{}{
 	ReasonCatalogCredential: {}, ReasonCatalogExternalPublish: {}, ReasonCatalogFinancial: {},
 	ReasonCatalogCommand: {}, ReasonSchemaMutating: {}, ReasonUnclassifiedMutating: {},
 	ReasonReviewedReadOnly: {}, ReasonUnclassified: {}, ReasonOperatorReview: {},
+	ReasonCompatibilityMode: {}, ReasonProfileRule: {},
 	"schema_changed": {}, "presentation_changed": {}, "server_visibility": {}, "rename_confirmed": {},
 }
 

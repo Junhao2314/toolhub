@@ -90,6 +90,13 @@ func TestValidateTargetBindingRejectsRelayPortChange(t *testing.T) {
 	assertRevisionConflict(t, validateTargetBinding(target, manifest, 6277))
 }
 
+func TestPublicErrorReducesUntrustedBridgeErrorToBoundedClass(t *testing.T) {
+	apiErr := publicError(&bridgeprotocol.APIError{Code: "upstream_secret_code", Message: "raw upstream marker", Details: map[string]any{"rawOutput": "secret"}})
+	if apiErr.Code != bridgeprotocol.ErrInvalidRequest || apiErr.Message != "Request is invalid" || apiErr.Details != nil {
+		t.Fatalf("worker public error was not bounded: %+v", apiErr)
+	}
+}
+
 func TestRelayResultProjectionPreservesBlockedSuccess(t *testing.T) {
 	status := bridgeprotocol.RelayStatus{Healthy: false, ErrorCode: bridgeprotocol.ErrRelayUnhealthy, ErrorReason: "relay unavailable"}
 	result := bridgeprotocol.TargetResult{Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthBlocked, Relay: &status, Error: relayProjectionError(status)}
@@ -97,7 +104,7 @@ func TestRelayResultProjectionPreservesBlockedSuccess(t *testing.T) {
 		t.Fatal("blocked result was normalized to healthy")
 	}
 	code, reason := resultProjectionError(result)
-	if code != bridgeprotocol.ErrRelayUnhealthy || reason != "relay unavailable" || !result.Error.Retryable {
+	if code != bridgeprotocol.ErrRelayUnhealthy || reason != "Relay runtime is unhealthy" || !result.Error.Retryable {
 		t.Fatalf("relay projection error code=%q reason=%q error=%+v", code, reason, result.Error)
 	}
 }

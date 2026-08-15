@@ -2,6 +2,7 @@ package bridgeclient
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -62,5 +63,17 @@ func TestGovernanceClientUsesFixedTypedRoutes(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestClientReducesUntrustedBridgeErrorToBoundedClass(t *testing.T) {
+	client := &Client{key: []byte("0123456789abcdef0123456789abcdef"), now: func() time.Time { return time.Unix(1, 0) }}
+	client.http = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":{"code":"upstream_secret_code","message":"raw upstream marker","details":{"rawOutput":"secret"}}}`))}, nil
+	})}
+	_, err := client.RelayCapability(context.Background())
+	var apiErr *bridgeprotocol.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrTargetUnavailable || apiErr.Message != "Target is unavailable" || !apiErr.Retryable || apiErr.Details != nil {
+		t.Fatalf("Bridge client error was not bounded: %+v", apiErr)
 	}
 }

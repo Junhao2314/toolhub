@@ -29,6 +29,8 @@ type governanceWorkerBridge struct {
 	drain     bridgeprotocol.ObservationDrainResponse
 	gc        bridgeprotocol.BackupGCResponse
 	operation bridgeprotocol.Operation
+	commit    bridgeprotocol.TargetResult
+	scan      bridgeprotocol.ScanResponse
 	err       error
 }
 
@@ -46,6 +48,14 @@ func (fake *governanceWorkerBridge) GCBackups(context.Context, string, bridgepro
 
 func (fake *governanceWorkerBridge) Operation(context.Context, string) (bridgeprotocol.Operation, error) {
 	return fake.operation, fake.err
+}
+
+func (fake *governanceWorkerBridge) Commit(context.Context, string, string, bridgeprotocol.CommitRequest) (bridgeprotocol.TargetResult, error) {
+	return fake.commit, fake.err
+}
+
+func (fake *governanceWorkerBridge) Scan(context.Context, string, bridgeprotocol.ScanRequest) (bridgeprotocol.ScanResponse, error) {
+	return fake.scan, fake.err
 }
 
 func TestFailedNodeRefreshPreservesActiveTargetsIntegration(t *testing.T) {
@@ -156,6 +166,70 @@ func TestBackupGCAlsoDeletesExpiredTelemetryIntegration(t *testing.T) {
 	result, apiErr := w.executeControl(ctx, domain.Operation{ID: uuid.NewString(), Kind: "backup_gc"})
 	if apiErr != nil || result["telemetryRowsDeleted"] != int64(1) {
 		t.Fatalf("backup GC result=%v error=%+v", result, apiErr)
+	}
+}
+
+func TestGovernanceApplyClearsIntentionalRelayPauseIntegration(t *testing.T) {
+	for _, kind := range []string{"relay_config_apply", "policy_apply"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			st := newWorkerIntegrationStore(t)
+			_, profile, sourceRevisionID := setupWorkerTelemetryFixture(t, st, "clear-pause-"+kind)
+			if err := st.SetRelayIntentionalPaused(ctx, true); err != nil {
+				t.Fatal(err)
+			}
+			var targetID string
+			if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/shared-relay'`).Scan(&targetID); err != nil {
+				t.Fatal(err)
+			}
+			target, err := st.Target(ctx, targetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := st.ResolveProfileManifest(ctx, profile.ID, targetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.PinDesiredSnapshot(ctx, targetID, "relay_config_apply", sourceRevisionID, "", manifest); err != nil {
+				t.Fatal(err)
+			}
+			request, err := json.Marshal(map[string]any{
+				"manifest": manifest, "targetRevision": target.TargetRevision,
+				"sourceKind": "relay_config_apply", "sourceId": sourceRevisionID,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := bridgeprotocol.TargetResult{
+				Status: bridgeprotocol.OperationSucceeded, Health: bridgeprotocol.HealthHealthy,
+				TargetRevision: strings.Repeat("f", 64),
+				Relay:          &bridgeprotocol.RelayStatus{State: "active", Healthy: true, FixedPort: 6276, SystemdEnabled: true},
+			}
+			fake := &governanceWorkerBridge{
+				commit: result,
+				scan:   bridgeprotocol.ScanResponse{TargetRevision: result.TargetRevision, Members: []bridgeprotocol.InventoryMember{}, Relay: result.Relay},
+			}
+			worker := &Worker{store: st, bridge: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now}
+			if err := worker.validateTargetBinding(ctx, toBridgeTarget(target), manifest); err != nil {
+				t.Fatalf("invalid governance Apply fixture: %v manifestTarget=%+v target=%+v", err, manifest.Target, toBridgeTarget(target))
+			}
+			item := store.WorkItem{
+				Operation:       domain.Operation{ID: uuid.NewString(), Kind: kind},
+				OperationTarget: domain.OperationTarget{ID: uuid.NewString(), Request: request},
+				Target:          target,
+			}
+
+			if _, apiErr := worker.executeCommit(ctx, item, toBridgeTarget(target)); apiErr != nil {
+				t.Fatalf("execute %s: %+v", kind, apiErr)
+			}
+			settings, err := st.Settings(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.RelayIntentionalPaused {
+				t.Fatalf("%s left the Relay intentionally paused", kind)
+			}
+		})
 	}
 }
 

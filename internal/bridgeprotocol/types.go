@@ -79,6 +79,53 @@ type APIError struct {
 	Details   map[string]any `json:"details,omitempty"`
 }
 
+type apiErrorClass struct {
+	message   string
+	retryable bool
+}
+
+var boundedAPIErrorClasses = map[string]apiErrorClass{
+	ErrAuthentication:       {message: "Bridge authentication failed"},
+	ErrReplay:               {message: "Bridge request nonce was already used"},
+	ErrExpiredRequest:       {message: "Bridge request expired"},
+	ErrIdempotencyConflict:  {message: "Idempotency key conflicts with an existing request"},
+	ErrInvalidRequest:       {message: "Request is invalid"},
+	ErrUnsupportedOperation: {message: "Operation is not supported"},
+	ErrRevisionConflict:     {message: "Runtime revision conflicts with the request"},
+	ErrProtectedScope:       {message: "Protected scope cannot be modified"},
+	ErrTargetUnavailable:    {message: "Target is unavailable", retryable: true},
+	ErrManagedUserMissing:   {message: "Managed user is unavailable"},
+	ErrSaltVersion:          {message: "Salt version is incompatible"},
+	ErrSaltJobMissing:       {message: "Salt job result is unavailable", retryable: true},
+	ErrMCPMMissing:          {message: "mcpm runtime is unavailable"},
+	ErrMCPMIncompatible:     {message: "mcpm runtime is incompatible"},
+	ErrRelayPortConflict:    {message: "Relay port conflicts with another process"},
+	ErrRelayUnhealthy:       {message: "Relay runtime is unhealthy", retryable: true},
+	ErrAtomicWrite:          {message: "Atomic write failed"},
+	ErrBackup:               {message: "Backup operation failed"},
+	ErrHermesReadOnly:       {message: "Hermes target is read-only"},
+}
+
+// BoundedAPIError reduces an error to a public code with a fixed message and
+// retry policy. It intentionally drops untrusted messages and details.
+func BoundedAPIError(err error, fallbackCode string) *APIError {
+	if err == nil {
+		return nil
+	}
+	class, ok := boundedAPIErrorClasses[fallbackCode]
+	if !ok {
+		fallbackCode = ErrInvalidRequest
+		class = boundedAPIErrorClasses[fallbackCode]
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		if candidate, exists := boundedAPIErrorClasses[apiErr.Code]; exists {
+			fallbackCode, class = apiErr.Code, candidate
+		}
+	}
+	return &APIError{Code: fallbackCode, Message: class.message, Retryable: class.retryable}
+}
+
 func (e *APIError) Error() string {
 	if e == nil {
 		return ""

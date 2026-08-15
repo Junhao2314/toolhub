@@ -711,7 +711,7 @@ paths:
         - {name: challengeID, in: path, required: true, schema: {$ref: '#/components/schemas/SHA256'}}
         - {$ref: '#/components/parameters/CSRFToken'}
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationApproveRequest'}}}}
-      responses: {'200': {description: Ephemeral decision, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+      responses: {'200': {description: Ephemeral 60-second grant, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationApprovalResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /relay/confirmations/{challengeID}/reject:
     post:
       tags: [Governance]
@@ -720,7 +720,7 @@ paths:
         - {name: challengeID, in: path, required: true, schema: {$ref: '#/components/schemas/SHA256'}}
         - {$ref: '#/components/parameters/CSRFToken'}
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationRejectRequest'}}}}
-      responses: {'200': {description: Ephemeral decision, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+      responses: {'200': {description: Ephemeral rejection without a grant, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationRejectionResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '500': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
   /relay/observations/live:
     get:
       tags: [Governance]
@@ -846,6 +846,9 @@ components:
     PreflightList: {description: Per-target preflight confirmations, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/PreflightItem'}}}}}}}
   schemas:
     UUID: {type: string, format: uuid}
+    PolicyReasonCode:
+      type: string
+      enum: [explicit_override, annotation_deny, annotation_destructive, annotation_mutating, annotation_read_only, catalog_destructive, catalog_credential, catalog_external_publish, catalog_financial, catalog_command_execution, schema_mutating, unclassified_mutating, reviewed_read_only, unclassified, operator_review, compatibility-mode, profile-rule, schema_changed, presentation_changed, server_visibility, rename_confirmed]
     Username: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{2,31}$'}
     ErrorEnvelope:
       type: object
@@ -1066,7 +1069,7 @@ components:
         toolId: {$ref: '#/components/schemas/UUID'}
         visible: {type: boolean}
         decision: {type: string, enum: [deny, confirm, allow]}
-        reasonCodes: {type: array, maxItems: 16, items: {type: string, minLength: 1, maxLength: 128}}
+        reasonCodes: {type: array, maxItems: 16, items: {$ref: '#/components/schemas/PolicyReasonCode'}}
     PendingSecretBinding:
       type: object
       required: [profileRevisionId, mcpRevisionId, namespace, key, slotHash, bound]
@@ -1300,14 +1303,14 @@ components:
       properties:
         kind: {type: string, enum: [skill, mcp]}
         memberId: {$ref: '#/components/schemas/UUID'}
-        name: {type: string, minLength: 1, maxLength: 255}
+        name: {type: string, minLength: 1, maxLength: 128}
     RemovedDiffItem:
       type: object
       additionalProperties: false
       required: [kind, name]
       properties:
         kind: {type: string, enum: [skill, mcp]}
-        name: {type: string, minLength: 1, maxLength: 255}
+        name: {type: string, minLength: 1, maxLength: 128}
     ExcludedDiffItem:
       type: object
       additionalProperties: false
@@ -1535,7 +1538,7 @@ components:
         contractRevisionId: {$ref: '#/components/schemas/UUID'}
         globalPolicyRevisionId: {$ref: '#/components/schemas/UUID'}
         decision: {type: string, enum: [confirm]}
-        reasonCodes: {type: array, maxItems: 32, items: {type: string, maxLength: 64}}
+        reasonCodes: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/PolicyReasonCode'}}
         argumentSummary: {type: array, maxItems: 512, items: {$ref: '#/components/schemas/ArgumentSummary'}}
     ConfirmationApproveRequest:
       type: object
@@ -1549,14 +1552,21 @@ components:
       additionalProperties: false
       required: [bindingHash]
       properties: {bindingHash: {$ref: '#/components/schemas/SHA256'}}
-    ConfirmationDecisionResponse:
+    ConfirmationApprovalResponse:
+      type: object
+      additionalProperties: false
+      required: [challengeId, bindingHash, grantExpiresAt]
+      properties:
+        challengeId: {$ref: '#/components/schemas/SHA256'}
+        bindingHash: {$ref: '#/components/schemas/SHA256'}
+        grantExpiresAt: {type: number, minimum: 0}
+    ConfirmationRejectionResponse:
       type: object
       additionalProperties: false
       required: [challengeId, bindingHash]
       properties:
         challengeId: {$ref: '#/components/schemas/SHA256'}
         bindingHash: {$ref: '#/components/schemas/SHA256'}
-        grantExpiresAt: {type: number, minimum: 0}
     NativeClientInspection:
       type: object
       additionalProperties: false
@@ -1600,7 +1610,7 @@ components:
         serverId: {$ref: '#/components/schemas/UUID'}
         toolId: {$ref: '#/components/schemas/UUID'}
         decision: {type: string, enum: [deny, confirm, allow]}
-        reasonCodes: {type: array, maxItems: 32, items: {type: string, maxLength: 64}}
+        reasonCodes: {type: array, maxItems: 32, items: {$ref: '#/components/schemas/PolicyReasonCode'}}
         outcome: {type: string, enum: [confirmation_required, confirmed, rejected, expired, denied, not_executed, executed, failed, unknown]}
         errorClass: {type: string, enum: [none, policy, confirmation, rate_limited, timeout, transport, upstream, internal]}
         durationBucket: {type: string, enum: [lt_10ms, lt_100ms, lt_1s, lt_10s, gte_10s]}

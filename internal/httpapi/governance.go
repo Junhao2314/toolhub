@@ -16,6 +16,7 @@ import (
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/policy"
 	"github.com/Junhao2314/toolhub/internal/store"
 )
 
@@ -272,7 +273,11 @@ func validBrowserPreflightResponse(manifest bridgeprotocol.DesiredManifest, resu
 			if excluded {
 				validKind = validKind || item.Kind == "entry"
 			}
-			if !validKind || !validPreflightName(item.Name) {
+			nameLimit := 128
+			if excluded {
+				nameLimit = 255
+			}
+			if !validKind || !validPreflightName(item.Name, nameLimit) {
 				return false
 			}
 			key := item.Kind + "\x00" + item.Name
@@ -299,8 +304,8 @@ func validBrowserPreflightResponse(manifest bridgeprotocol.DesiredManifest, resu
 		validItems(diff.Delete, false, false) && validItems(diff.Excluded, false, true)
 }
 
-func validPreflightName(value string) bool {
-	if value == "" || len(value) > 255 || strings.TrimSpace(value) != value {
+func validPreflightName(value string, maximum int) bool {
+	if value == "" || len(value) > maximum || strings.TrimSpace(value) != value {
 		return false
 	}
 	for _, character := range value {
@@ -486,7 +491,10 @@ func (a *API) decideRelayConfirmation(w http.ResponseWriter, r *http.Request, ap
 		writeError(w, r, http.StatusBadGateway, "confirmation_outcome_unknown", "Relay confirmation outcome is unknown")
 		return
 	}
-	_ = a.auditConfirmation(r, summary, outcome)
+	if err := a.auditConfirmation(r, summary, outcome); err != nil {
+		writeError(w, r, http.StatusInternalServerError, "audit_persistence_failed", "Confirmation decision audit could not be persisted")
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -502,10 +510,14 @@ func validConfirmationDecisionResponse(result bridgeprotocol.ConfirmationDecisio
 	if !constantTimeEqual(result.ChallengeID, summary.ChallengeID) || !constantTimeEqual(result.BindingHash, summary.BindingHash) {
 		return false
 	}
-	if result.GrantExpiresAt == nil {
-		return true
+	if !approve {
+		return result.GrantExpiresAt == nil
 	}
-	return approve && !math.IsNaN(*result.GrantExpiresAt) && !math.IsInf(*result.GrantExpiresAt, 0) && *result.GrantExpiresAt >= 0
+	if result.GrantExpiresAt == nil || math.IsNaN(*result.GrantExpiresAt) || math.IsInf(*result.GrantExpiresAt, 0) {
+		return false
+	}
+	now := float64(time.Now().UnixNano()) / float64(time.Second)
+	return *result.GrantExpiresAt > now && *result.GrantExpiresAt <= now+60
 }
 
 func (a *API) auditConfirmation(r *http.Request, summary bridgeprotocol.ConfirmationSummary, outcome string) error {
@@ -534,7 +546,7 @@ func validConfirmationSummaries(items []bridgeprotocol.ConfirmationSummary) bool
 			return false
 		}
 		for _, reason := range item.ReasonCodes {
-			if !validSafeName(reason, 64) {
+			if !policy.ValidateReasonCode(reason) {
 				return false
 			}
 		}
@@ -754,7 +766,7 @@ func validObservationDrain(result bridgeprotocol.ObservationDrainResponse, reque
 			return false
 		}
 		for _, reason := range item.ReasonCodes {
-			if strings.TrimSpace(reason) == "" || len(reason) > 64 {
+			if !policy.ValidateReasonCode(reason) {
 				return false
 			}
 		}

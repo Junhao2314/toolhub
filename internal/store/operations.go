@@ -310,7 +310,8 @@ func (s *Store) FinishControlOperation(ctx context.Context, operationID, status 
 	}
 	errorCode, errorReason := "", ""
 	if apiErr != nil {
-		errorCode, errorReason = apiErr.Code, truncate(apiErr.Message, 500)
+		bounded := bridgeprotocol.BoundedAPIError(apiErr, bridgeprotocol.ErrInvalidRequest)
+		errorCode, errorReason = bounded.Code, bounded.Message
 	}
 	command, err := s.pool.Exec(ctx, `UPDATE operations SET status=$2,metadata=metadata||jsonb_build_object('result',$3::jsonb),error_code=$4,error_reason=$5,finished_at=now(),updated_at=now() WHERE id=$1 AND status='running' AND NOT EXISTS(SELECT 1 FROM operation_targets WHERE operation_id=$1)`, operationID, status, jsonText(resultJSON), errorCode, errorReason)
 	if err != nil {
@@ -406,7 +407,8 @@ func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, st
 	}
 	errorCode, errorReason := "", ""
 	if apiErr != nil {
-		errorCode, errorReason = apiErr.Code, truncate(apiErr.Message, 500)
+		bounded := bridgeprotocol.BoundedAPIError(apiErr, bridgeprotocol.ErrInvalidRequest)
+		errorCode, errorReason = bounded.Code, bounded.Message
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -477,7 +479,8 @@ func (s *Store) FailGovernanceFinalization(ctx context.Context, operationID stri
 	if command.RowsAffected() == 0 {
 		return ErrConflict
 	}
-	command, err = tx.Exec(ctx, `UPDATE operations SET status='failed',error_code=$2,error_reason=$3,finished_at=now(),updated_at=now() WHERE id=$1 AND status='running'`, operationID, truncate(apiErr.Code, 120), truncate(apiErr.Message, 500))
+	bounded := bridgeprotocol.BoundedAPIError(apiErr, bridgeprotocol.ErrInvalidRequest)
+	command, err = tx.Exec(ctx, `UPDATE operations SET status='failed',error_code=$2,error_reason=$3,finished_at=now(),updated_at=now() WHERE id=$1 AND status='running'`, operationID, bounded.Code, bounded.Message)
 	if err != nil {
 		return err
 	}
