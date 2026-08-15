@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 
 	"github.com/google/uuid"
@@ -16,15 +19,35 @@ import (
 const maxProfileMembers = 500
 
 type ProfileInput struct {
-	Name            string            `json:"name"`
-	Description     string            `json:"description"`
-	SkillIDs        []string          `json:"skillIds"`
-	MCPServerIDs    []string          `json:"mcpServerIds"`
-	SkillVersionIDs map[string]string `json:"skillVersionIds,omitempty"`
-	MCPRevisionIDs  map[string]string `json:"mcpRevisionIds,omitempty"`
-	Revision        int64             `json:"revision,omitempty"`
-	ArchivedRestore bool              `json:"-"`
-	PendingBindings bool              `json:"-"`
+	Name            string                      `json:"name"`
+	Description     string                      `json:"description"`
+	ClientKind      string                      `json:"clientKind,omitempty"`
+	Category        string                      `json:"category,omitempty"`
+	Variant         string                      `json:"variant,omitempty"`
+	MigrationState  string                      `json:"migrationState,omitempty"`
+	SkillIDs        []string                    `json:"skillIds"`
+	MCPServerIDs    []string                    `json:"mcpServerIds"`
+	SkillVersionIDs map[string]string           `json:"skillVersionIds,omitempty"`
+	MCPRevisionIDs  map[string]string           `json:"mcpRevisionIds,omitempty"`
+	MCPGovernance   []ProfileMCPGovernanceInput `json:"mcpGovernance,omitempty"`
+	ToolRules       []ProfileToolRuleInput      `json:"toolRules,omitempty"`
+	Revision        int64                       `json:"revision,omitempty"`
+	ArchivedRestore bool                        `json:"-"`
+	PendingBindings bool                        `json:"-"`
+}
+
+type ProfileMCPGovernanceInput struct {
+	ServerID                   string `json:"serverId"`
+	MCPRevisionID              string `json:"mcpRevisionId"`
+	AcceptedContractRevisionID string `json:"acceptedContractRevisionId,omitempty"`
+	VisibilityMode             string `json:"visibilityMode"`
+}
+
+type ProfileToolRuleInput struct {
+	ToolID      string   `json:"toolId"`
+	Visible     bool     `json:"visible"`
+	Decision    string   `json:"decision"`
+	ReasonCodes []string `json:"reasonCodes,omitempty"`
 }
 
 type profilePins struct {
@@ -59,6 +82,19 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 	if len(input.SkillIDs) > maxProfileMembers || len(input.MCPServerIDs) > maxProfileMembers {
 		return "", "", errors.New("Profile membership exceeds safety limit")
 	}
+	input.ClientKind = strings.TrimSpace(input.ClientKind)
+	input.Category = strings.TrimSpace(input.Category)
+	input.Variant = strings.TrimSpace(input.Variant)
+	variantProvided := input.Variant != ""
+	if input.ClientKind != "" && input.ClientKind != "claude" && input.ClientKind != "codex" && input.ClientKind != "shared" && input.ClientKind != "unknown" {
+		return "", "", errors.New("invalid Profile client kind")
+	}
+	if input.Variant == "" {
+		input.Variant = "standard"
+	}
+	if len(input.Category) > 120 || len(input.Variant) > 64 {
+		return "", "", errors.New("invalid Profile category or variant")
+	}
 	if id == "" {
 		id = uuid.NewString()
 	}
@@ -68,10 +104,12 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 
 	var current int64
 	var archived bool
-	err := tx.QueryRow(ctx, `SELECT revision,archived_at IS NOT NULL FROM profiles WHERE id=$1 FOR UPDATE`, id).Scan(&current, &archived)
+	var existingClientKind, existingCategory, existingVariant, existingMigrationState string
+	err := tx.QueryRow(ctx, `SELECT revision,archived_at IS NOT NULL,client_kind,category,variant,migration_state FROM profiles WHERE id=$1 FOR UPDATE`, id).Scan(&current, &archived, &existingClientKind, &existingCategory, &existingVariant, &existingMigrationState)
 	if errors.Is(err, pgx.ErrNoRows) {
 		current = 0
 		archived = false
+		existingClientKind, existingCategory, existingVariant, existingMigrationState = "unknown", "", "standard", "needs_review"
 	} else if err != nil {
 		return "", "", err
 	}
@@ -81,12 +119,56 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 	if archived && !input.ArchivedRestore {
 		return "", "", ErrConflict
 	}
+	if input.ClientKind == "" {
+		input.ClientKind = existingClientKind
+	}
+	if input.Category == "" {
+		input.Category = existingCategory
+	}
+	if !variantProvided && existingVariant != "" {
+		input.Variant = existingVariant
+	}
+	if input.MigrationState == "" {
+		input.MigrationState = existingMigrationState
+		if current == 0 {
+			switch input.ClientKind {
+			case "claude", "codex":
+				input.MigrationState = "ready"
+			case "shared":
+				input.MigrationState = "compatibility"
+			default:
+				input.MigrationState = "needs_review"
+			}
+		}
+	}
+	if input.MigrationState != "ready" && input.MigrationState != "needs_review" && input.MigrationState != "compatibility" {
+		return "", "", errors.New("invalid Profile migration state")
+	}
 
 	pins, err := resolveProfilePinsTx(ctx, tx, input)
 	if err != nil {
 		return "", "", err
 	}
-	canonicalHash, err := CanonicalProfileHash(input.Name, input.Description, pins.Skills, pins.MCP)
+	profileServers := make(map[string]struct{}, len(pins.MCP))
+	for _, pin := range pins.MCP {
+		profileServers[pin.ServerID] = struct{}{}
+	}
+	for _, rule := range input.ToolRules {
+		var serverID string
+		if err := tx.QueryRow(ctx, `SELECT server_id::text FROM mcp_tools WHERE id=$1`, rule.ToolID).Scan(&serverID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return "", "", ErrNotFound
+			}
+			return "", "", err
+		}
+		if _, ok := profileServers[serverID]; !ok {
+			return "", "", ErrConflict
+		}
+	}
+	if err := validateProfileToolCeiling(ctx, tx, input.ToolRules); err != nil {
+		return "", "", err
+	}
+	canonicalHash, err := CanonicalGovernedProfileHash(input, pins.Skills, pins.MCP)
 	if err != nil {
 		return "", "", err
 	}
@@ -94,9 +176,9 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 	revision := current + 1
 	revisionID := uuid.NewString()
 	if current == 0 {
-		_, err = tx.Exec(ctx, `INSERT INTO profiles(id,name,description,revision,current_revision_id) VALUES($1,$2,$3,$4,$5)`, id, input.Name, input.Description, revision, revisionID)
+		_, err = tx.Exec(ctx, `INSERT INTO profiles(id,name,description,client_kind,category,variant,migration_state,revision,current_revision_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, input.Name, input.Description, input.ClientKind, input.Category, input.Variant, input.MigrationState, revision, revisionID)
 	} else {
-		_, err = tx.Exec(ctx, `UPDATE profiles SET name=$2,description=$3,revision=$4,current_revision_id=$5,archived_at=NULL,updated_at=now() WHERE id=$1`, id, input.Name, input.Description, revision, revisionID)
+		_, err = tx.Exec(ctx, `UPDATE profiles SET name=$2,description=$3,client_kind=$4,category=$5,variant=$6,migration_state=$7,revision=$8,current_revision_id=$9,archived_at=NULL,updated_at=now() WHERE id=$1`, id, input.Name, input.Description, input.ClientKind, input.Category, input.Variant, input.MigrationState, revision, revisionID)
 	}
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -104,7 +186,7 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 		}
 		return "", "", err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO profile_revisions(id,profile_id,revision,name,description,canonical_hash,pending_bindings,archived_restore) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, revisionID, id, revision, input.Name, input.Description, canonicalHash, input.PendingBindings, input.ArchivedRestore); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO profile_revisions(id,profile_id,revision,name,description,client_kind,category,variant,migration_state,canonical_hash,pending_bindings,archived_restore) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, revisionID, id, revision, input.Name, input.Description, input.ClientKind, input.Category, input.Variant, input.MigrationState, canonicalHash, input.PendingBindings, input.ArchivedRestore); err != nil {
 		return "", "", err
 	}
 	for position, pin := range pins.Skills {
@@ -114,6 +196,45 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 	}
 	for position, pin := range pins.MCP {
 		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_mcp_servers(profile_revision_id,server_id,mcp_revision_id,position) VALUES($1,$2,$3,$4)`, revisionID, pin.ServerID, pin.RevisionID, position); err != nil {
+			return "", "", err
+		}
+	}
+	governance := make(map[string]ProfileMCPGovernanceInput, len(input.MCPGovernance))
+	for _, item := range input.MCPGovernance {
+		if item.ServerID == "" || item.VisibilityMode == "" {
+			return "", "", errors.New("invalid Profile MCP governance")
+		}
+		if item.VisibilityMode != "all_accepted" && item.VisibilityMode != "selected" && item.VisibilityMode != "hidden" {
+			return "", "", errors.New("invalid Profile MCP visibility")
+		}
+		if _, exists := governance[item.ServerID]; exists {
+			return "", "", errors.New("duplicate Profile MCP governance")
+		}
+		governance[item.ServerID] = item
+	}
+	for serverID := range governance {
+		if _, ok := profileServers[serverID]; !ok {
+			return "", "", ErrConflict
+		}
+	}
+	for _, pin := range pins.MCP {
+		item := governance[pin.ServerID]
+		if item.MCPRevisionID != "" && item.MCPRevisionID != pin.RevisionID {
+			return "", "", ErrConflict
+		}
+		if item.VisibilityMode == "" {
+			item.VisibilityMode = "all_accepted"
+		}
+		var accepted any
+		if strings.TrimSpace(item.AcceptedContractRevisionID) != "" {
+			accepted = item.AcceptedContractRevisionID
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_mcp_governance(profile_revision_id,server_id,mcp_revision_id,accepted_contract_revision_id,visibility_mode) VALUES($1,$2,$3,$4,$5)`, revisionID, pin.ServerID, pin.RevisionID, accepted, item.VisibilityMode); err != nil {
+			return "", "", err
+		}
+	}
+	for _, rule := range input.ToolRules {
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_tool_rules(profile_revision_id,tool_id,visible,decision,reason_codes) VALUES($1,$2,$3,$4,$5)`, revisionID, rule.ToolID, rule.Visible, rule.Decision, rule.ReasonCodes); err != nil {
 			return "", "", err
 		}
 	}
@@ -195,6 +316,49 @@ func CanonicalProfileHash(name, description string, skills []domain.ProfileSkill
 	return profilebundle.CanonicalProfileHash(manifest)
 }
 
+func CanonicalGovernedProfileHash(input ProfileInput, skills []domain.ProfileSkillPin, servers []domain.ProfileMCPPin) (string, error) {
+	base, err := CanonicalProfileHash(input.Name, input.Description, skills, servers)
+	if err != nil {
+		return "", err
+	}
+	// Preserve the legacy portable hash for unclassified imported Profiles. New
+	// governance fields are included as soon as a Profile opts into them.
+	if input.ClientKind == "unknown" && input.Category == "" && input.Variant == "standard" && input.MigrationState == "needs_review" && len(input.MCPGovernance) == 0 && len(input.ToolRules) == 0 {
+		return base, nil
+	}
+	provided := make(map[string]ProfileMCPGovernanceInput, len(input.MCPGovernance))
+	for _, item := range input.MCPGovernance {
+		provided[item.ServerID] = item
+	}
+	governance := make([]ProfileMCPGovernanceInput, 0, len(servers))
+	for _, pin := range servers {
+		item := provided[pin.ServerID]
+		item.ServerID = pin.ServerID
+		item.MCPRevisionID = pin.RevisionID
+		if item.VisibilityMode == "" {
+			item.VisibilityMode = "all_accepted"
+		}
+		governance = append(governance, item)
+	}
+	sort.Slice(governance, func(i, j int) bool { return governance[i].ServerID < governance[j].ServerID })
+	rules := append([]ProfileToolRuleInput(nil), input.ToolRules...)
+	sort.Slice(rules, func(i, j int) bool { return rules[i].ToolID < rules[j].ToolID })
+	body, err := json.Marshal(struct {
+		Base           string                      `json:"base"`
+		ClientKind     string                      `json:"clientKind"`
+		Category       string                      `json:"category"`
+		Variant        string                      `json:"variant"`
+		MigrationState string                      `json:"migrationState"`
+		MCPGovernance  []ProfileMCPGovernanceInput `json:"mcpGovernance"`
+		ToolRules      []ProfileToolRuleInput      `json:"toolRules"`
+	}{base, input.ClientKind, input.Category, input.Variant, input.MigrationState, governance, rules})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func (s *Store) ListProfiles(ctx context.Context, includeArchived bool) (json.RawMessage, error) {
 	query := `SELECT id::text FROM profiles WHERE archived_at IS NULL ORDER BY lower(name),id`
 	if includeArchived {
@@ -225,7 +389,7 @@ func (s *Store) ListProfiles(ctx context.Context, includeArchived bool) (json.Ra
 
 func (s *Store) Profile(ctx context.Context, id string) (domain.Profile, error) {
 	var profile domain.Profile
-	err := s.pool.QueryRow(ctx, `SELECT p.id::text,p.current_revision_id::text,p.name,p.description,p.revision,pr.canonical_hash,pr.pending_bindings,p.archived_at,p.created_at,p.updated_at FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1`, id).Scan(&profile.ID, &profile.CurrentRevisionID, &profile.Name, &profile.Description, &profile.Revision, &profile.CanonicalHash, &profile.PendingBindings, &profile.ArchivedAt, &profile.CreatedAt, &profile.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT p.id::text,p.current_revision_id::text,p.name,p.description,p.client_kind,p.category,p.variant,p.migration_state,p.revision,pr.canonical_hash,pr.pending_bindings,p.archived_at,p.created_at,p.updated_at FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1`, id).Scan(&profile.ID, &profile.CurrentRevisionID, &profile.Name, &profile.Description, &profile.ClientKind, &profile.Category, &profile.Variant, &profile.MigrationState, &profile.Revision, &profile.CanonicalHash, &profile.PendingBindings, &profile.ArchivedAt, &profile.CreatedAt, &profile.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Profile{}, ErrNotFound
 	}
@@ -245,12 +409,33 @@ func (s *Store) Profile(ctx context.Context, id string) (domain.Profile, error) 
 	for _, pin := range profile.MCPServers {
 		profile.MCPServerIDs = append(profile.MCPServerIDs, pin.ServerID)
 	}
+	profile.EffectiveVisibleCount, err = s.ProfileEffectiveVisibleCount(ctx, profile.CurrentRevisionID)
+	if err != nil {
+		return domain.Profile{}, err
+	}
 	return profile, nil
+}
+
+func (s *Store) ProfileEffectiveVisibleCount(ctx context.Context, revisionID string) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM profile_revision_mcp_governance g
+		JOIN mcp_contract_revision_tools crt ON crt.contract_revision_id=g.accepted_contract_revision_id
+		JOIN mcp_tools t ON t.id=crt.tool_id
+		LEFT JOIN profile_revision_tool_rules r ON r.profile_revision_id=g.profile_revision_id AND r.tool_id=t.id
+		JOIN global_policy_state gps ON gps.singleton
+		JOIN global_policy_revisions gp ON gp.id=gps.applied_revision_id
+		WHERE g.profile_revision_id=$1
+		  AND CASE WHEN r.tool_id IS NOT NULL THEN r.visible ELSE g.visibility_mode='all_accepted' END
+		  AND coalesce(r.decision,'allow') <> 'deny'
+		  AND coalesce(gp.explicit_overrides->>t.id::text,gp.explicit_overrides->>t.name,gp.unclassified_mutating) <> 'deny'`, revisionID).Scan(&count)
+	return count, err
 }
 
 func (s *Store) ProfileRevision(ctx context.Context, id string) (domain.ProfileRevision, error) {
 	var revision domain.ProfileRevision
-	err := s.pool.QueryRow(ctx, `SELECT id::text,profile_id::text,revision,name,description,canonical_hash,pending_bindings,archived_restore,created_at FROM profile_revisions WHERE id=$1`, id).Scan(&revision.ID, &revision.ProfileID, &revision.Revision, &revision.Name, &revision.Description, &revision.CanonicalHash, &revision.PendingBindings, &revision.ArchivedRestore, &revision.CreatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT id::text,profile_id::text,revision,name,description,client_kind,category,variant,migration_state,canonical_hash,pending_bindings,archived_restore,created_at FROM profile_revisions WHERE id=$1`, id).Scan(&revision.ID, &revision.ProfileID, &revision.Revision, &revision.Name, &revision.Description, &revision.ClientKind, &revision.Category, &revision.Variant, &revision.MigrationState, &revision.CanonicalHash, &revision.PendingBindings, &revision.ArchivedRestore, &revision.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.ProfileRevision{}, ErrNotFound
 	}
@@ -319,6 +504,41 @@ func (s *Store) ProfileHistory(ctx context.Context, profileID string) ([]domain.
 	return result, nil
 }
 
+func (s *Store) profileGovernanceInputs(ctx context.Context, revisionID string) ([]ProfileMCPGovernanceInput, []ProfileToolRuleInput, error) {
+	governance := []ProfileMCPGovernanceInput{}
+	rows, err := s.pool.Query(ctx, `SELECT server_id::text,mcp_revision_id::text,coalesce(accepted_contract_revision_id::text,''),visibility_mode FROM profile_revision_mcp_governance WHERE profile_revision_id=$1 ORDER BY server_id`, revisionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var item ProfileMCPGovernanceInput
+		if err := rows.Scan(&item.ServerID, &item.MCPRevisionID, &item.AcceptedContractRevisionID, &item.VisibilityMode); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		governance = append(governance, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, nil, err
+	}
+	rows.Close()
+	rules := []ProfileToolRuleInput{}
+	rows, err = s.pool.Query(ctx, `SELECT tool_id::text,visible,decision,reason_codes FROM profile_revision_tool_rules WHERE profile_revision_id=$1 ORDER BY tool_id`, revisionID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item ProfileToolRuleInput
+		if err := rows.Scan(&item.ToolID, &item.Visible, &item.Decision, &item.ReasonCodes); err != nil {
+			return nil, nil, err
+		}
+		rules = append(rules, item)
+	}
+	return governance, rules, rows.Err()
+}
+
 func (s *Store) RefreshProfile(ctx context.Context, id string, expectedRevision int64) (domain.Profile, error) {
 	profile, err := s.Profile(ctx, id)
 	if err != nil {
@@ -327,7 +547,14 @@ func (s *Store) RefreshProfile(ctx context.Context, id string, expectedRevision 
 	if profile.PendingBindings {
 		return domain.Profile{}, ErrConflict
 	}
-	return s.SaveProfile(ctx, id, ProfileInput{Name: profile.Name, Description: profile.Description, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, Revision: expectedRevision})
+	governance, rules, err := s.profileGovernanceInputs(ctx, profile.CurrentRevisionID)
+	if err != nil {
+		return domain.Profile{}, err
+	}
+	for index := range governance {
+		governance[index].MCPRevisionID = ""
+	}
+	return s.SaveProfile(ctx, id, ProfileInput{Name: profile.Name, Description: profile.Description, ClientKind: profile.ClientKind, Category: profile.Category, Variant: profile.Variant, MigrationState: profile.MigrationState, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, MCPGovernance: governance, ToolRules: rules, Revision: expectedRevision})
 }
 
 func (s *Store) CloneProfile(ctx context.Context, id, name string) (domain.Profile, error) {
@@ -338,14 +565,28 @@ func (s *Store) CloneProfile(ctx context.Context, id, name string) (domain.Profi
 	if profile.PendingBindings {
 		return domain.Profile{}, ErrConflict
 	}
-	input := ProfileInput{Name: name, Description: profile.Description, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, SkillVersionIDs: map[string]string{}, MCPRevisionIDs: map[string]string{}}
-	for _, pin := range profile.Skills {
-		input.SkillVersionIDs[pin.SkillID] = pin.VersionID
+	governance, rules, err := s.profileGovernanceInputs(ctx, profile.CurrentRevisionID)
+	if err != nil {
+		return domain.Profile{}, err
 	}
-	for _, pin := range profile.MCPServers {
-		input.MCPRevisionIDs[pin.ServerID] = pin.RevisionID
-	}
+	input := ProfileInput{Name: name, Description: profile.Description, ClientKind: profile.ClientKind, Category: profile.Category, Variant: profile.Variant, MigrationState: profile.MigrationState, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, SkillVersionIDs: profileSkillVersions(profile), MCPRevisionIDs: profileMCPRevisions(profile), MCPGovernance: governance, ToolRules: rules}
 	return s.SaveProfile(ctx, uuid.NewString(), input)
+}
+
+func profileSkillVersions(profile domain.Profile) map[string]string {
+	result := make(map[string]string, len(profile.Skills))
+	for _, pin := range profile.Skills {
+		result[pin.SkillID] = pin.VersionID
+	}
+	return result
+}
+
+func profileMCPRevisions(profile domain.Profile) map[string]string {
+	result := make(map[string]string, len(profile.MCPServers))
+	for _, pin := range profile.MCPServers {
+		result[pin.ServerID] = pin.RevisionID
+	}
+	return result
 }
 
 func (s *Store) ArchiveProfile(ctx context.Context, id string, expectedRevision int64) error {
@@ -374,13 +615,11 @@ func (s *Store) RestoreArchivedProfile(ctx context.Context, id string, expectedR
 	if err != nil {
 		return domain.Profile{}, err
 	}
-	input := ProfileInput{Name: profile.Name, Description: profile.Description, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, SkillVersionIDs: map[string]string{}, MCPRevisionIDs: map[string]string{}, Revision: expectedRevision, ArchivedRestore: true, PendingBindings: profile.PendingBindings}
-	for _, pin := range profile.Skills {
-		input.SkillVersionIDs[pin.SkillID] = pin.VersionID
+	governance, rules, err := s.profileGovernanceInputs(ctx, profile.CurrentRevisionID)
+	if err != nil {
+		return domain.Profile{}, err
 	}
-	for _, pin := range profile.MCPServers {
-		input.MCPRevisionIDs[pin.ServerID] = pin.RevisionID
-	}
+	input := ProfileInput{Name: profile.Name, Description: profile.Description, ClientKind: profile.ClientKind, Category: profile.Category, Variant: profile.Variant, MigrationState: profile.MigrationState, SkillIDs: profile.SkillIDs, MCPServerIDs: profile.MCPServerIDs, SkillVersionIDs: profileSkillVersions(profile), MCPRevisionIDs: profileMCPRevisions(profile), MCPGovernance: governance, ToolRules: rules, Revision: expectedRevision, ArchivedRestore: true, PendingBindings: profile.PendingBindings}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.Profile{}, err

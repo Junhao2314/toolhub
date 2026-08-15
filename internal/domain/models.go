@@ -157,24 +157,25 @@ type ProfileMCPPin struct {
 }
 
 type Profile struct {
-	ID                string            `json:"id"`
-	CurrentRevisionID string            `json:"currentRevisionId"`
-	Name              string            `json:"name"`
-	Description       string            `json:"description,omitempty"`
-	ClientKind        string            `json:"clientKind,omitempty"`
-	Category          string            `json:"category,omitempty"`
-	Variant           string            `json:"variant,omitempty"`
-	MigrationState    string            `json:"migrationState,omitempty"`
-	Revision          int64             `json:"revision"`
-	CanonicalHash     string            `json:"canonicalHash"`
-	PendingBindings   bool              `json:"pendingBindings"`
-	ArchivedAt        *time.Time        `json:"archivedAt,omitempty"`
-	SkillIDs          []string          `json:"skillIds"`
-	MCPServerIDs      []string          `json:"mcpServerIds"`
-	Skills            []ProfileSkillPin `json:"skills"`
-	MCPServers        []ProfileMCPPin   `json:"mcpServers"`
-	CreatedAt         time.Time         `json:"createdAt"`
-	UpdatedAt         time.Time         `json:"updatedAt"`
+	ID                    string            `json:"id"`
+	CurrentRevisionID     string            `json:"currentRevisionId"`
+	Name                  string            `json:"name"`
+	Description           string            `json:"description,omitempty"`
+	ClientKind            string            `json:"clientKind,omitempty"`
+	Category              string            `json:"category,omitempty"`
+	Variant               string            `json:"variant,omitempty"`
+	MigrationState        string            `json:"migrationState,omitempty"`
+	Revision              int64             `json:"revision"`
+	CanonicalHash         string            `json:"canonicalHash"`
+	PendingBindings       bool              `json:"pendingBindings"`
+	ArchivedAt            *time.Time        `json:"archivedAt,omitempty"`
+	SkillIDs              []string          `json:"skillIds"`
+	MCPServerIDs          []string          `json:"mcpServerIds"`
+	Skills                []ProfileSkillPin `json:"skills"`
+	MCPServers            []ProfileMCPPin   `json:"mcpServers"`
+	EffectiveVisibleCount int               `json:"effectiveVisibleCount"`
+	CreatedAt             time.Time         `json:"createdAt"`
+	UpdatedAt             time.Time         `json:"updatedAt"`
 }
 
 type ProfileRevision struct {
