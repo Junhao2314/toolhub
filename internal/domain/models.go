@@ -310,6 +310,7 @@ type OperationTarget struct {
 	OperationID       string          `json:"operationId"`
 	TargetID          string          `json:"targetId"`
 	TargetKey         string          `json:"targetKey"`
+	DependsOnTargetID string          `json:"dependsOnTargetId,omitempty"`
 	Status            string          `json:"status"`
 	Attempt           int             `json:"attempt"`
 	PendingRerun      bool            `json:"pendingRerun"`

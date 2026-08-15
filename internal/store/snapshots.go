@@ -398,12 +398,35 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,'apply','queued',$2,$3,$4,$5)`, operationID, profileID, nullableText(idempotencyKey), requestHash, jsonText(metadata)); err != nil {
 		return domain.Operation{}, err
 	}
+	targetRuntime := make(map[string]string, len(confirmed))
+	for _, item := range confirmed {
+		var runtime string
+		if err := tx.QueryRow(ctx, `SELECT runtime FROM targets WHERE id=$1`, item.TargetID).Scan(&runtime); err != nil {
+			return domain.Operation{}, err
+		}
+		targetRuntime[item.TargetID] = runtime
+	}
+	var skillTargetID string
+	for _, item := range confirmed {
+		if targetRuntime[item.TargetID] != domain.RuntimeSharedRelay {
+			skillTargetID = item.TargetID
+			break
+		}
+	}
+	rowIDs := make(map[string]string, len(confirmed))
+	for _, item := range confirmed {
+		rowIDs[item.TargetID] = uuid.NewString()
+	}
 	for _, item := range confirmed {
 		targetRequest, err := json.Marshal(map[string]any{"manifest": item.Manifest, "targetRevision": item.TargetRevision, "sourceKind": "profile_apply", "sourceId": profileID})
 		if err != nil {
 			return domain.Operation{}, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request) VALUES($1,$2,$3,$4)`, uuid.NewString(), operationID, item.TargetID, jsonText(targetRequest)); err != nil {
+		var dependency any
+		if targetRuntime[item.TargetID] == domain.RuntimeSharedRelay && skillTargetID != "" {
+			dependency = rowIDs[skillTargetID]
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,request) VALUES($1,$2,$3,$4,$5)`, rowIDs[item.TargetID], operationID, item.TargetID, dependency, jsonText(targetRequest)); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				return domain.Operation{}, ErrOperationActive

@@ -18,19 +18,33 @@ import (
 )
 
 type CreateOperationInput struct {
-	Kind           string
-	SourceID       string
-	IdempotencyKey string
-	Request        any
-	Metadata       map[string]any
-	TargetIDs      []string
-	TargetRequests map[string]any
+	Kind               string
+	SourceID           string
+	IdempotencyKey     string
+	Request            any
+	Metadata           map[string]any
+	TargetIDs          []string
+	TargetRequests     map[string]any
+	TargetDependencies map[string]string
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 var controlOperationKinds = []string{"skill_import", "update_check", "refresh", "backup_gc"}
 
 func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput) (domain.Operation, error) {
-	requestHash, err := operationRequestHash(input.Request, input.TargetRequests)
+	dependencyIdentity := make(map[string]any, len(input.TargetDependencies))
+	for targetID, dependencyID := range input.TargetDependencies {
+		dependencyIdentity[targetID] = dependencyID
+	}
+	requestHash, err := operationRequestHashWithDependencies(input.Request, input.TargetRequests, dependencyIdentity)
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -60,6 +74,12 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 	if err := lockActiveTargets(ctx, tx, input.TargetIDs); err != nil {
 		return domain.Operation{}, err
 	}
+	dependencies := input.TargetDependencies
+	for dependent, dependency := range dependencies {
+		if !containsString(uniqueIDs(input.TargetIDs), dependent) || !containsString(uniqueIDs(input.TargetIDs), dependency) || dependent == dependency {
+			return domain.Operation{}, ErrConflict
+		}
+	}
 	id := uuid.NewString()
 	var source any
 	if uuid.Validate(input.SourceID) == nil {
@@ -68,12 +88,20 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,$2,'queued',$3,$4,$5,$6)`, id, input.Kind, source, nullableText(input.IdempotencyKey), requestHash, jsonText(metadataJSON)); err != nil {
 		return domain.Operation{}, err
 	}
+	targetRowIDs := make(map[string]string)
+	for _, targetID := range uniqueIDs(input.TargetIDs) {
+		targetRowIDs[targetID] = uuid.NewString()
+	}
 	for _, targetID := range uniqueIDs(input.TargetIDs) {
 		requestJSON, err := marshalJSONObject(input.TargetRequests[targetID])
 		if err != nil {
 			return domain.Operation{}, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request) VALUES($1,$2,$3,$4)`, uuid.NewString(), id, targetID, jsonText(requestJSON)); err != nil {
+		var dependency any
+		if dependencyID := targetRowIDs[dependencies[targetID]]; dependencyID != "" {
+			dependency = dependencyID
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,request) VALUES($1,$2,$3,$4,$5)`, targetRowIDs[targetID], id, targetID, dependency, jsonText(requestJSON)); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				return domain.Operation{}, ErrOperationActive
@@ -122,10 +150,15 @@ func lockActiveTargets(ctx context.Context, tx pgx.Tx, targetIDs []string) error
 }
 
 func operationRequestHash(request any, targetRequests map[string]any) (string, error) {
+	return operationRequestHashWithDependencies(request, targetRequests, nil)
+}
+
+func operationRequestHashWithDependencies(request any, targetRequests, dependencies map[string]any) (string, error) {
 	hashInput := struct {
 		Request        any            `json:"request"`
 		TargetRequests map[string]any `json:"targetRequests,omitempty"`
-	}{Request: request, TargetRequests: targetRequests}
+		Dependencies   map[string]any `json:"dependencies,omitempty"`
+	}{Request: request, TargetRequests: targetRequests, Dependencies: dependencies}
 	requestJSON, err := json.Marshal(hashInput)
 	if err != nil {
 		return "", err
@@ -185,11 +218,11 @@ func (s *Store) ListOperations(ctx context.Context, limit int) (json.RawMessage,
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	return s.JSONList(ctx, `SELECT o.id::text,o.kind,o.status,coalesce(o.source_id::text,'') AS "sourceId",o.metadata,o.error_code AS "errorCode",o.error_reason AS "errorReason",o.cancel_requested AS "cancelRequested",o.created_at AS "createdAt",o.started_at AS "startedAt",o.finished_at AS "finishedAt",o.updated_at AS "updatedAt",coalesce((SELECT jsonb_agg(jsonb_build_object('id',ot.id::text,'targetId',ot.target_id::text,'targetKey',t.target_key,'status',ot.status,'attempt',ot.attempt,'pendingRerun',ot.pending_rerun,'errorCode',ot.error_code,'errorReason',ot.error_reason) ORDER BY t.target_key) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=o.id),'[]'::jsonb) AS targets FROM operations o ORDER BY o.created_at DESC LIMIT $1`, limit)
+	return s.JSONList(ctx, `SELECT o.id::text,o.kind,o.status,coalesce(o.source_id::text,'') AS "sourceId",o.metadata,o.error_code AS "errorCode",o.error_reason AS "errorReason",o.cancel_requested AS "cancelRequested",o.created_at AS "createdAt",o.started_at AS "startedAt",o.finished_at AS "finishedAt",o.updated_at AS "updatedAt",coalesce((SELECT jsonb_agg(jsonb_build_object('id',ot.id::text,'targetId',ot.target_id::text,'targetKey',t.target_key,'dependsOnTargetId',ot.depends_on_target_id,'status',ot.status,'attempt',ot.attempt,'pendingRerun',ot.pending_rerun,'errorCode',ot.error_code,'errorReason',ot.error_reason) ORDER BY t.target_key) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=o.id),'[]'::jsonb) AS targets FROM operations o ORDER BY o.created_at DESC LIMIT $1`, limit)
 }
 
 func (s *Store) OperationDetail(ctx context.Context, id string) (json.RawMessage, error) {
-	return s.JSONObject(ctx, `SELECT o.id::text,o.kind,o.status,coalesce(o.source_id::text,'') AS "sourceId",o.metadata,o.error_code AS "errorCode",o.error_reason AS "errorReason",o.cancel_requested AS "cancelRequested",o.created_at AS "createdAt",o.started_at AS "startedAt",o.finished_at AS "finishedAt",o.updated_at AS "updatedAt",coalesce((SELECT jsonb_agg(jsonb_build_object('id',ot.id::text,'targetId',ot.target_id::text,'targetKey',t.target_key,'status',ot.status,'attempt',ot.attempt,'pendingRerun',ot.pending_rerun,'bridgeOperationId',ot.bridge_operation_id,'saltJid',ot.salt_jid,'result',ot.result,'errorCode',ot.error_code,'errorReason',ot.error_reason,'createdAt',ot.created_at,'startedAt',ot.started_at,'finishedAt',ot.finished_at,'updatedAt',ot.updated_at) ORDER BY t.target_key) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=o.id),'[]'::jsonb) AS targets FROM operations o WHERE o.id=$1`, id)
+	return s.JSONObject(ctx, `SELECT o.id::text,o.kind,o.status,coalesce(o.source_id::text,'') AS "sourceId",o.metadata,o.error_code AS "errorCode",o.error_reason AS "errorReason",o.cancel_requested AS "cancelRequested",o.created_at AS "createdAt",o.started_at AS "startedAt",o.finished_at AS "finishedAt",o.updated_at AS "updatedAt",coalesce((SELECT jsonb_agg(jsonb_build_object('id',ot.id::text,'targetId',ot.target_id::text,'targetKey',t.target_key,'dependsOnTargetId',ot.depends_on_target_id,'status',ot.status,'attempt',ot.attempt,'pendingRerun',ot.pending_rerun,'bridgeOperationId',ot.bridge_operation_id,'saltJid',ot.salt_jid,'result',ot.result,'errorCode',ot.error_code,'errorReason',ot.error_reason,'createdAt',ot.created_at,'startedAt',ot.started_at,'finishedAt',ot.finished_at,'updatedAt',ot.updated_at) ORDER BY t.target_key) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=o.id),'[]'::jsonb) AS targets FROM operations o WHERE o.id=$1`, id)
 }
 
 type WorkItem struct {
@@ -254,7 +287,7 @@ func (s *Store) ClaimOperationTarget(ctx context.Context) (WorkItem, error) {
 		operationTargetID string
 		nodeID            string
 	}
-	rows, err := tx.Query(ctx, `SELECT o.id::text,ot.id::text,n.id::text FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.status='queued' AND NOT o.cancel_requested AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') ORDER BY o.id,ot.id,n.id LIMIT 100`)
+	rows, err := tx.Query(ctx, `SELECT o.id::text,ot.id::text,n.id::text FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.status='queued' AND NOT o.cancel_requested AND (ot.depends_on_target_id IS NULL OR EXISTS(SELECT 1 FROM operation_targets dep WHERE dep.id=ot.depends_on_target_id AND dep.status='succeeded')) AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') ORDER BY o.id,ot.id,n.id LIMIT 100`)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -283,7 +316,7 @@ func (s *Store) ClaimOperationTarget(ctx context.Context) (WorkItem, error) {
 		if err != nil {
 			return WorkItem{}, err
 		}
-		err = tx.QueryRow(ctx, `SELECT ot.id::text,ot.operation_id::text,ot.target_id::text,ot.status,ot.attempt,ot.pending_rerun,ot.bridge_operation_id,ot.salt_jid,ot.request,ot.created_at,ot.updated_at FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.id=$1 AND ot.operation_id=$2 AND ot.status='queued' AND NOT o.cancel_requested AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') FOR UPDATE OF ot SKIP LOCKED`, candidate.operationTargetID, operationID).Scan(&item.OperationTarget.ID, &item.OperationTarget.OperationID, &item.OperationTarget.TargetID, &item.OperationTarget.Status, &item.OperationTarget.Attempt, &item.OperationTarget.PendingRerun, &item.OperationTarget.BridgeOperationID, &item.OperationTarget.SaltJID, &item.OperationTarget.Request, &item.OperationTarget.CreatedAt, &item.OperationTarget.UpdatedAt)
+		err = tx.QueryRow(ctx, `SELECT ot.id::text,ot.operation_id::text,ot.target_id::text,coalesce(ot.depends_on_target_id::text,''),ot.status,ot.attempt,ot.pending_rerun,ot.bridge_operation_id,ot.salt_jid,ot.request,ot.created_at,ot.updated_at FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.id=$1 AND ot.operation_id=$2 AND ot.status='queued' AND NOT o.cancel_requested AND (ot.depends_on_target_id IS NULL OR EXISTS(SELECT 1 FROM operation_targets dep WHERE dep.id=ot.depends_on_target_id AND dep.status='succeeded')) AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') FOR UPDATE OF ot SKIP LOCKED`, candidate.operationTargetID, operationID).Scan(&item.OperationTarget.ID, &item.OperationTarget.OperationID, &item.OperationTarget.TargetID, &item.OperationTarget.DependsOnTargetID, &item.OperationTarget.Status, &item.OperationTarget.Attempt, &item.OperationTarget.PendingRerun, &item.OperationTarget.BridgeOperationID, &item.OperationTarget.SaltJID, &item.OperationTarget.Request, &item.OperationTarget.CreatedAt, &item.OperationTarget.UpdatedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
@@ -349,6 +382,11 @@ func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, st
 	}
 	if command.RowsAffected() != 1 {
 		return ErrConflict
+	}
+	if status != bridgeprotocol.OperationSucceeded {
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET status='failed',error_code='dependency_failed',error_reason='dependency target did not succeed',finished_at=now(),updated_at=now() WHERE depends_on_target_id=$1 AND status='queued'`, operationTargetID); err != nil {
+			return err
+		}
 	}
 	if err := recalculateOperation(ctx, tx, operationID); err != nil {
 		return err
