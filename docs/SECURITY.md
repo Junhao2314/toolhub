@@ -52,6 +52,26 @@ adapter mutation.
 The Bridge API exposes typed operations only: no arbitrary shell, executable,
 filesystem path, Salt function, or systemd unit can cross the boundary.
 
+Browser governance handlers treat even authenticated Bridge responses as
+untrusted. Confirmation summaries and live observations are accepted only when
+their UUIDs/hashes, timestamps, enum values, names, reason codes, JSON pointers,
+and collection sizes match the private contract. Invalid safe DTOs return `502`;
+Bridge transport failures return `503`. The Browser allowlist contains only
+identity/revision hashes, bounded names and reason codes, scalar type/length
+summaries, decisions, outcome classes, and duration buckets. Arguments, results,
+prompts, raw errors, secret values, and session identifiers are never forwarded.
+
+Confirmation challenges and one-shot 60-second grants live only in the mcpm
+Relay process. They are not stored in PostgreSQL, desired snapshots, operations,
+or Bridge BoltDB. Approval requires the exact Profile display name and binding
+hash, rechecks the current Profile revision, and sends only the challenge ID and
+binding hash across the Bridge. It requires session authentication and CSRF but
+not password reauthentication. The synchronous audit record is payload-free and
+limited to challenge/binding/argument hashes, Profile/revision/server/tool IDs,
+reason codes, and the decision outcome. A post-dispatch transport failure or a
+decision response whose challenge/binding does not match is audited and returned
+as an unknown outcome, never retried automatically.
+
 Local MCP intake requires a separate revision-bound confirmation. Its preview
 returns sanitized transport fields and secret key names only. After confirmation,
 the Bridge reads the matching native user-scope entry once; the worker encrypts

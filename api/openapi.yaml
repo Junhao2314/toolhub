@@ -16,6 +16,7 @@ tags:
   - name: Profiles
   - name: Targets
   - name: Operations
+  - name: Governance
   - name: Settings
 paths:
   /auth/login:
@@ -609,6 +610,132 @@ paths:
         - {$ref: '#/components/parameters/IdempotencyKey'}
       responses:
         '202': {$ref: '#/components/responses/Operation'}
+  /relay/configuration:
+    get:
+      tags: [Governance]
+      operationId: getRelayConfiguration
+      responses: {'200': {description: Current and applied Relay Configuration, content: {application/json: {schema: {$ref: '#/components/schemas/RelayConfigurationProjection'}}}}}
+    put:
+      tags: [Governance]
+      operationId: saveRelayConfiguration
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RelayConfigurationInput'}}}}
+      responses: {'200': {description: Immutable Relay Configuration revision, content: {application/json: {schema: {$ref: '#/components/schemas/RelayConfigurationRevision'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /relay/configuration/prepare-profile-updates:
+    post:
+      tags: [Governance]
+      operationId: prepareRelayProfileUpdates
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GovernanceRevisionRequest'}}}}
+      responses: {'200': {description: Affected Profile IDs, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}}}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /relay/configuration/preflight:
+    post:
+      tags: [Governance]
+      operationId: preflightRelayConfiguration
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RelayPreflightRequest'}}}}
+      responses: {'200': {description: Revision-bound Relay preflight, content: {application/json: {schema: {$ref: '#/components/schemas/RelayPreflightResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /relay/configuration/apply:
+    post:
+      tags: [Governance]
+      operationId: applyRelayConfiguration
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RelayApplyRequest'}}}}
+      responses: {'202': {$ref: '#/components/responses/Operation'}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /relay/contracts:
+    get:
+      tags: [Governance]
+      operationId: listRelayContracts
+      responses: {'200': {description: Latest and accepted contracts plus rename proposals, content: {application/json: {schema: {$ref: '#/components/schemas/ContractGovernanceProjection'}}}}}
+  /relay/contracts/observe:
+    post:
+      tags: [Governance]
+      operationId: observeRelayContracts
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses: {'202': {$ref: '#/components/responses/Operation'}, '400': {$ref: '#/components/responses/Error'}}
+  /relay/contracts/{revisionID}/accept:
+    post:
+      tags: [Governance]
+      operationId: acceptRelayContract
+      parameters:
+        - {name: revisionID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /relay/renames/{proposalID}/confirm:
+    post:
+      tags: [Governance]
+      operationId: confirmRelayRename
+      parameters:
+        - {name: proposalID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {$ref: '#/components/requestBodies/EmptyObject'}
+      responses: {'204': {$ref: '#/components/responses/NoContent'}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /mcp/policy:
+    get:
+      tags: [Governance]
+      operationId: getGlobalPolicy
+      responses: {'200': {description: Current and applied Global Policy, content: {application/json: {schema: {$ref: '#/components/schemas/GlobalPolicyProjection'}}}}}
+    put:
+      tags: [Governance]
+      operationId: saveGlobalPolicy
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GlobalPolicyInput'}}}}
+      responses: {'200': {description: Immutable Global Policy revision, content: {application/json: {schema: {$ref: '#/components/schemas/GlobalPolicyRevision'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /mcp/policy/apply:
+    post:
+      tags: [Governance]
+      operationId: applyGlobalPolicy
+      parameters: [{$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PolicyApplyRequest'}}}}
+      responses: {'202': {$ref: '#/components/responses/Operation'}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
+  /profiles/{profileID}/launch:
+    get:
+      tags: [Governance]
+      operationId: getProfileLaunchReadiness
+      parameters: [{$ref: '#/components/parameters/ProfileID'}]
+      responses: {'200': {description: Verified native launch readiness, content: {application/json: {schema: {$ref: '#/components/schemas/ProfileLaunchReadiness'}}}}, '400': {$ref: '#/components/responses/Error'}, '404': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /relay/confirmations:
+    get:
+      tags: [Governance]
+      operationId: listRelayConfirmations
+      responses: {'200': {description: Payload-free ephemeral confirmation summaries, content: {application/json: {schema: {type: object, additionalProperties: false, required: [items], properties: {items: {type: array, maxItems: 256, items: {$ref: '#/components/schemas/ConfirmationSummary'}}}}}}}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /relay/confirmations/{challengeID}/approve:
+    post:
+      tags: [Governance]
+      operationId: approveRelayConfirmation
+      parameters:
+        - {name: challengeID, in: path, required: true, schema: {$ref: '#/components/schemas/SHA256'}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationApproveRequest'}}}}
+      responses: {'200': {description: Ephemeral decision, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /relay/confirmations/{challengeID}/reject:
+    post:
+      tags: [Governance]
+      operationId: rejectRelayConfirmation
+      parameters:
+        - {name: challengeID, in: path, required: true, schema: {$ref: '#/components/schemas/SHA256'}}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationRejectRequest'}}}}
+      responses: {'200': {description: Ephemeral decision, content: {application/json: {schema: {$ref: '#/components/schemas/ConfirmationDecisionResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /relay/observations/live:
+    get:
+      tags: [Governance]
+      operationId: liveRelayObservations
+      parameters:
+        - {name: afterBootId, in: query, schema: {$ref: '#/components/schemas/UUID'}}
+        - {name: afterSequence, in: query, schema: {type: integer, format: int64, minimum: 0}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 100}}
+      responses: {'200': {description: Payload-free live observations, content: {application/json: {schema: {$ref: '#/components/schemas/ObservationDrainResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '502': {$ref: '#/components/responses/Error'}, '503': {$ref: '#/components/responses/Error'}}
+  /relay/observations/daily:
+    get:
+      tags: [Governance]
+      operationId: dailyRelayObservations
+      parameters:
+        - {name: days, in: query, schema: {type: integer, minimum: 1, maximum: 31, default: 30}}
+        - {name: profileId, in: query, schema: {$ref: '#/components/schemas/UUID'}}
+      responses: {'200': {description: Bounded daily aggregates, content: {application/json: {schema: {type: object, required: [items, days], properties: {items: {type: array, maxItems: 5000, items: {$ref: '#/components/schemas/DailyToolAggregate'}}, days: {type: integer, minimum: 1, maximum: 31}}}}}}, '400': {$ref: '#/components/responses/Error'}}
   /operations:
     get:
       tags: [Operations]
@@ -686,6 +813,9 @@ components:
     ServerID: {name: serverID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
     OperationID: {name: operationID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
   requestBodies:
+    EmptyObject:
+      required: true
+      content: {application/json: {schema: {type: object, additionalProperties: false, maxProperties: 0}}}
     JSONObject:
       required: true
       content: {application/json: {schema: {type: object}}}
@@ -1112,7 +1242,7 @@ components:
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         revision: {type: integer, minimum: 1}
-        sourceKind: {type: string, enum: [profile_apply, target_edit, restore]}
+        sourceKind: {type: string, enum: [profile_apply, target_edit, restore, relay_config_apply]}
         sourceId: {$ref: '#/components/schemas/UUID'}
         profileRevision: {type: integer}
         manifestHash: {$ref: '#/components/schemas/SHA256'}
@@ -1147,12 +1277,311 @@ components:
             targetRevision: {type: string}
             manifestHash: {$ref: '#/components/schemas/SHA256'}
             diff: {$ref: '#/components/schemas/Diff'}
+    RelayConfigurationPin:
+      type: object
+      additionalProperties: false
+      required: [serverId, mcpRevisionId, position]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        mcpRevisionId: {$ref: '#/components/schemas/UUID'}
+        position: {type: integer, minimum: 0, maximum: 499}
+    RelayConfigurationRevision:
+      type: object
+      additionalProperties: false
+      required: [id, revision, canonicalHash, mcpServers, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, format: int64, minimum: 1}
+        canonicalHash: {$ref: '#/components/schemas/SHA256'}
+        mcpServers: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/RelayConfigurationPin'}}
+        metadata: {type: object, description: Bounded payload-free operator metadata.}
+        createdAt: {type: string, format: date-time}
+    RelayConfigurationProjection:
+      type: object
+      additionalProperties: false
+      required: [current, applied, mode, defaultProfileId]
+      properties:
+        current: {$ref: '#/components/schemas/RelayConfigurationRevision'}
+        applied: {$ref: '#/components/schemas/RelayConfigurationRevision'}
+        mode: {type: string, enum: [compatibility, enforced]}
+        defaultProfileId: {oneOf: [{$ref: '#/components/schemas/UUID'}, {type: 'null'}]}
+    RelayConfigurationInput:
+      type: object
+      additionalProperties: false
+      required: [revision, mcpServerIds, mcpRevisionIds, metadata]
+      properties:
+        revision: {type: integer, format: int64, minimum: 0}
+        mcpServerIds: {type: array, uniqueItems: true, maxItems: 500, items: {$ref: '#/components/schemas/UUID'}}
+        mcpRevisionIds: {type: object, maxProperties: 500, additionalProperties: {$ref: '#/components/schemas/UUID'}}
+        metadata: {type: object}
+    GovernanceRevisionRequest:
+      type: object
+      additionalProperties: false
+      required: [revisionId]
+      properties: {revisionId: {$ref: '#/components/schemas/UUID'}}
+    RelayPreflightRequest:
+      type: object
+      additionalProperties: false
+      required: [revisionId, profileIds]
+      properties:
+        revisionId: {$ref: '#/components/schemas/UUID'}
+        profileIds: {type: array, uniqueItems: true, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}
+    RelayApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [revisionId, profileIds, targetRevision, routingHash]
+      properties:
+        revisionId: {$ref: '#/components/schemas/UUID'}
+        profileIds: {type: array, uniqueItems: true, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+        routingHash: {$ref: '#/components/schemas/SHA256'}
+    RelayPreflightResponse:
+      type: object
+      additionalProperties: false
+      required: [revisionId, routingHash, result]
+      properties:
+        revisionId: {$ref: '#/components/schemas/UUID'}
+        routingHash: {$ref: '#/components/schemas/SHA256'}
+        result:
+          type: object
+          required: [targetRevision, manifestHash, diff]
+          properties:
+            targetRevision: {$ref: '#/components/schemas/SHA256'}
+            manifestHash: {$ref: '#/components/schemas/SHA256'}
+            diff: {$ref: '#/components/schemas/Diff'}
+    GlobalPolicyRevision:
+      type: object
+      additionalProperties: false
+      required: [id, revision, canonicalHash, catalogVersion, unclassifiedMutating, reviewedReadOnly, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, format: int64, minimum: 1}
+        canonicalHash: {$ref: '#/components/schemas/SHA256'}
+        catalogVersion: {type: integer, minimum: 1, maximum: 100}
+        explicitOverrides: {type: object, maxProperties: 20000, additionalProperties: {type: string, enum: [deny, confirm, allow]}}
+        unclassifiedMutating: {type: string, enum: [deny, confirm, allow]}
+        reviewedReadOnly: {type: string, enum: [deny, confirm, allow]}
+        createdAt: {type: string, format: date-time}
+    GlobalPolicyProjection:
+      type: object
+      additionalProperties: false
+      required: [current, applied]
+      properties:
+        current: {$ref: '#/components/schemas/GlobalPolicyRevision'}
+        applied: {$ref: '#/components/schemas/GlobalPolicyRevision'}
+    GlobalPolicyInput:
+      type: object
+      additionalProperties: false
+      required: [revision, catalogVersion, explicitOverrides, unclassifiedMutating, reviewedReadOnly]
+      properties:
+        revision: {type: integer, format: int64, minimum: 0}
+        catalogVersion: {type: integer, minimum: 1, maximum: 100}
+        explicitOverrides: {type: object, maxProperties: 20000, additionalProperties: {type: string, enum: [deny, confirm, allow]}}
+        unclassifiedMutating: {type: string, enum: [deny, confirm, allow]}
+        reviewedReadOnly: {type: string, enum: [deny, confirm, allow]}
+    PolicyApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [revisionId, targetRevision]
+      properties:
+        revisionId: {$ref: '#/components/schemas/UUID'}
+        targetRevision: {$ref: '#/components/schemas/SHA256'}
+    ContractGovernanceProjection:
+      type: object
+      additionalProperties: false
+      required: [items, renames]
+      properties:
+        items: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ContractState'}}
+        renames: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ToolRenameProposal'}}
+    ContractState:
+      type: object
+      additionalProperties: false
+      required: [serverId, serverName, reviewState, latest, accepted]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        serverName: {type: string, minLength: 1, maxLength: 128}
+        reviewState: {type: string, enum: [unreviewed, accepted, changed, paused]}
+        latest: {oneOf: [{$ref: '#/components/schemas/ContractRevisionView'}, {type: 'null'}]}
+        accepted: {oneOf: [{$ref: '#/components/schemas/ContractRevisionView'}, {type: 'null'}]}
+    ContractRevisionView:
+      type: object
+      additionalProperties: false
+      required: [revision, tools]
+      properties:
+        revision: {$ref: '#/components/schemas/ObservedContractRevision'}
+        tools: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ObservedContractTool'}}
+    ObservedContractRevision:
+      type: object
+      additionalProperties: false
+      required: [id, serverId, revision, canonicalHash, normalizedContract, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        revision: {type: integer, format: int64, minimum: 1}
+        canonicalHash: {$ref: '#/components/schemas/SHA256'}
+        normalizedContract: {type: object, description: Normalized tool definitions only; no call payloads.}
+        createdAt: {type: string, format: date-time}
+    ObservedContractTool:
+      type: object
+      additionalProperties: false
+      required: [id, serverId, name, position, inputSchema, outputSchema, annotations, presentation]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string, minLength: 1, maxLength: 128}
+        position: {type: integer, minimum: 0, maximum: 499}
+        inputSchema: {type: object}
+        outputSchema: {type: object}
+        annotations: {type: object}
+        presentation: {type: object}
+    ToolRenameProposal:
+      type: object
+      additionalProperties: false
+      required: [id, serverId, removedToolId, removedToolName, addedToolId, addedToolName, removedContractRevisionId, addedContractRevisionId, status, createdAt]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        removedToolId: {$ref: '#/components/schemas/UUID'}
+        removedToolName: {type: string, minLength: 1, maxLength: 128}
+        addedToolId: {$ref: '#/components/schemas/UUID'}
+        addedToolName: {type: string, minLength: 1, maxLength: 128}
+        removedContractRevisionId: {$ref: '#/components/schemas/UUID'}
+        addedContractRevisionId: {$ref: '#/components/schemas/UUID'}
+        status: {type: string, enum: [suspected, confirmed, rejected, ambiguous]}
+        createdAt: {type: string, format: date-time}
+    ArgumentSummary:
+      type: object
+      additionalProperties: false
+      required: [pointer, valueType, arrayLength, stringLength, sensitive]
+      properties:
+        pointer: {type: string, maxLength: 512}
+        valueType: {type: string, enum: [object, array, string, number, boolean, 'null']}
+        arrayLength: {oneOf: [{type: integer, minimum: 0}, {type: 'null'}]}
+        stringLength: {oneOf: [{type: integer, minimum: 0}, {type: 'null'}]}
+        sensitive: {type: boolean}
+    ConfirmationSummary:
+      type: object
+      additionalProperties: false
+      required: [challengeId, bindingHash, argumentHash, createdAt, expiresAt, profileId, profileRevisionId, profileName, clientKind, serverId, serverName, toolId, toolName, runtimeName, mcpConfigRevisionId, contractRevisionId, globalPolicyRevisionId, decision, reasonCodes, argumentSummary]
+      properties:
+        challengeId: {$ref: '#/components/schemas/SHA256'}
+        bindingHash: {$ref: '#/components/schemas/SHA256'}
+        argumentHash: {$ref: '#/components/schemas/SHA256'}
+        createdAt: {type: number, minimum: 0}
+        expiresAt: {type: number, minimum: 0}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        profileName: {type: string, minLength: 1, maxLength: 120}
+        clientKind: {type: string, enum: [claude, codex]}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        serverName: {type: string, minLength: 1, maxLength: 128}
+        toolId: {$ref: '#/components/schemas/UUID'}
+        toolName: {type: string, minLength: 1, maxLength: 128}
+        runtimeName: {type: string, minLength: 1, maxLength: 256}
+        mcpConfigRevisionId: {$ref: '#/components/schemas/UUID'}
+        contractRevisionId: {$ref: '#/components/schemas/UUID'}
+        globalPolicyRevisionId: {$ref: '#/components/schemas/UUID'}
+        decision: {type: string, enum: [confirm]}
+        reasonCodes: {type: array, maxItems: 32, items: {type: string, maxLength: 64}}
+        argumentSummary: {type: array, maxItems: 512, items: {$ref: '#/components/schemas/ArgumentSummary'}}
+    ConfirmationApproveRequest:
+      type: object
+      additionalProperties: false
+      required: [profileName, bindingHash]
+      properties:
+        profileName: {type: string, minLength: 1, maxLength: 120}
+        bindingHash: {$ref: '#/components/schemas/SHA256'}
+    ConfirmationRejectRequest:
+      type: object
+      additionalProperties: false
+      required: [bindingHash]
+      properties: {bindingHash: {$ref: '#/components/schemas/SHA256'}}
+    ConfirmationDecisionResponse:
+      type: object
+      additionalProperties: false
+      required: [challengeId, bindingHash]
+      properties:
+        challengeId: {$ref: '#/components/schemas/SHA256'}
+        bindingHash: {$ref: '#/components/schemas/SHA256'}
+        grantExpiresAt: {type: number, minimum: 0}
+    NativeClientInspection:
+      type: object
+      additionalProperties: false
+      required: [clientKind, version, supported]
+      properties:
+        clientKind: {type: string, enum: [claude, codex]}
+        version: {type: string, maxLength: 64}
+        supported: {type: boolean}
+        errorCode: {type: string, enum: [native_client_path_unsafe, native_client_inspection_failed, native_client_not_found, native_client_resolution_ambiguous, native_client_timeout, native_client_output_invalid, native_client_version_invalid, native_client_version_unsupported]}
+    LaunchCommand:
+      type: object
+      additionalProperties: false
+      required: [executable, args, display]
+      properties:
+        executable: {type: string, enum: [claude, codex]}
+        args: {type: array, maxItems: 3, items: {type: string}}
+        display: {type: string, maxLength: 4096}
+    ProfileLaunchReadiness:
+      type: object
+      additionalProperties: false
+      required: [ready, profileId, profileRevisionId, clientKind, nativeClient]
+      properties:
+        ready: {type: boolean}
+        reasonCode: {type: string, maxLength: 64}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        clientKind: {type: string, enum: [claude, codex]}
+        nativeClient: {$ref: '#/components/schemas/NativeClientInspection'}
+        command: {$ref: '#/components/schemas/LaunchCommand'}
+    Observation:
+      type: object
+      additionalProperties: false
+      required: [bootId, sequence, observedAt, minuteBucket, profileId, profileRevisionId, serverId, toolId, decision, reasonCodes, outcome, errorClass, durationBucket]
+      properties:
+        bootId: {$ref: '#/components/schemas/UUID'}
+        sequence: {type: integer, format: int64, minimum: 1}
+        observedAt: {type: number, minimum: 0}
+        minuteBucket: {type: string, format: date-time}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        toolId: {$ref: '#/components/schemas/UUID'}
+        decision: {type: string, enum: [deny, confirm, allow]}
+        reasonCodes: {type: array, maxItems: 32, items: {type: string, maxLength: 64}}
+        outcome: {type: string, enum: [confirmation_required, confirmed, rejected, expired, denied, not_executed, executed, failed, unknown]}
+        errorClass: {type: string, enum: [none, policy, confirmation, rate_limited, timeout, transport, upstream, internal]}
+        durationBucket: {type: string, enum: [lt_10ms, lt_100ms, lt_1s, lt_10s, gte_10s]}
+    ObservationDrainResponse:
+      type: object
+      additionalProperties: false
+      required: [bootId, items, nextSequence]
+      properties:
+        bootId: {$ref: '#/components/schemas/UUID'}
+        items: {type: array, maxItems: 1000, items: {$ref: '#/components/schemas/Observation'}}
+        nextSequence: {type: integer, format: int64, minimum: 0}
+    DailyToolAggregate:
+      type: object
+      additionalProperties: false
+      required: [day, clientKind, decision, outcome, callCount, errorCount]
+      properties:
+        day: {type: string, format: date}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        serverId: {$ref: '#/components/schemas/UUID'}
+        toolId: {$ref: '#/components/schemas/UUID'}
+        clientKind: {type: string, enum: [claude, codex]}
+        decision: {type: string, enum: [deny, confirm, allow]}
+        outcome: {type: string, enum: [confirmation_required, confirmed, rejected, expired, denied, not_executed, executed, failed, unknown]}
+        errorClass: {type: string, enum: [policy, confirmation, rate_limited, timeout, transport, upstream, internal]}
+        callCount: {type: integer, format: int64, minimum: 0}
+        errorCount: {type: integer, format: int64, minimum: 0}
+        durationBucket: {type: string, enum: [lt_10ms, lt_100ms, lt_1s, lt_10s, gte_10s]}
     Operation:
       type: object
       required: [id, kind, status, metadata, cancelRequested, createdAt, updatedAt]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
-        kind: {type: string, enum: [skill_import, mcp_import, update_check, apply, edit, restore, scan, refresh, reconcile, relay_start, relay_stop, relay_restart, relay_health, backup_gc]}
+        kind: {type: string, enum: [skill_import, mcp_import, update_check, apply, edit, restore, scan, refresh, reconcile, relay_start, relay_stop, relay_restart, relay_health, backup_gc, relay_config_apply, contract_observe, policy_apply, relay_telemetry_pull]}
         status: {$ref: '#/components/schemas/OperationStatus'}
         sourceId: {$ref: '#/components/schemas/UUID'}
         metadata: {type: object}

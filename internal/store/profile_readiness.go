@@ -9,6 +9,7 @@ import (
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/clientlaunch"
+	"github.com/Junhao2314/toolhub/internal/domain"
 )
 
 type ProfileLaunchReadiness struct {
@@ -19,6 +20,25 @@ type ProfileLaunchReadiness struct {
 	ClientKind        string                                        `json:"clientKind"`
 	NativeClient      bridgeprotocol.NativeClientInspectionResponse `json:"nativeClient"`
 	Command           *clientlaunch.Command                         `json:"command,omitempty"`
+}
+
+func (s *Store) ProfileNativeClientInspectionRequest(ctx context.Context, profileID string) (domain.Profile, bridgeprotocol.NativeClientInspectionRequest, error) {
+	profile, err := s.Profile(ctx, profileID)
+	if err != nil {
+		return domain.Profile{}, bridgeprotocol.NativeClientInspectionRequest{}, err
+	}
+	if profile.ClientKind != bridgeprotocol.RuntimeClaude && profile.ClientKind != bridgeprotocol.RuntimeCodex {
+		return profile, bridgeprotocol.NativeClientInspectionRequest{}, ErrConflict
+	}
+	var managedUsername string
+	err = s.pool.QueryRow(ctx, `SELECT managed_username FROM targets WHERE target_key=$1`, "local/"+profile.ClientKind).Scan(&managedUsername)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.Profile{}, bridgeprotocol.NativeClientInspectionRequest{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Profile{}, bridgeprotocol.NativeClientInspectionRequest{}, err
+	}
+	return profile, bridgeprotocol.NativeClientInspectionRequest{ManagedUsername: managedUsername, ClientKind: profile.ClientKind}, nil
 }
 
 func (s *Store) ProfileReadiness(ctx context.Context, profileID string, inspection bridgeprotocol.NativeClientInspectionResponse) (ProfileLaunchReadiness, error) {

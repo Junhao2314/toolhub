@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -247,6 +249,254 @@ func TestRelayConfigurationFinalizerRejectsASecondOperationWithStalePredecessor(
 	secondOperation := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"revisionId": second.ID, "routingHash": strings.Repeat("b", 64), "expectedAppliedRelayConfigurationRevisionId": predecessor})
 	if err := st.FinalizeRelayConfigurationApply(ctx, secondOperation, second.ID, governanceRoutingHash(t, st, secondOperation)); err != ErrConflict {
 		t.Fatalf("stale Relay Configuration operation returned %v, want conflict", err)
+	}
+}
+
+func TestGovernanceApplyOperationPreparationIsAtomicWithFinalization(t *testing.T) {
+	t.Run("relay configuration", func(t *testing.T) {
+		ctx := context.Background()
+		st := newIntegrationStore(t, true)
+		if err := st.BootstrapEnvironment(ctx, "atomic-relay-host", "runner", "UTC", 6276); err != nil {
+			t.Fatal(err)
+		}
+		server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "atomic-relay-preparation", Transport: "http", URL: "https://example.invalid/mcp"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}, Metadata: map[string]any{"candidate": "first"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{Revision: first.Revision, MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}, Metadata: map[string]any{"candidate": "second"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := st.PrepareRelayConfigurationApply(ctx, second.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstOperation := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"revisionId": first.ID})
+
+		operation := createGovernanceOperationAcrossFinalization(t, st, func(createStore *Store) (domain.Operation, error) {
+			return createStore.CreateRelayConfigurationApplyOperation(ctx, second.ID, nil, strings.Repeat("a", 64), prepared.RoutingHash, "atomic-relay-preparation")
+		}, func() error {
+			return st.FinalizeRelayConfigurationApply(ctx, firstOperation, first.ID, governanceRoutingHash(t, st, firstOperation))
+		})
+		if got := stringMetadata(operation.Metadata, "expectedAppliedRelayConfigurationRevisionId"); got != first.ID {
+			t.Fatalf("operation predecessor=%s, want finalized revision %s", got, first.ID)
+		}
+	})
+
+	t.Run("global policy", func(t *testing.T) {
+		ctx := context.Background()
+		st := newIntegrationStore(t, true)
+		first, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{Revision: 1, CatalogVersion: 1, ExplicitOverrides: map[string]string{}, UnclassifiedMutating: "deny", ReviewedReadOnly: "allow"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{Revision: first.Revision, CatalogVersion: 1, ExplicitOverrides: map[string]string{}, UnclassifiedMutating: "deny", ReviewedReadOnly: "confirm"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		firstOperation := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": first.ID})
+
+		operation := createGovernanceOperationAcrossFinalization(t, st, func(createStore *Store) (domain.Operation, error) {
+			return createStore.CreateGlobalPolicyApplyOperation(ctx, second.ID, strings.Repeat("a", 64), "atomic-policy-preparation")
+		}, func() error {
+			return st.FinalizeGlobalPolicyApply(ctx, firstOperation, first.ID)
+		})
+		if got := stringMetadata(operation.Metadata, "expectedAppliedGlobalPolicyRevisionId"); got != first.ID {
+			t.Fatalf("operation predecessor=%s, want finalized revision %s", got, first.ID)
+		}
+	})
+}
+
+func TestGovernanceApplyOperationIdempotencyReplaysActiveRequest(t *testing.T) {
+	t.Run("relay configuration", func(t *testing.T) {
+		ctx := context.Background()
+		st := newIntegrationStore(t, true)
+		if err := st.BootstrapEnvironment(ctx, "relay-idempotency-host", "runner", "UTC", 6276); err != nil {
+			t.Fatal(err)
+		}
+		draft, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{Metadata: map[string]any{"candidate": "idempotent"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := st.PrepareRelayConfigurationApply(ctx, draft.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := st.CreateRelayConfigurationApplyOperation(ctx, draft.ID, nil, strings.Repeat("a", 64), prepared.RoutingHash, "relay-idempotency")
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := st.CreateRelayConfigurationApplyOperation(ctx, draft.ID, nil, strings.Repeat("a", 64), prepared.RoutingHash, "relay-idempotency")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replayed.ID != first.ID {
+			t.Fatalf("relay replay operation=%s, want %s", replayed.ID, first.ID)
+		}
+		if _, err := st.CreateRelayConfigurationApplyOperation(ctx, draft.ID, nil, strings.Repeat("b", 64), prepared.RoutingHash, "relay-idempotency"); !errors.Is(err, ErrIdempotencyConflict) {
+			t.Fatalf("changed Relay request returned %v, want idempotency conflict", err)
+		}
+	})
+
+	t.Run("global policy", func(t *testing.T) {
+		ctx := context.Background()
+		st := newIntegrationStore(t, true)
+		if err := st.BootstrapEnvironment(ctx, "policy-idempotency-host", "runner", "UTC", 6276); err != nil {
+			t.Fatal(err)
+		}
+		draft, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{Revision: 1, CatalogVersion: 1, ExplicitOverrides: map[string]string{}, UnclassifiedMutating: "deny", ReviewedReadOnly: "allow"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		first, err := st.CreateGlobalPolicyApplyOperation(ctx, draft.ID, strings.Repeat("a", 64), "policy-idempotency")
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayed, err := st.CreateGlobalPolicyApplyOperation(ctx, draft.ID, strings.Repeat("a", 64), "policy-idempotency")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if replayed.ID != first.ID {
+			t.Fatalf("policy replay operation=%s, want %s", replayed.ID, first.ID)
+		}
+		if _, err := st.CreateGlobalPolicyApplyOperation(ctx, draft.ID, strings.Repeat("b", 64), "policy-idempotency"); !errors.Is(err, ErrIdempotencyConflict) {
+			t.Fatalf("changed Policy request returned %v, want idempotency conflict", err)
+		}
+	})
+}
+
+func TestGovernanceApplyOperationIdempotencyReplaysConcurrentRequest(t *testing.T) {
+	t.Run("relay configuration", func(t *testing.T) {
+		ctx := context.Background()
+		st := newIntegrationStore(t, true)
+		if err := st.BootstrapEnvironment(ctx, "relay-concurrent-idempotency-host", "runner", "UTC", 6276); err != nil {
+			t.Fatal(err)
+		}
+		draft, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{Metadata: map[string]any{"candidate": "concurrent-idempotent"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared, err := st.PrepareRelayConfigurationApply(ctx, draft.ID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		operations := createConcurrentGovernanceOperations(t, st, func(createStore *Store) (domain.Operation, error) {
+			return createStore.CreateRelayConfigurationApplyOperation(ctx, draft.ID, nil, strings.Repeat("a", 64), prepared.RoutingHash, "relay-concurrent-idempotency")
+		})
+		if operations[0].ID != operations[1].ID {
+			t.Fatalf("concurrent Relay operations=%s,%s, want one replayed operation", operations[0].ID, operations[1].ID)
+		}
+	})
+
+	t.Run("global policy", func(t *testing.T) {
+		ctx := context.Background()
+		st := newIntegrationStore(t, true)
+		if err := st.BootstrapEnvironment(ctx, "policy-concurrent-idempotency-host", "runner", "UTC", 6276); err != nil {
+			t.Fatal(err)
+		}
+		draft, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{Revision: 1, CatalogVersion: 1, ExplicitOverrides: map[string]string{}, UnclassifiedMutating: "deny", ReviewedReadOnly: "allow"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		operations := createConcurrentGovernanceOperations(t, st, func(createStore *Store) (domain.Operation, error) {
+			return createStore.CreateGlobalPolicyApplyOperation(ctx, draft.ID, strings.Repeat("a", 64), "policy-concurrent-idempotency")
+		})
+		if operations[0].ID != operations[1].ID {
+			t.Fatalf("concurrent Policy operations=%s,%s, want one replayed operation", operations[0].ID, operations[1].ID)
+		}
+	})
+}
+
+func createConcurrentGovernanceOperations(t *testing.T, st *Store, create func(*Store) (domain.Operation, error)) [2]domain.Operation {
+	t.Helper()
+	ctx := context.Background()
+	barrierPool, firstStore, secondStore, closePools := integrationLockOrderStores(t, st)
+	defer closePools()
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	barrier, err := barrierPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = barrier.Rollback(ctx) }()
+	var nodeID string
+	if err := barrier.QueryRow(ctx, `SELECT id::text FROM nodes WHERE id=$1 FOR UPDATE`, relayTarget.NodeID).Scan(&nodeID); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		operation domain.Operation
+		err       error
+	}
+	results := make(chan result, 2)
+	for _, createStore := range []*Store{firstStore, secondStore} {
+		go func(createStore *Store) {
+			operation, err := create(createStore)
+			results <- result{operation: operation, err: err}
+		}(createStore)
+	}
+	waitForBackendLock(t, st, "toolhub-finish-lock-order")
+	waitForBackendLock(t, st, "toolhub-archive-lock-order")
+	if err := barrier.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var operations [2]domain.Operation
+	for index := range operations {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			operations[index] = result.operation
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent governance operation creation did not resume")
+		}
+	}
+	return operations
+}
+
+func createGovernanceOperationAcrossFinalization(t *testing.T, st *Store, create func(*Store) (domain.Operation, error), finalize func() error) domain.Operation {
+	t.Helper()
+	ctx := context.Background()
+	barrierPool, createStore, _, closePools := integrationLockOrderStores(t, st)
+	defer closePools()
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	barrier, err := barrierPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = barrier.Rollback(ctx) }()
+	var nodeID string
+	if err := barrier.QueryRow(ctx, `SELECT id::text FROM nodes WHERE id=$1 FOR UPDATE`, relayTarget.NodeID).Scan(&nodeID); err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		operation domain.Operation
+		err       error
+	}
+	created := make(chan result, 1)
+	go func() {
+		operation, err := create(createStore)
+		created <- result{operation: operation, err: err}
+	}()
+	waitForBackendLock(t, st, "toolhub-finish-lock-order")
+	if err := finalize(); err != nil {
+		t.Fatal(err)
+	}
+	if err := barrier.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-created:
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		return result.operation
+	case <-time.After(5 * time.Second):
+		t.Fatal("governance operation creation did not resume")
+		return domain.Operation{}
 	}
 }
 

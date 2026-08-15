@@ -138,6 +138,28 @@ func TestTelemetryRetentionDeletesOnlyBucketsOlderThanThirtyDays(t *testing.T) {
 	}
 }
 
+func TestDailyToolAggregatesExcludeFutureBuckets(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if _, err := st.pool.Exec(ctx, `
+		INSERT INTO mcp_daily_aggregates(day,client_kind,decision,outcome,error_class,call_count,error_count,duration_bucket)
+		VALUES(current_date,'unknown','allow','executed','',1,0,'lt_10ms'),
+		      (current_date+1,'unknown','allow','executed','',1,0,'lt_10ms')`); err != nil {
+		t.Fatal(err)
+	}
+	items, err := st.DailyToolAggregates(ctx, 1, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var today string
+	if err := st.pool.QueryRow(ctx, `SELECT current_date::text`).Scan(&today); err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Day != today {
+		t.Fatalf("daily aggregates=%+v, want only current day", items)
+	}
+}
+
 func TestGovernanceControlOperationsCoalesceWhileActive(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)

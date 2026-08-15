@@ -175,6 +175,53 @@ back to another port. Target detail exposes only bounded protocol health,
 capability counts, stable error codes, and retry timing. Arbitrary unit names are
 impossible.
 
+Relay governance separates draft/current state from applied state. `GET
+/relay/configuration` and `GET /mcp/policy` return both immutable projections;
+their `PUT` routes create a new current revision with optimistic revision
+checking and do not Apply it. Relay Configuration revisions pin an ordered set of
+exact MCP revisions. Global Policy revisions pin the policy catalog version and
+explicit tool decisions.
+
+Relay Configuration Apply is revision-bound. `POST
+/relay/configuration/prepare-profile-updates` returns the Profiles affected by a
+candidate revision. `POST /relay/configuration/preflight` renders that candidate
+with the exact selected current Profile revisions and returns the target revision
+and routing hash. `POST /relay/configuration/apply` accepts those values and
+queues a durable `relay_config_apply`; finalization advances the applied Relay
+revision and the selected Published Profile revisions only if every predecessor
+and hash still matches. `POST /mcp/policy/apply` uses the same target-revision
+binding for a durable `policy_apply` operation.
+
+Contract governance is exposed through `GET /relay/contracts`, the durable
+`POST /relay/contracts/observe`, revision acceptance, and explicit rename
+confirmation routes. Contract projections contain normalized definitions and
+presentation metadata, never MCP call arguments, results, prompts, or raw
+transport errors. The projection returns at most 500 deterministically ordered
+servers and 500 most-recent rename proposals.
+
+`GET /relay/confirmations` reads bounded, payload-free, in-memory challenges
+from the Relay. Approval requires the exact case-sensitive Profile name and
+binding hash; the handler verifies the Profile's current revision before sending
+only `{challengeId,bindingHash}` to the Bridge. Rejection requires the binding
+hash. Both decisions require an authenticated session and CSRF token but not a
+password. Challenges and 60-second one-shot grants are ephemeral and are not
+durable operations. A transport failure or mismatched decision response returns
+`confirmation_outcome_unknown`; clients must not retry or claim the tool was not
+executed.
+
+`GET /profiles/{id}/launch` returns a command only when the current Profile is
+Published, its native Skill target and shared Relay snapshot are healthy and
+revision-matched, the routing hash is current, and the fixed native adapter is
+supported. Otherwise it returns a stable reason code and no command.
+
+Observability remains payload-free. `GET /relay/observations/live` validates the
+Relay cursor and returns no more than the requested limit, capped at 1,000 safe
+observations. `GET
+/relay/observations/daily?days=30&profileId=...` reads PostgreSQL aggregates for
+the current database day and preceding window, capped at 31 days and 5,000 rows.
+Neither surface contains arguments, results, prompts, raw errors, secret values,
+or session identifiers.
+
 ## Removed Routes
 
 Generation 2 has no Agent/enrollment/WebSocket/SSH, users/roles/access,

@@ -263,6 +263,17 @@ func (s *Store) resolveRelayManifestCandidate(ctx context.Context, target domain
 		return bridgeprotocol.DesiredManifest{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	manifest, err := s.resolveRelayManifestCandidateTx(ctx, tx, target, profileID, profileRevision, candidate)
+	if err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	return manifest, nil
+}
+
+func (s *Store) resolveRelayManifestCandidateTx(ctx context.Context, tx pgx.Tx, target domain.Target, profileID string, profileRevision int64, candidate RoutingBundleCandidate) (bridgeprotocol.DesiredManifest, error) {
 	bundle, routingHash, err := s.RenderCandidateRoutingBundleTx(ctx, tx, candidate)
 	if err != nil {
 		return bridgeprotocol.DesiredManifest{}, err
@@ -305,9 +316,6 @@ func (s *Store) resolveRelayManifestCandidate(ctx context.Context, target domain
 	}
 	if err := manifest.Validate(true); err != nil {
 		return bridgeprotocol.DesiredManifest{}, fmt.Errorf("resolve relay manifest: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return bridgeprotocol.DesiredManifest{}, err
 	}
 	return manifest, nil
 }

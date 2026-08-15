@@ -42,56 +42,86 @@ var controlOperationKinds = []string{"skill_import", "update_check", "refresh", 
 
 var coalescedControlOperationKinds = map[string]bool{"contract_observe": true, "relay_telemetry_pull": true}
 
+var errCoalescedControlOperationRace = errors.New("coalesced control operation raced with another creator")
+
+type createOperationTxResult struct {
+	ID     string
+	Replay bool
+}
+
 func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput) (domain.Operation, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.createOperationTx(ctx, tx, input, false)
+	if errors.Is(err, errCoalescedControlOperationRace) {
+		_ = tx.Rollback(ctx)
+		var existingID string
+		if queryErr := s.pool.QueryRow(ctx, `SELECT id::text FROM operations WHERE kind=$1 AND status IN ('queued','running') ORDER BY created_at LIMIT 1`, input.Kind).Scan(&existingID); queryErr != nil {
+			return domain.Operation{}, queryErr
+		}
+		return s.Operation(ctx, existingID)
+	}
+	if err != nil {
+		return domain.Operation{}, err
+	}
+	if result.Replay {
+		_ = tx.Rollback(ctx)
+		return s.Operation(ctx, result.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Operation{}, err
+	}
+	return s.Operation(ctx, result.ID)
+}
+
+func (s *Store) createOperationTx(ctx context.Context, tx pgx.Tx, input CreateOperationInput, targetsLocked bool) (createOperationTxResult, error) {
 	dependencyIdentity := make(map[string]any, len(input.TargetDependencies))
 	for targetID, dependencyID := range input.TargetDependencies {
 		dependencyIdentity[targetID] = dependencyID
 	}
 	requestHash, err := operationRequestHashWithDependencies(input.Request, input.TargetRequests, dependencyIdentity)
 	if err != nil {
-		return domain.Operation{}, err
+		return createOperationTxResult{}, err
 	}
 	metadataJSON, err := marshalJSONObject(input.Metadata)
 	if err != nil {
-		return domain.Operation{}, err
+		return createOperationTxResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return domain.Operation{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	if input.IdempotencyKey != "" {
 		var existingID, existingHash string
 		err := tx.QueryRow(ctx, `SELECT id::text,request_hash FROM operations WHERE kind=$1 AND idempotency_key=$2`, input.Kind, input.IdempotencyKey).Scan(&existingID, &existingHash)
 		if err == nil {
 			if existingHash != requestHash {
-				return domain.Operation{}, ErrIdempotencyConflict
+				return createOperationTxResult{}, ErrIdempotencyConflict
 			}
-			_ = tx.Rollback(ctx)
-			return s.Operation(ctx, existingID)
+			return createOperationTxResult{ID: existingID, Replay: true}, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return domain.Operation{}, err
+			return createOperationTxResult{}, err
 		}
 	}
 	if coalescedControlOperationKinds[input.Kind] && len(input.TargetIDs) == 0 {
 		var existingID string
 		err := tx.QueryRow(ctx, `SELECT id::text FROM operations WHERE kind=$1 AND status IN ('queued','running') ORDER BY created_at LIMIT 1 FOR UPDATE`, input.Kind).Scan(&existingID)
 		if err == nil {
-			_ = tx.Rollback(ctx)
-			return s.Operation(ctx, existingID)
+			return createOperationTxResult{ID: existingID, Replay: true}, nil
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
-			return domain.Operation{}, err
+			return createOperationTxResult{}, err
 		}
 	}
-	if err := lockActiveTargets(ctx, tx, input.TargetIDs); err != nil {
-		return domain.Operation{}, err
+	if !targetsLocked {
+		if err := lockActiveTargets(ctx, tx, input.TargetIDs); err != nil {
+			return createOperationTxResult{}, err
+		}
 	}
 	dependencies := input.TargetDependencies
 	for dependent, dependency := range dependencies {
 		if !containsString(uniqueIDs(input.TargetIDs), dependent) || !containsString(uniqueIDs(input.TargetIDs), dependency) || dependent == dependency {
-			return domain.Operation{}, ErrConflict
+			return createOperationTxResult{}, ErrConflict
 		}
 	}
 	id := uuid.NewString()
@@ -102,14 +132,9 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,$2,'queued',$3,$4,$5,$6)`, id, input.Kind, source, nullableText(input.IdempotencyKey), requestHash, jsonText(metadataJSON)); err != nil {
 		var pgErr *pgconn.PgError
 		if coalescedControlOperationKinds[input.Kind] && errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "operations_governance_control_one_active_idx" {
-			_ = tx.Rollback(ctx)
-			var existingID string
-			if queryErr := s.pool.QueryRow(ctx, `SELECT id::text FROM operations WHERE kind=$1 AND status IN ('queued','running') ORDER BY created_at LIMIT 1`, input.Kind).Scan(&existingID); queryErr != nil {
-				return domain.Operation{}, queryErr
-			}
-			return s.Operation(ctx, existingID)
+			return createOperationTxResult{}, errCoalescedControlOperationRace
 		}
-		return domain.Operation{}, err
+		return createOperationTxResult{}, err
 	}
 	targetRowIDs := make(map[string]string)
 	for _, targetID := range uniqueIDs(input.TargetIDs) {
@@ -118,7 +143,7 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 	for _, targetID := range uniqueIDs(input.TargetIDs) {
 		requestJSON, err := marshalJSONObject(input.TargetRequests[targetID])
 		if err != nil {
-			return domain.Operation{}, err
+			return createOperationTxResult{}, err
 		}
 		var dependency any
 		if dependencyID := targetRowIDs[dependencies[targetID]]; dependencyID != "" {
@@ -128,15 +153,12 @@ func (s *Store) CreateOperation(ctx context.Context, input CreateOperationInput)
 		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,request,governance_finalization_pending) VALUES($1,$2,$3,$4,$5,$6)`, targetRowIDs[targetID], id, targetID, dependency, jsonText(requestJSON), governancePending); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-				return domain.Operation{}, ErrOperationActive
+				return createOperationTxResult{}, ErrOperationActive
 			}
-			return domain.Operation{}, err
+			return createOperationTxResult{}, err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return domain.Operation{}, err
-	}
-	return s.Operation(ctx, id)
+	return createOperationTxResult{ID: id}, nil
 }
 
 func lockActiveTargets(ctx context.Context, tx pgx.Tx, targetIDs []string) error {

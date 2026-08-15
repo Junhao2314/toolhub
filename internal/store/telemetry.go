@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
+	"github.com/Junhao2314/toolhub/internal/domain"
 )
 
 const maxRelayObservationBatch = 1000
@@ -158,6 +159,31 @@ func (s *Store) DeleteExpiredTelemetry(ctx context.Context, now time.Time) (int6
 		return 0, err
 	}
 	return command.RowsAffected(), nil
+}
+
+func (s *Store) DailyToolAggregates(ctx context.Context, days int, profileID string) ([]domain.DailyToolAggregate, error) {
+	if days < 1 || days > 31 || profileID != "" && uuid.Validate(profileID) != nil {
+		return nil, ErrNotFound
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT day::text,coalesce(profile_id::text,''),coalesce(profile_revision_id::text,''),coalesce(server_id::text,''),coalesce(tool_id::text,''),client_kind,decision,outcome,error_class,call_count,error_count,duration_bucket
+		FROM mcp_daily_aggregates
+		WHERE day>=current_date-($1::int-1) AND day<=current_date AND ($2='' OR profile_id=NULLIF($2,'')::uuid)
+		ORDER BY day DESC,profile_id NULLS LAST,server_id NULLS LAST,tool_id NULLS LAST,decision,outcome,error_class,duration_bucket
+		LIMIT 5000`, days, profileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []domain.DailyToolAggregate{}
+	for rows.Next() {
+		var item domain.DailyToolAggregate
+		if err := rows.Scan(&item.Day, &item.ProfileID, &item.ProfileRevisionID, &item.ServerID, &item.ToolID, &item.ClientKind, &item.Decision, &item.Outcome, &item.ErrorClass, &item.CallCount, &item.ErrorCount, &item.DurationBucket); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) RelayGovernanceHealthy(ctx context.Context) (bool, error) {
