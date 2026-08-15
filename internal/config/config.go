@@ -29,6 +29,7 @@ type Config struct {
 	SkillsMPAPIKey    string
 	XiapingAPIKey     string
 	XiapingBaseURL    string
+	SkillHubBaseURL   string
 	SessionTTL        time.Duration
 	SecureCookies     bool
 	RelayPort         int
@@ -86,6 +87,7 @@ func Load() (Config, error) {
 		SkillsMPAPIKey:    strings.TrimSpace(os.Getenv("SKILLSMP_API_KEY")),
 		XiapingAPIKey:     strings.TrimSpace(os.Getenv("XIAPING_API_KEY")),
 		XiapingBaseURL:    strings.TrimRight(env("XIAPING_BASE_URL", "https://xiaping.coze.com"), "/"),
+		SkillHubBaseURL:   strings.TrimRight(env("SKILLHUB_BASE_URL", "https://api.skillhub.tencent.com"), "/"),
 		SessionTTL:        ttl,
 		SecureCookies:     secureCookies,
 		RelayPort:         relayPort,
@@ -96,6 +98,10 @@ func Load() (Config, error) {
 	parsedXiapingURL, err := url.Parse(cfg.XiapingBaseURL)
 	if err != nil || parsedXiapingURL.Scheme != "https" || parsedXiapingURL.Hostname() == "" || parsedXiapingURL.User != nil || parsedXiapingURL.RawQuery != "" || parsedXiapingURL.Fragment != "" {
 		return Config{}, errors.New("XIAPING_BASE_URL must be an https URL without embedded credentials")
+	}
+	parsedSkillHubURL, err := url.Parse(cfg.SkillHubBaseURL)
+	if err != nil || parsedSkillHubURL.Scheme != "https" || parsedSkillHubURL.Hostname() == "" || parsedSkillHubURL.User != nil || parsedSkillHubURL.RawQuery != "" || parsedSkillHubURL.Fragment != "" {
+		return Config{}, errors.New("SKILLHUB_BASE_URL must be an https URL without embedded credentials")
 	}
 	return cfg, nil
 }

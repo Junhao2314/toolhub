@@ -233,6 +233,27 @@ func (w *Worker) importSource(ctx context.Context, source store.SourceInput) (do
 		source.Commit = download.Version
 		provenance["sourceCommit"], provenance["skillPage"] = download.Version, download.SkillPage
 		return w.store.ImportSkill(ctx, source, pkg, provenance)
+	case "skillhub":
+		client, ok := w.market.SkillHub()
+		if !ok {
+			return domain.Skill{}, false, errors.New("SkillHub marketplace is not configured")
+		}
+		skillID, _ := source.Metadata["skillId"].(string)
+		if strings.TrimSpace(skillID) == "" {
+			return domain.Skill{}, false, errors.New("SkillHub source requires metadata.skillId")
+		}
+		version, _ := source.Metadata["version"].(string)
+		download, err := client.Download(ctx, skillID, version, skills.DefaultLimits.MaxArchiveBytes)
+		if err != nil {
+			return domain.Skill{}, false, err
+		}
+		pkg, err := skills.ScanZIP(download.Archive, skills.DefaultLimits)
+		if err != nil {
+			return domain.Skill{}, false, err
+		}
+		source.Commit = download.Version
+		provenance["sourceCommit"], provenance["skillPage"] = download.Version, download.SkillPage
+		return w.store.ImportSkill(ctx, source, pkg, provenance)
 	default:
 		return domain.Skill{}, false, errors.New("queued Skill import source is unsupported")
 	}

@@ -29,7 +29,7 @@ type SourceInput struct {
 }
 
 func (s *Store) RefreshableSkillSources(ctx context.Context) ([]SourceInput, error) {
-	rows, err := s.pool.Query(ctx, `SELECT kind,name,url,subdirectory,current_commit,metadata FROM skill_sources WHERE kind IN ('git','skillsmp','xiaping') ORDER BY id`)
+	rows, err := s.pool.Query(ctx, `SELECT kind,name,url,subdirectory,current_commit,metadata FROM skill_sources WHERE kind IN ('git','skillsmp','xiaping','skillhub') ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +173,7 @@ func validateSourceInput(input SourceInput) error {
 		if input.URL != "" {
 			return errors.New("ZIP and local Skill sources cannot contain a URL")
 		}
-	case "git", "skillsmp", "xiaping":
+	case "git", "skillsmp", "xiaping", "skillhub":
 		parsed, err := url.Parse(strings.TrimSpace(input.URL))
 		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
 			return errors.New("remote Skill source requires an HTTPS URL without credentials")

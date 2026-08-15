@@ -19,7 +19,10 @@ async function navigate(page: Page, projectName: string, label: string) {
 }
 
 async function expectNoViewportOverflow(page: Page) {
-  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true)
+  await expect.poll(() => page.evaluate(() => {
+    const viewportWidth = window.visualViewport?.width ?? window.innerWidth
+    return document.documentElement.scrollWidth <= viewportWidth + 1
+  })).toBe(true)
 }
 
 function session() {
@@ -51,6 +54,95 @@ test('username login and generation-2 navigation render without overlap', async 
   await expect(page.getByLabel('Username')).toHaveValue(username)
   await page.screenshot({ path: `../test-results/${testInfo.project.name}-generation2-navigation.png`, fullPage: true })
   expect(consoleErrors).toEqual([])
+})
+
+test('Marketplace cards open complete Skill details without hijacking card actions', async ({ page }, testInfo) => {
+  const description = '从灵感到成片的全流程AI视频创作助手。支持灵感裂变、专业分镜脚本、剧本诊断优化、爆款公式、多平台适配（即梦/可灵/Runway），并提供完整的发布工作流。'
+  const sourceUrl = `https://example.invalid/skills/${'ai-video-creator-'.repeat(10)}`
+  const skill = {
+    source: 'skillhub',
+    id: 'ai-video-creator',
+    name: 'AI视频创作师',
+    description,
+    author: 'ToolHub Studio',
+    stars: 89,
+    downloads: 1280,
+    version: '1.4.0',
+    status: 'verified',
+    sourceUrl,
+  }
+  const skillWithoutStatus = {
+    source: 'skillsmp',
+    id: 'storyboard-assistant',
+    name: '分镜助手',
+    description: '生成专业分镜。',
+    githubUrl: 'https://example.invalid/skills/storyboard-assistant',
+  }
+
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/market/search') return route.fulfill({ json: { items: [skill, skillWithoutStatus] } })
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
+  })
+
+  await page.goto('/marketplace')
+  const card = page.locator('.market-item').filter({ hasText: skill.name })
+  const detailsButton = card.getByRole('button', { name: `View details · ${skill.name}` })
+  await expect(detailsButton).toBeVisible()
+
+  await card.click()
+  let dialog = page.getByRole('dialog', { name: `Skill details · ${skill.name}` })
+  let closeButton = dialog.getByRole('button', { name: 'Close' })
+  await expect(dialog).toContainText(description)
+  await expect(dialog).toContainText('ToolHub Studio')
+  await expect(dialog).toContainText('89')
+  await expect(dialog).toContainText('1,280')
+  await expect(dialog).toContainText(sourceUrl)
+  const details = dialog.locator('.detail-list')
+  const detailValue = (label: string) => details.getByText(label, { exact: true }).locator('..').locator('dd')
+  await expect(detailValue('Source')).toHaveText('skillhub')
+  await expect(detailValue('Status')).toHaveText('verified')
+  await expect(detailValue('Version')).toHaveText('1.4.0')
+  await expect(closeButton).toBeFocused()
+  await expectNoViewportOverflow(page)
+  await page.screenshot({ path: `../test-results/${testInfo.project.name}-marketplace-details.png` })
+  await page.keyboard.press('Shift+Tab')
+  await expect(dialog.getByRole('button', { name: 'Import' })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(closeButton).toBeFocused()
+  await closeButton.click()
+  await expect(dialog).toHaveCount(0)
+  await expect(detailsButton).toBeFocused()
+
+  await page.keyboard.press('Space')
+  dialog = page.getByRole('dialog', { name: `Skill details · ${skill.name}` })
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(detailsButton).toBeFocused()
+
+  await page.keyboard.press('Enter')
+  dialog = page.getByRole('dialog', { name: `Skill details · ${skill.name}` })
+  await expect(dialog).toBeVisible()
+  await page.locator('.modal-backdrop').click({ position: { x: 2, y: 2 } })
+  await expect(dialog).toHaveCount(0)
+
+  const cardWithoutStatus = page.locator('.market-item').filter({ hasText: skillWithoutStatus.name })
+  await cardWithoutStatus.click()
+  dialog = page.getByRole('dialog', { name: `Skill details · ${skillWithoutStatus.name}` })
+  const missingStatus = dialog.locator('.detail-list').getByText('Status', { exact: true }).locator('..').locator('dd')
+  await expect(missingStatus).toHaveText('—')
+  await dialog.getByRole('button', { name: 'Close' }).click()
+
+  const popupPromise = page.waitForEvent('popup')
+  await card.getByRole('link', { name: 'Open source' }).click()
+  const popup = await popupPromise
+  await popup.close()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  await card.getByRole('button', { name: 'Import' }).click()
+  await expect(page.getByRole('dialog', { name: `Import · ${skill.name}` })).toBeVisible()
 })
 
 test('Targets refresh waits for completion and reloads active inventory', async ({ page }) => {

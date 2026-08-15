@@ -490,7 +490,7 @@ func safeBundleProvenance(sourceKind, sourceURL, commit string, raw []byte) prof
 	_ = json.Unmarshal(raw, &metadata)
 	if source, ok := metadata["source"].(string); ok {
 		source = strings.ToLower(strings.TrimSpace(source))
-		if source == "claude" || source == "codex" || source == "hermes" || source == "git" || source == "skillsmp" || source == "xiaping" || source == "zip" || source == "local" || source == "bundle" {
+		if source == "claude" || source == "codex" || source == "hermes" || source == "git" || source == "skillsmp" || source == "xiaping" || source == "skillhub" || source == "zip" || source == "local" || source == "bundle" {
 			value.Source = source
 		}
 	}

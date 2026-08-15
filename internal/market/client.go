@@ -88,6 +88,16 @@ func (m *Multi) Xiaping() (*XiapingClient, bool) {
 	return nil, false
 }
 
+// SkillHub returns the configured SkillHub source, if any.
+func (m *Multi) SkillHub() (*SkillHubClient, bool) {
+	for _, source := range m.sources {
+		if skillhub, ok := source.(*SkillHubClient); ok {
+			return skillhub, true
+		}
+	}
+	return nil, false
+}
+
 func (m *Multi) selectSources(selector string) ([]Source, error) {
 	selector = strings.ToLower(strings.TrimSpace(selector))
 	if selector == "" || selector == "all" {

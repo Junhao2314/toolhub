@@ -71,6 +71,7 @@ func run(logger *slog.Logger) error {
 	marketClient := market.NewMulti(
 		market.New("https://skillsmp.com/api/v1", cfg.SkillsMPAPIKey),
 		market.NewXiaping(cfg.XiapingBaseURL, cfg.XiapingAPIKey),
+		market.NewSkillHub(cfg.SkillHubBaseURL),
 	)
 	operationWorker := worker.New(st, bridge, marketClient, logger)
 	if err := operationWorker.Recover(ctx); err != nil {

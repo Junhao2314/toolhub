@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import { useEffect, useRef, type ButtonHTMLAttributes, type ReactNode } from 'react'
 import { AlertTriangle, LoaderCircle, X } from 'lucide-react'
 import { useI18n } from '../i18n'
 
@@ -32,8 +32,48 @@ export function ErrorNotice({ message, retry }: { message: string; retry?: () =>
 
 export function Modal({ title, children, close }: { title: string; children: ReactNode; close: () => void }) {
   const { t } = useI18n()
+  const modalRef = useRef<HTMLElement>(null)
+  const closeRef = useRef(close)
+  closeRef.current = close
+
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const modal = modalRef.current
+    const focusable = () => Array.from(modal?.querySelectorAll<HTMLElement>('a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') ?? [])
+    focusable()[0]?.focus()
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeRef.current()
+        return
+      }
+      if (event.key !== 'Tab') return
+
+      const controls = focusable()
+      if (controls.length === 0) {
+        event.preventDefault()
+        return
+      }
+      const first = controls[0]
+      const last = controls.at(-1) ?? first
+      if (event.shiftKey && (document.activeElement === first || !modal?.contains(document.activeElement))) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+      opener?.focus()
+    }
+  }, [])
+
   return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && close()}>
-    <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+    <section ref={modalRef} className="modal" role="dialog" aria-modal="true" aria-label={title}>
       <header><h2>{title}</h2><IconButton label={t('Close')} onClick={close}><X size={18} /></IconButton></header>
       <div className="modal-body">{children}</div>
     </section>
