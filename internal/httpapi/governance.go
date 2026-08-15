@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -173,6 +174,10 @@ func (a *API) preflightRelayConfiguration(w http.ResponseWriter, r *http.Request
 		writeError(w, r, http.StatusConflict, "preflight_failed", "Relay Configuration preflight failed")
 		return
 	}
+	if !validBrowserPreflightResponse(prepared.Manifest, result) {
+		writeError(w, r, http.StatusBadGateway, "relay_response_invalid", "Relay preflight response is invalid")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"revisionId": input.RevisionID, "routingHash": prepared.RoutingHash, "result": result})
 }
 
@@ -232,6 +237,72 @@ func validUUIDList(ids []string, max int) bool {
 			return false
 		}
 		seen[id] = struct{}{}
+	}
+	return true
+}
+
+func validBrowserPreflightResponse(manifest bridgeprotocol.DesiredManifest, result bridgeprotocol.PreflightResponse) bool {
+	if !bridgeprotocol.IsSHA256(result.TargetRevision) || !bridgeprotocol.IsSHA256(result.ManifestHash) {
+		return false
+	}
+	_, expectedHash, err := manifest.Canonical()
+	if err != nil || result.ManifestHash != expectedHash {
+		return false
+	}
+	diff := result.Diff
+	if diff.Add == nil || diff.Replace == nil || diff.Delete == nil || diff.Excluded == nil {
+		return false
+	}
+	if len(diff.Add) > bridgeprotocol.GovernanceMaxItems || len(diff.Replace) > bridgeprotocol.GovernanceMaxItems ||
+		len(diff.Delete) > bridgeprotocol.GovernanceMaxItems || len(diff.Excluded) > bridgeprotocol.GovernanceMaxItems ||
+		len(diff.Add)+len(diff.Replace)+len(diff.Delete)+len(diff.Excluded) > bridgeprotocol.GovernanceMaxItems {
+		return false
+	}
+	desired := make(map[string]string, len(manifest.Skills)+len(manifest.MCPServers))
+	for _, skill := range manifest.Skills {
+		desired["skill\x00"+skill.Slug] = skill.MemberID
+	}
+	for _, server := range manifest.MCPServers {
+		desired["mcp\x00"+server.Name] = server.MemberID
+	}
+	seen := make(map[string]struct{}, len(diff.Add)+len(diff.Replace)+len(diff.Delete)+len(diff.Excluded))
+	validItems := func(items []bridgeprotocol.DiffItem, desiredMember, excluded bool) bool {
+		for _, item := range items {
+			if (item.Kind != "skill" && item.Kind != "mcp") || !validPreflightName(item.Name) {
+				return false
+			}
+			key := item.Kind + "\x00" + item.Name
+			if _, exists := seen[key]; exists {
+				return false
+			}
+			seen[key] = struct{}{}
+			if desiredMember {
+				if uuid.Validate(item.MemberID) != nil || desired[key] != item.MemberID || item.Reason != "" {
+					return false
+				}
+				continue
+			}
+			if item.MemberID != "" || desired[key] != "" {
+				return false
+			}
+			if excluded && item.Reason != "protected" || !excluded && item.Reason != "" {
+				return false
+			}
+		}
+		return true
+	}
+	return validItems(diff.Add, true, false) && validItems(diff.Replace, true, false) &&
+		validItems(diff.Delete, false, false) && validItems(diff.Excluded, false, true)
+}
+
+func validPreflightName(value string) bool {
+	if value == "" || len(value) > 128 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
 	}
 	return true
 }
@@ -364,6 +435,8 @@ func (a *API) rejectRelayConfirmation(w http.ResponseWriter, r *http.Request) {
 
 var errInvalidRelayConfirmationResponse = errors.New("invalid Relay confirmation response")
 
+var argumentSummaryPointerPattern = regexp.MustCompile(`^(?:/(?:o(?:0|[1-9][0-9]*)|a(?:0|[1-9][0-9]*)))*$`)
+
 func (a *API) confirmationSummary(r *http.Request, challengeID string) (bridgeprotocol.ConfirmationSummary, bool, error) {
 	result, err := a.bridge.ListRelayConfirmations(r.Context())
 	if err != nil {
@@ -462,7 +535,7 @@ func validConfirmationSummaries(items []bridgeprotocol.ConfirmationSummary) bool
 			}
 		}
 		for _, summary := range item.ArgumentSummary {
-			if len(summary.Pointer) > 512 || !validArgumentSummary(summary) {
+			if len(summary.Pointer) > 512 || !argumentSummaryPointerPattern.MatchString(summary.Pointer) || !validArgumentSummary(summary) {
 				return false
 			}
 		}

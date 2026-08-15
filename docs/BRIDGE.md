@@ -120,6 +120,11 @@ up current content and then restores one cataloged backup. Every write uses
 stage, validate, backup, and atomic replacement. A no-op reconcile does not
 create a backup.
 
+Preflight responses bind a SHA-256 target revision and canonical manifest hash
+to four non-null diff collections. Diff entries are bounded, typed as `skill`
+or `mcp`, and add/replace entries reference an exact desired member ID; only
+excluded protected entries carry the `protected` reason.
+
 For Salt targets the Bridge resolves `managedUsername` through the fixed
 `user.info` call, validates a canonical non-root home, and injects that home
 only into the transient staged bundle. Caller-selected home paths are not an

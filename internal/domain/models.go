@@ -156,44 +156,65 @@ type ProfileMCPPin struct {
 	Current     bool     `json:"current"`
 }
 
+type ProfileMCPGovernance struct {
+	ServerID                   string `json:"serverId"`
+	MCPRevisionID              string `json:"mcpRevisionId"`
+	AcceptedContractRevisionID string `json:"acceptedContractRevisionId,omitempty"`
+	VisibilityMode             string `json:"visibilityMode"`
+}
+
+type ProfileToolRule struct {
+	ToolID      string   `json:"toolId"`
+	Visible     bool     `json:"visible"`
+	Decision    string   `json:"decision"`
+	ReasonCodes []string `json:"reasonCodes,omitempty"`
+}
+
 type Profile struct {
-	ID                    string            `json:"id"`
-	CurrentRevisionID     string            `json:"currentRevisionId"`
-	Name                  string            `json:"name"`
-	Description           string            `json:"description,omitempty"`
-	ClientKind            string            `json:"clientKind,omitempty"`
-	Category              string            `json:"category,omitempty"`
-	Variant               string            `json:"variant,omitempty"`
-	MigrationState        string            `json:"migrationState,omitempty"`
-	Revision              int64             `json:"revision"`
-	CanonicalHash         string            `json:"canonicalHash"`
-	PendingBindings       bool              `json:"pendingBindings"`
-	ArchivedAt            *time.Time        `json:"archivedAt,omitempty"`
-	SkillIDs              []string          `json:"skillIds"`
-	MCPServerIDs          []string          `json:"mcpServerIds"`
-	Skills                []ProfileSkillPin `json:"skills"`
-	MCPServers            []ProfileMCPPin   `json:"mcpServers"`
-	EffectiveVisibleCount int               `json:"effectiveVisibleCount"`
-	CreatedAt             time.Time         `json:"createdAt"`
-	UpdatedAt             time.Time         `json:"updatedAt"`
+	ID                    string                 `json:"id"`
+	CurrentRevisionID     string                 `json:"currentRevisionId"`
+	PublishedRevisionID   string                 `json:"publishedRevisionId,omitempty"`
+	PublishedRevision     int64                  `json:"publishedRevision,omitempty"`
+	PublishedAt           *time.Time             `json:"publishedAt,omitempty"`
+	Name                  string                 `json:"name"`
+	Description           string                 `json:"description,omitempty"`
+	ClientKind            string                 `json:"clientKind,omitempty"`
+	Category              string                 `json:"category,omitempty"`
+	Variant               string                 `json:"variant,omitempty"`
+	MigrationState        string                 `json:"migrationState,omitempty"`
+	Revision              int64                  `json:"revision"`
+	CanonicalHash         string                 `json:"canonicalHash"`
+	PendingBindings       bool                   `json:"pendingBindings"`
+	ArchivedAt            *time.Time             `json:"archivedAt,omitempty"`
+	SkillIDs              []string               `json:"skillIds"`
+	MCPServerIDs          []string               `json:"mcpServerIds"`
+	Skills                []ProfileSkillPin      `json:"skills"`
+	MCPServers            []ProfileMCPPin        `json:"mcpServers"`
+	MCPGovernance         []ProfileMCPGovernance `json:"mcpGovernance"`
+	ToolRules             []ProfileToolRule      `json:"toolRules"`
+	EffectiveVisibleCount int                    `json:"effectiveVisibleCount"`
+	CreatedAt             time.Time              `json:"createdAt"`
+	UpdatedAt             time.Time              `json:"updatedAt"`
 }
 
 type ProfileRevision struct {
-	ID              string            `json:"id"`
-	ProfileID       string            `json:"profileId"`
-	Revision        int64             `json:"revision"`
-	Name            string            `json:"name"`
-	Description     string            `json:"description,omitempty"`
-	ClientKind      string            `json:"clientKind,omitempty"`
-	Category        string            `json:"category,omitempty"`
-	Variant         string            `json:"variant,omitempty"`
-	MigrationState  string            `json:"migrationState,omitempty"`
-	CanonicalHash   string            `json:"canonicalHash"`
-	PendingBindings bool              `json:"pendingBindings"`
-	ArchivedRestore bool              `json:"archivedRestore"`
-	Skills          []ProfileSkillPin `json:"skills"`
-	MCPServers      []ProfileMCPPin   `json:"mcpServers"`
-	CreatedAt       time.Time         `json:"createdAt"`
+	ID              string                 `json:"id"`
+	ProfileID       string                 `json:"profileId"`
+	Revision        int64                  `json:"revision"`
+	Name            string                 `json:"name"`
+	Description     string                 `json:"description,omitempty"`
+	ClientKind      string                 `json:"clientKind,omitempty"`
+	Category        string                 `json:"category,omitempty"`
+	Variant         string                 `json:"variant,omitempty"`
+	MigrationState  string                 `json:"migrationState,omitempty"`
+	CanonicalHash   string                 `json:"canonicalHash"`
+	PendingBindings bool                   `json:"pendingBindings"`
+	ArchivedRestore bool                   `json:"archivedRestore"`
+	Skills          []ProfileSkillPin      `json:"skills"`
+	MCPServers      []ProfileMCPPin        `json:"mcpServers"`
+	MCPGovernance   []ProfileMCPGovernance `json:"mcpGovernance"`
+	ToolRules       []ProfileToolRule      `json:"toolRules"`
+	CreatedAt       time.Time              `json:"createdAt"`
 }
 
 // RelayConfigurationRevision is an immutable ordered set of MCP revisions

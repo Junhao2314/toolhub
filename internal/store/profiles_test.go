@@ -61,6 +61,71 @@ func TestProfileReportsEffectiveVisibleCount(t *testing.T) {
 	}
 }
 
+func TestProfileBrowserProjectionRoundTripsGovernanceAndPublishedRevision(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "profile-round-trip", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, contract.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	toolID := integrationToolID(t, st, server.ID, "read_item")
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-round-trip", ClientKind: "claude", Category: "coding", Variant: "focused",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: contract.Revision.ID, VisibilityMode: "selected"}},
+		ToolRules:     []ProfileToolRuleInput{{ToolID: toolID, Visible: true, Decision: "confirm", ReasonCodes: []string{"operator_review"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRevisionID := profile.CurrentRevisionID
+	if _, err := st.pool.Exec(ctx, `INSERT INTO published_profiles(profile_id,profile_revision_id) VALUES($1,$2)`, profile.ID, firstRevisionID); err != nil {
+		t.Fatal(err)
+	}
+
+	projected, err := st.Profile(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.MCPGovernance) != 1 || projected.MCPGovernance[0].VisibilityMode != "selected" || len(projected.ToolRules) != 1 || projected.ToolRules[0].Decision != "confirm" {
+		t.Fatalf("current governance projection=%+v rules=%+v", projected.MCPGovernance, projected.ToolRules)
+	}
+	updated, err := st.SaveProfile(ctx, profile.ID, ProfileInput{
+		Name: projected.Name, Description: "draft", ClientKind: projected.ClientKind, Category: projected.Category, Variant: projected.Variant,
+		MigrationState: projected.MigrationState, SkillIDs: projected.SkillIDs, MCPServerIDs: projected.MCPServerIDs,
+		SkillVersionIDs: profileSkillVersions(projected), MCPRevisionIDs: profileMCPRevisions(projected),
+		MCPGovernance: projected.MCPGovernance, ToolRules: projected.ToolRules, Revision: projected.Revision,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.PublishedRevisionID != firstRevisionID || updated.PublishedRevision != 1 || updated.PublishedAt == nil {
+		t.Fatalf("published projection id=%q revision=%d at=%v", updated.PublishedRevisionID, updated.PublishedRevision, updated.PublishedAt)
+	}
+	if updated.CurrentRevisionID == updated.PublishedRevisionID {
+		t.Fatal("draft current revision was reported as Published")
+	}
+	history, err := st.ProfileHistory(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("history length=%d want 2", len(history))
+	}
+	for _, revision := range history {
+		if len(revision.MCPGovernance) != 1 || revision.MCPGovernance[0].AcceptedContractRevisionID != contract.Revision.ID || len(revision.ToolRules) != 1 || revision.ToolRules[0].ToolID != toolID {
+			t.Fatalf("revision %d lost governance=%+v rules=%+v", revision.Revision, revision.MCPGovernance, revision.ToolRules)
+		}
+	}
+}
+
 func TestSaveProfileRequiresCurrentAcceptedContractPin(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)

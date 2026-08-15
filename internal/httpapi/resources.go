@@ -726,6 +726,10 @@ func (a *API) profilePreflight(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, 409, "preflight_failed", err.Error())
 			return
 		}
+		if !validBrowserPreflightResponse(target.manifest, result) {
+			writeError(w, r, http.StatusBadGateway, "relay_response_invalid", "Profile preflight response is invalid")
+			return
+		}
 		token, expires, err := a.store.CreatePreflightConfirmation(r.Context(), profileID, target.id, result.TargetRevision, target.manifest, result.Diff, 5*time.Minute)
 		if err != nil {
 			a.handleStoreError(w, r, err)
@@ -737,25 +741,13 @@ func (a *API) profilePreflight(w http.ResponseWriter, r *http.Request) {
 }
 
 func nativeClientPreflightReason(expectedKind string, inspection bridgeprotocol.NativeClientInspectionResponse) string {
-	if inspection.ClientKind != expectedKind || inspection.Supported && inspection.Version == "" {
+	if !validNativeClientInspection(inspection, expectedKind) {
 		return "native_client_inspection_invalid"
 	}
 	if inspection.Supported {
 		return ""
 	}
-	switch inspection.ErrorCode {
-	case "native_client_not_found",
-		"native_client_path_unsafe",
-		"native_client_resolution_ambiguous",
-		"native_client_timeout",
-		"native_client_output_invalid",
-		"native_client_version_invalid",
-		"native_client_version_unsupported",
-		"native_client_inspection_failed":
-		return inspection.ErrorCode
-	default:
-		return "native_client_unsupported"
-	}
+	return inspection.ErrorCode
 }
 
 func (a *API) applyProfile(w http.ResponseWriter, r *http.Request) {

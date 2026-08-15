@@ -45,6 +45,21 @@ func TestProfilePreflightRejectsUnsupportedNativeClientBeforeCreatingConfirmatio
 			inspection: bridgeprotocol.NativeClientInspectionResponse{ClientKind: bridgeprotocol.RuntimeClaude, ErrorCode: "native_client_resolution_ambiguous"},
 			wantCode:   "native_client_resolution_ambiguous",
 		},
+		{
+			name:       "supported invalid version",
+			inspection: bridgeprotocol.NativeClientInspectionResponse{ClientKind: bridgeprotocol.RuntimeClaude, Version: "fake", Supported: true},
+			wantCode:   "native_client_inspection_invalid",
+		},
+		{
+			name:       "supported below version floor",
+			inspection: bridgeprotocol.NativeClientInspectionResponse{ClientKind: bridgeprotocol.RuntimeClaude, Version: "2.1.231", Supported: true},
+			wantCode:   "native_client_inspection_invalid",
+		},
+		{
+			name:       "supported with error code",
+			inspection: bridgeprotocol.NativeClientInspectionResponse{ClientKind: bridgeprotocol.RuntimeClaude, Version: "2.1.232", Supported: true, ErrorCode: "native_client_timeout"},
+			wantCode:   "native_client_inspection_invalid",
+		},
 	}
 
 	for _, test := range tests {
@@ -117,6 +132,59 @@ func TestProfilePreflightRejectsUnsupportedNativeClientBeforeCreatingConfirmatio
 				t.Fatalf("unsupported native client minted %d confirmations", confirmationCount)
 			}
 		})
+	}
+}
+
+func TestProfilePreflightRejectsInvalidBridgeResponseWithoutCreatingConfirmations(t *testing.T) {
+	st := newHTTPIntegrationStore(t)
+	ctx := context.Background()
+	if err := st.BootstrapEnvironment(ctx, "http-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	var skillTargetID, relayTargetID string
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/claude'`).Scan(&skillTargetID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool().QueryRow(ctx, `SELECT id::text FROM targets WHERE target_key='local/shared-relay'`).Scan(&relayTargetID); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), store.ProfileInput{Name: "claude-invalid-preflight", ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newHTTPTestBridgeClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/native-clients/inspect":
+			writeJSON(w, http.StatusOK, bridgeprotocol.NativeClientInspectionResponse{ClientKind: "claude", Version: "2.1.232", Supported: true})
+		case "/v1/targets/preflight":
+			writeJSON(w, http.StatusOK, bridgeprotocol.PreflightResponse{
+				TargetRevision: strings.Repeat("a", 64), ManifestHash: strings.Repeat("b", 64),
+				Diff: bridgeprotocol.Diff{Add: []bridgeprotocol.DiffItem{}, Replace: []bridgeprotocol.DiffItem{}, Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	api := &API{store: st, bridge: client, logger: slog.New(slog.NewTextHandler(os.Stderr, nil))}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/"+profile.ID+"/preflight", strings.NewReader(
+		`{"targetIds":["`+skillTargetID+`","`+relayTargetID+`"]}`,
+	))
+	routeContext := chi.NewRouteContext()
+	routeContext.URLParams.Add("profileID", profile.ID)
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+	recorder := httptest.NewRecorder()
+
+	api.profilePreflight(recorder, request)
+
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), `"code":"relay_response_invalid"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var confirmationCount int
+	if err := st.Pool().QueryRow(ctx, `SELECT count(*) FROM preflight_confirmations`).Scan(&confirmationCount); err != nil {
+		t.Fatal(err)
+	}
+	if confirmationCount != 0 {
+		t.Fatalf("invalid Bridge response minted %d confirmations", confirmationCount)
 	}
 }
 

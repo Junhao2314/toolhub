@@ -709,7 +709,7 @@ components:
       additionalProperties: false
       required: [pointer, valueType, arrayLength, stringLength, sensitive]
       properties:
-        pointer: {type: string, maxLength: 512}
+        pointer: {type: string, maxLength: 512, pattern: '^(?:/(?:o(?:0|[1-9][0-9]*)|a(?:0|[1-9][0-9]*)))*$'}
         valueType: {type: string, enum: ['null', boolean, number, string, array, object]}
         arrayLength: {type: integer, minimum: 0, nullable: true}
         stringLength: {type: integer, minimum: 0, nullable: true}
@@ -814,19 +814,19 @@ components:
       additionalProperties: false
       required: [add, replace, delete, excluded]
       properties:
-        add: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
-        replace: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
-        delete: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
-        excluded: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        add: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
+        replace: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
+        delete: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
+        excluded: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
     DiffItem:
       type: object
       additionalProperties: false
       required: [kind, name]
       properties:
-        kind: {type: string}
+        kind: {type: string, enum: [skill, mcp]}
         memberId: {$ref: '#/components/schemas/UUID'}
-        name: {type: string}
-        reason: {type: string}
+        name: {type: string, minLength: 1, maxLength: 128}
+        reason: {type: string, enum: [protected]}
     TargetResult:
       type: object
       additionalProperties: false

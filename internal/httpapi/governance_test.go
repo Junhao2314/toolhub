@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -128,7 +129,20 @@ func TestGovernanceApplyRoutesCreateBoundDurableOperations(t *testing.T) {
 			t.Errorf("decode preflight: %v", err)
 		}
 		preflightManifest = input.Manifest
-		writeJSON(w, http.StatusOK, bridgeprotocol.PreflightResponse{TargetRevision: targetRevision, ManifestHash: strings.Repeat("b", 64), Diff: bridgeprotocol.Diff{}})
+		_, manifestHash, err := input.Manifest.Canonical()
+		if err != nil {
+			t.Errorf("canonicalize preflight manifest: %v", err)
+			http.Error(w, "invalid manifest", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, bridgeprotocol.PreflightResponse{
+			TargetRevision: targetRevision,
+			ManifestHash:   manifestHash,
+			Diff: bridgeprotocol.Diff{
+				Add: []bridgeprotocol.DiffItem{}, Replace: []bridgeprotocol.DiffItem{},
+				Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{},
+			},
+		})
 	}))
 	ctx := context.Background()
 	relayDraft, err := harness.store.SaveRelayConfiguration(ctx, store.RelayConfigurationInput{Revision: 1, MCPServerIDs: []string{}, MCPRevisionIDs: map[string]string{}, Metadata: map[string]any{"label": "apply"}})
@@ -176,7 +190,26 @@ func TestGovernancePreflightPreservesBrowserIdempotencyKey(t *testing.T) {
 			return
 		}
 		bridgeIdempotencyKey = r.Header.Get(bridgeprotocol.HeaderIdempotencyKey)
-		writeJSON(w, http.StatusOK, bridgeprotocol.PreflightResponse{TargetRevision: targetRevision, ManifestHash: strings.Repeat("b", 64), Diff: bridgeprotocol.Diff{}})
+		var input bridgeprotocol.PreflightRequest
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+			t.Errorf("decode preflight: %v", err)
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		_, manifestHash, err := input.Manifest.Canonical()
+		if err != nil {
+			t.Errorf("canonicalize preflight manifest: %v", err)
+			http.Error(w, "invalid manifest", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, bridgeprotocol.PreflightResponse{
+			TargetRevision: targetRevision,
+			ManifestHash:   manifestHash,
+			Diff: bridgeprotocol.Diff{
+				Add: []bridgeprotocol.DiffItem{}, Replace: []bridgeprotocol.DiffItem{},
+				Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{},
+			},
+		})
 	}))
 	relayDraft, err := harness.store.SaveRelayConfiguration(context.Background(), store.RelayConfigurationInput{Revision: 1, MCPServerIDs: []string{}, MCPRevisionIDs: map[string]string{}, Metadata: map[string]any{}})
 	if err != nil {
@@ -196,6 +229,91 @@ func TestGovernancePreflightPreservesBrowserIdempotencyKey(t *testing.T) {
 	if bridgeIdempotencyKey != wantKey {
 		t.Fatalf("Bridge idempotency key length=%d want=%d key=%q", len(bridgeIdempotencyKey), len(wantKey), bridgeIdempotencyKey)
 	}
+}
+
+func TestValidBrowserPreflightResponseRejectsUnboundOrUnsafeDiff(t *testing.T) {
+	memberID := "11111111-1111-4111-8111-111111111111"
+	manifest := bridgeprotocol.DesiredManifest{
+		SchemaVersion: bridgeprotocol.ManifestSchemaVersion,
+		Target: bridgeprotocol.Target{
+			ID: "22222222-2222-4222-8222-222222222222", NodeID: "33333333-3333-4333-8333-333333333333",
+			NodeKind: bridgeprotocol.NodeKindLocal, Runtime: bridgeprotocol.RuntimeClaude, ManagedUsername: "runner",
+		},
+		Skills: []bridgeprotocol.SkillMember{{
+			MemberID: memberID, SkillID: "44444444-4444-4444-8444-444444444444", VersionID: "55555555-5555-4555-8555-555555555555",
+			Slug: "formatter", SHA256: strings.Repeat("a", 64), ContentHash: strings.Repeat("b", 64),
+		}},
+		MCPServers: []bridgeprotocol.MCPMember{}, ManagedMemberIDs: []string{memberID},
+	}
+	_, manifestHash, err := manifest.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := func() bridgeprotocol.PreflightResponse {
+		return bridgeprotocol.PreflightResponse{
+			TargetRevision: strings.Repeat("c", 64), ManifestHash: manifestHash,
+			Diff: bridgeprotocol.Diff{
+				Add:     []bridgeprotocol.DiffItem{{Kind: "skill", MemberID: memberID, Name: "formatter"}},
+				Replace: []bridgeprotocol.DiffItem{}, Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{},
+			},
+		}
+	}
+	if !validBrowserPreflightResponse(manifest, valid()) {
+		t.Fatal("valid preflight response was rejected")
+	}
+	tests := []struct {
+		name   string
+		mutate func(*bridgeprotocol.PreflightResponse)
+	}{
+		{name: "invalid target revision", mutate: func(item *bridgeprotocol.PreflightResponse) { item.TargetRevision = "invalid" }},
+		{name: "manifest hash mismatch", mutate: func(item *bridgeprotocol.PreflightResponse) { item.ManifestHash = strings.Repeat("d", 64) }},
+		{name: "nil diff collection", mutate: func(item *bridgeprotocol.PreflightResponse) { item.Diff.Delete = nil }},
+		{name: "too many diff items", mutate: func(item *bridgeprotocol.PreflightResponse) {
+			item.Diff.Delete = make([]bridgeprotocol.DiffItem, 10001)
+			for index := range item.Diff.Delete {
+				item.Diff.Delete[index] = bridgeprotocol.DiffItem{Kind: "skill", Name: "old-skill-" + strconv.Itoa(index)}
+			}
+		}},
+		{name: "unknown kind", mutate: func(item *bridgeprotocol.PreflightResponse) { item.Diff.Add[0].Kind = "secret" }},
+		{name: "member binding mismatch", mutate: func(item *bridgeprotocol.PreflightResponse) {
+			item.Diff.Add[0].MemberID = "66666666-6666-4666-8666-666666666666"
+		}},
+		{name: "raw reason", mutate: func(item *bridgeprotocol.PreflightResponse) { item.Diff.Add[0].Reason = "raw upstream error" }},
+		{name: "duplicate across groups", mutate: func(item *bridgeprotocol.PreflightResponse) {
+			item.Diff.Replace = append(item.Diff.Replace, item.Diff.Add[0])
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := valid()
+			test.mutate(&response)
+			if validBrowserPreflightResponse(manifest, response) {
+				t.Fatal("invalid preflight response was accepted")
+			}
+		})
+	}
+}
+
+func TestGovernanceRelayPreflightRejectsInvalidBridgeResponse(t *testing.T) {
+	harness := newGovernanceHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/targets/preflight" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, bridgeprotocol.PreflightResponse{
+			TargetRevision: strings.Repeat("a", 64), ManifestHash: strings.Repeat("b", 64),
+			Diff: bridgeprotocol.Diff{Add: []bridgeprotocol.DiffItem{}, Replace: []bridgeprotocol.DiffItem{}, Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{}},
+		})
+	}))
+	relayDraft, err := harness.store.SaveRelayConfiguration(context.Background(), store.RelayConfigurationInput{
+		Revision: 1, MCPServerIDs: []string{}, MCPRevisionIDs: map[string]string{}, Metadata: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response := harness.request(t, http.MethodPost, "/api/v1/relay/configuration/preflight", `{"revisionId":"`+relayDraft.ID+`","profileIds":[]}`)
+	assertGovernanceError(t, response, http.StatusBadGateway, "relay_response_invalid")
 }
 
 func TestGovernanceContractRoutesValidateAndQueueObservation(t *testing.T) {
@@ -262,7 +380,7 @@ func TestGovernanceConfirmationDecisionIsProfileBoundAndPayloadFree(t *testing.T
 		ProfileID: profile.ID, ProfileRevisionID: profile.CurrentRevisionID, ProfileName: profile.Name, ClientKind: profile.ClientKind,
 		ServerID: "22222222-2222-4222-8222-222222222222", ServerName: "acemcp", ToolID: "33333333-3333-4333-8333-333333333333", ToolName: "search", RuntimeName: "search",
 		MCPConfigRevisionID: "44444444-4444-4444-8444-444444444444", ContractRevisionID: "55555555-5555-4555-8555-555555555555", GlobalPolicyRevisionID: "66666666-6666-4666-8666-666666666666",
-		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/query", ValueType: "string", Sensitive: true}},
+		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "string", Sensitive: true}},
 	}
 
 	listed := harness.request(t, http.MethodGet, "/api/v1/relay/confirmations", "")
@@ -342,7 +460,7 @@ func TestGovernanceRejectsInvalidSafeRelayDTOs(t *testing.T) {
 		ProfileID: "11111111-1111-4111-8111-111111111111", ProfileRevisionID: "22222222-2222-4222-8222-222222222222", ProfileName: "claude-coding", ClientKind: "claude",
 		ServerID: "33333333-3333-4333-8333-333333333333", ServerName: "acemcp", ToolID: "44444444-4444-4444-8444-444444444444", ToolName: "search", RuntimeName: "search",
 		MCPConfigRevisionID: "55555555-5555-4555-8555-555555555555", ContractRevisionID: "66666666-6666-4666-8666-666666666666", GlobalPolicyRevisionID: "77777777-7777-4777-8777-777777777777",
-		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/query", ValueType: "string", StringLength: &stringLength}},
+		Decision: "confirm", ReasonCodes: []string{"mutating"}, ArgumentSummary: []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "string", StringLength: &stringLength}},
 	}
 	if !validConfirmationSummaries([]bridgeprotocol.ConfirmationSummary{validConfirmation}) {
 		t.Fatal("valid confirmation summary was rejected")
@@ -360,12 +478,21 @@ func TestGovernanceRejectsInvalidSafeRelayDTOs(t *testing.T) {
 		{name: "overlong pointer", mutate: func(item *bridgeprotocol.ConfirmationSummary) {
 			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: strings.Repeat("/", 513), ValueType: "string"}}
 		}},
+		{name: "raw text pointer", mutate: func(item *bridgeprotocol.ConfirmationSummary) {
+			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: "raw argument marker", ValueType: "string"}}
+		}},
+		{name: "raw object key pointer", mutate: func(item *bridgeprotocol.ConfirmationSummary) {
+			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: "/secret-value-marker", ValueType: "string"}}
+		}},
+		{name: "non canonical ordinal pointer", mutate: func(item *bridgeprotocol.ConfirmationSummary) {
+			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: "/o01", ValueType: "string"}}
+		}},
 		{name: "invalid value type", mutate: func(item *bridgeprotocol.ConfirmationSummary) {
-			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: "/query", ValueType: "integer"}}
+			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "integer"}}
 		}},
 		{name: "negative string length", mutate: func(item *bridgeprotocol.ConfirmationSummary) {
 			invalid := -1
-			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: "/query", ValueType: "string", StringLength: &invalid}}
+			item.ArgumentSummary = []bridgeprotocol.ArgumentSummary{{Pointer: "/o0", ValueType: "string", StringLength: &invalid}}
 		}},
 	}
 	for _, test := range invalidConfirmations {

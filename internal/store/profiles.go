@@ -36,19 +36,9 @@ type ProfileInput struct {
 	PendingBindings bool                        `json:"-"`
 }
 
-type ProfileMCPGovernanceInput struct {
-	ServerID                   string `json:"serverId"`
-	MCPRevisionID              string `json:"mcpRevisionId"`
-	AcceptedContractRevisionID string `json:"acceptedContractRevisionId,omitempty"`
-	VisibilityMode             string `json:"visibilityMode"`
-}
+type ProfileMCPGovernanceInput = domain.ProfileMCPGovernance
 
-type ProfileToolRuleInput struct {
-	ToolID      string   `json:"toolId"`
-	Visible     bool     `json:"visible"`
-	Decision    string   `json:"decision"`
-	ReasonCodes []string `json:"reasonCodes,omitempty"`
-}
+type ProfileToolRuleInput = domain.ProfileToolRule
 
 type profilePins struct {
 	Skills []domain.ProfileSkillPin
@@ -411,7 +401,7 @@ func (s *Store) ListProfiles(ctx context.Context, includeArchived bool) (json.Ra
 
 func (s *Store) Profile(ctx context.Context, id string) (domain.Profile, error) {
 	var profile domain.Profile
-	err := s.pool.QueryRow(ctx, `SELECT p.id::text,p.current_revision_id::text,p.name,p.description,p.client_kind,p.category,p.variant,p.migration_state,p.revision,pr.canonical_hash,pr.pending_bindings,p.archived_at,p.created_at,p.updated_at FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1`, id).Scan(&profile.ID, &profile.CurrentRevisionID, &profile.Name, &profile.Description, &profile.ClientKind, &profile.Category, &profile.Variant, &profile.MigrationState, &profile.Revision, &profile.CanonicalHash, &profile.PendingBindings, &profile.ArchivedAt, &profile.CreatedAt, &profile.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT p.id::text,p.current_revision_id::text,coalesce(pp.profile_revision_id::text,''),coalesce(published.revision,0),pp.published_at,p.name,p.description,p.client_kind,p.category,p.variant,p.migration_state,p.revision,current.canonical_hash,current.pending_bindings,p.archived_at,p.created_at,p.updated_at FROM profiles p JOIN profile_revisions current ON current.id=p.current_revision_id LEFT JOIN published_profiles pp ON pp.profile_id=p.id LEFT JOIN profile_revisions published ON published.id=pp.profile_revision_id WHERE p.id=$1`, id).Scan(&profile.ID, &profile.CurrentRevisionID, &profile.PublishedRevisionID, &profile.PublishedRevision, &profile.PublishedAt, &profile.Name, &profile.Description, &profile.ClientKind, &profile.Category, &profile.Variant, &profile.MigrationState, &profile.Revision, &profile.CanonicalHash, &profile.PendingBindings, &profile.ArchivedAt, &profile.CreatedAt, &profile.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Profile{}, ErrNotFound
 	}
@@ -423,6 +413,7 @@ func (s *Store) Profile(ctx context.Context, id string) (domain.Profile, error) 
 		return domain.Profile{}, err
 	}
 	profile.Skills, profile.MCPServers = revision.Skills, revision.MCPServers
+	profile.MCPGovernance, profile.ToolRules = revision.MCPGovernance, revision.ToolRules
 	profile.SkillIDs = make([]string, 0, len(profile.Skills))
 	profile.MCPServerIDs = make([]string, 0, len(profile.MCPServers))
 	for _, pin := range profile.Skills {
@@ -487,7 +478,6 @@ func (s *Store) ProfileRevision(ctx context.Context, id string) (domain.ProfileR
 	if err != nil {
 		return domain.ProfileRevision{}, err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var pin domain.ProfileMCPPin
 		if err := rows.Scan(&pin.ServerID, &pin.RevisionID, &pin.Revision, &pin.Name, &pin.Description, &pin.Transport, &pin.Command, &pin.Args, &pin.URL, &pin.EnvKeys, &pin.HeaderKeys, &pin.ContentHash, &pin.Current); err != nil {
@@ -495,7 +485,16 @@ func (s *Store) ProfileRevision(ctx context.Context, id string) (domain.ProfileR
 		}
 		revision.MCPServers = append(revision.MCPServers, pin)
 	}
-	return revision, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return domain.ProfileRevision{}, err
+	}
+	rows.Close()
+	revision.MCPGovernance, revision.ToolRules, err = s.profileGovernanceInputs(ctx, id)
+	if err != nil {
+		return domain.ProfileRevision{}, err
+	}
+	return revision, nil
 }
 
 func (s *Store) ProfileHistory(ctx context.Context, profileID string) ([]domain.ProfileRevision, error) {

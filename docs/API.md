@@ -39,6 +39,12 @@ Reusing a key with a different canonical request returns `409`.
 - `/profiles` is the only Profile model. Each immutable revision pins exact
   Skill versions and MCP revisions; current Library pointers are used only for
   new Profiles or explicit Refresh.
+- Profile list/detail responses and revision history expose the pinned
+  `mcpGovernance` and `toolRules` arrays so an editor can round-trip a governed
+  revision without weakening or dropping policy. Current Profile responses also
+  expose the optional Published revision ID, revision number, and timestamp;
+  comparing that pointer with `currentRevisionId` distinguishes a draft from the
+  revision active in the Relay. Empty governance and rule collections are `[]`.
 - `GET /profiles?includeArchived=true` includes reversible archived Profiles
   after active rows. `POST /profiles/{id}/archive` requires the current
   revision; `POST /profiles/{id}/restore` creates an `archived_restore`
@@ -80,7 +86,11 @@ resolve to different executable inodes return
 `native_client_resolution_ambiguous`; aliases of the same inode are
 deduplicated. A successful request resolves current Library revisions and
 returns a per-target destructive diff plus a five-minute, one-use confirmation
-token. `POST /profiles/{id}/apply` atomically consumes the tokens and queues one
+token. Bridge preflight responses are accepted only when their target and
+manifest hashes are valid, the manifest hash matches the server-rendered
+manifest, and the bounded diff references exact desired members; an invalid
+response returns `502` and issues no token. `POST /profiles/{id}/apply`
+atomically consumes the tokens and queues one
 fleet operation. A changed Profile, changed target, expired token, reused
 token, or mismatched manifest returns `409`.
 
@@ -184,7 +194,10 @@ explicit tool decisions.
 
 Relay Configuration Apply is revision-bound. `POST
 /relay/configuration/prepare-profile-updates` returns the Profiles affected by a
-candidate revision. `POST /relay/configuration/preflight` renders that candidate
+candidate revision. It creates a candidate only while the current Profile still
+matches its Published predecessor, treats an exact repeated preparation as a
+no-op, and returns `409` instead of replacing an unrelated current draft. `POST
+/relay/configuration/preflight` renders that candidate
 with the exact selected current Profile revisions and returns the target revision
 and routing hash. `POST /relay/configuration/apply` accepts those values and
 queues a durable `relay_config_apply`; finalization advances the applied Relay

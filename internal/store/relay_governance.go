@@ -525,6 +525,25 @@ func (s *Store) PrepareAffectedProfileUpdates(ctx context.Context, relayRevision
 		if !changed {
 			continue
 		}
+		pins, err := resolveProfilePinsTx(ctx, tx, input)
+		if err != nil {
+			return nil, err
+		}
+		candidateHash, err := CanonicalGovernedProfileHash(input, pins.Skills, pins.MCP)
+		if err != nil {
+			return nil, err
+		}
+		if currentRevisionID != publishedRevisionIDs[profileID] {
+			var currentHash string
+			var pendingBindings bool
+			if err := tx.QueryRow(ctx, `SELECT canonical_hash,pending_bindings FROM profile_revisions WHERE id=$1 AND profile_id=$2`, currentRevisionID, profileID).Scan(&currentHash, &pendingBindings); err != nil {
+				return nil, err
+			}
+			if pendingBindings || currentHash != candidateHash {
+				return nil, ErrConflict
+			}
+			continue
+		}
 		_, candidateRevisionID, err := s.saveProfileTx(ctx, tx, profileID, input)
 		if err != nil {
 			return nil, err

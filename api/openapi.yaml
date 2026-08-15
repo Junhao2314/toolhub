@@ -625,6 +625,7 @@ paths:
     post:
       tags: [Governance]
       operationId: prepareRelayProfileUpdates
+      description: Creates exact candidate Profile revisions from their Published predecessors. Repeating the same preparation is a no-op; a conflicting current draft returns 409 and is never replaced.
       parameters: [{$ref: '#/components/parameters/CSRFToken'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GovernanceRevisionRequest'}}}}
       responses: {'200': {description: Affected Profile IDs, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}}}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
@@ -1009,11 +1010,17 @@ components:
       properties:
         name: {type: string, minLength: 1, maxLength: 120}
         description: {type: string}
+        clientKind: {type: string, enum: [claude, codex, shared, unknown]}
+        category: {type: string, maxLength: 120}
+        variant: {type: string, maxLength: 64}
+        migrationState: {type: string, enum: [ready, needs_review, compatibility]}
         revision: {type: integer, minimum: 0}
         skillIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
         mcpServerIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
         skillVersionIds: {type: object, additionalProperties: {$ref: '#/components/schemas/UUID'}}
         mcpRevisionIds: {type: object, additionalProperties: {$ref: '#/components/schemas/UUID'}}
+        mcpGovernance: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileMCPGovernance'}}
+        toolRules: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileToolRule'}}
     ProfileSkillPin:
       type: object
       required: [skillId, versionId, slug, name, sha256, contentHash, current]
@@ -1041,6 +1048,24 @@ components:
         headerKeys: {type: array, items: {type: string}}
         contentHash: {$ref: '#/components/schemas/SHA256'}
         current: {type: boolean}
+    ProfileMCPGovernance:
+      type: object
+      additionalProperties: false
+      required: [serverId, mcpRevisionId, visibilityMode]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        mcpRevisionId: {$ref: '#/components/schemas/UUID'}
+        acceptedContractRevisionId: {$ref: '#/components/schemas/UUID'}
+        visibilityMode: {type: string, enum: [all_accepted, selected, hidden]}
+    ProfileToolRule:
+      type: object
+      additionalProperties: false
+      required: [toolId, visible, decision]
+      properties:
+        toolId: {$ref: '#/components/schemas/UUID'}
+        visible: {type: boolean}
+        decision: {type: string, enum: [deny, confirm, allow]}
+        reasonCodes: {type: array, maxItems: 16, items: {type: string, minLength: 1, maxLength: 128}}
     PendingSecretBinding:
       type: object
       required: [profileRevisionId, mcpRevisionId, namespace, key, slotHash, bound]
@@ -1056,30 +1081,41 @@ components:
       allOf:
         - {$ref: '#/components/schemas/ProfileInput'}
         - type: object
-          required: [id, createdAt, updatedAt]
+          required: [id, currentRevisionId, canonicalHash, pendingBindings, skills, mcpServers, mcpGovernance, toolRules, effectiveVisibleCount, createdAt, updatedAt]
           properties:
             id: {$ref: '#/components/schemas/UUID'}
             currentRevisionId: {$ref: '#/components/schemas/UUID'}
+            publishedRevisionId: {$ref: '#/components/schemas/UUID'}
+            publishedRevision: {type: integer, minimum: 1}
+            publishedAt: {type: string, format: date-time}
             canonicalHash: {$ref: '#/components/schemas/SHA256'}
             pendingBindings: {type: boolean}
             archivedAt: {type: [string, 'null'], format: date-time}
             skills: {type: array, items: {$ref: '#/components/schemas/ProfileSkillPin'}}
             mcpServers: {type: array, items: {$ref: '#/components/schemas/ProfileMCPPin'}}
+            effectiveVisibleCount: {type: integer, minimum: 0}
             createdAt: {type: string, format: date-time}
             updatedAt: {type: string, format: date-time}
     ProfileRevision:
       type: object
-      required: [id, profileId, revision, name, canonicalHash, skills, mcpServers, createdAt]
+      required: [id, profileId, revision, name, clientKind, variant, migrationState, canonicalHash, pendingBindings, archivedRestore, skills, mcpServers, mcpGovernance, toolRules, createdAt]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         profileId: {$ref: '#/components/schemas/UUID'}
         revision: {type: integer, minimum: 1}
         name: {type: string}
         description: {type: string}
+        clientKind: {type: string, enum: [claude, codex, shared, unknown]}
+        category: {type: string, maxLength: 120}
+        variant: {type: string, maxLength: 64}
+        migrationState: {type: string, enum: [ready, needs_review, compatibility]}
         canonicalHash: {$ref: '#/components/schemas/SHA256'}
         pendingBindings: {type: boolean}
+        archivedRestore: {type: boolean}
         skills: {type: array, items: {$ref: '#/components/schemas/ProfileSkillPin'}}
         mcpServers: {type: array, items: {$ref: '#/components/schemas/ProfileMCPPin'}}
+        mcpGovernance: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileMCPGovernance'}}
+        toolRules: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileToolRule'}}
         createdAt: {type: string, format: date-time}
     BundlePreview:
       type: object
@@ -1249,20 +1285,22 @@ components:
         createdAt: {type: string, format: date-time}
     Diff:
       type: object
+      additionalProperties: false
       required: [add, replace, delete, excluded]
       properties:
-        add: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
-        replace: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
-        delete: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
-        excluded: {type: array, items: {$ref: '#/components/schemas/DiffItem'}}
+        add: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
+        replace: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
+        delete: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
+        excluded: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/DiffItem'}}
     DiffItem:
       type: object
+      additionalProperties: false
       required: [kind, name]
       properties:
-        kind: {type: string}
+        kind: {type: string, enum: [skill, mcp]}
         memberId: {$ref: '#/components/schemas/UUID'}
-        name: {type: string}
-        reason: {type: string}
+        name: {type: string, minLength: 1, maxLength: 128}
+        reason: {type: string, enum: [protected]}
     PreflightItem:
       type: object
       required: [targetId, confirmationToken, expiresAt, result]
@@ -1454,7 +1492,7 @@ components:
       additionalProperties: false
       required: [pointer, valueType, arrayLength, stringLength, sensitive]
       properties:
-        pointer: {type: string, maxLength: 512}
+        pointer: {type: string, maxLength: 512, pattern: '^(?:/(?:o(?:0|[1-9][0-9]*)|a(?:0|[1-9][0-9]*)))*$'}
         valueType: {type: string, enum: [object, array, string, number, boolean, 'null']}
         arrayLength: {oneOf: [{type: integer, minimum: 0}, {type: 'null'}]}
         stringLength: {oneOf: [{type: integer, minimum: 0}, {type: 'null'}]}

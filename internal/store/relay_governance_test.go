@@ -668,7 +668,43 @@ func TestPrepareAffectedProfileUpdatesCreatesMCPRevisionCandidate(t *testing.T) 
 	}
 }
 
-func TestPrepareAffectedProfileUpdatesClonesPublishedRevisionNotCurrentDraft(t *testing.T) {
+func TestPrepareAffectedProfileUpdatesIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, _, profile, _ := setupPublishedRelayProfile(t, st, "candidate-idempotent")
+	server, err := st.SaveMCPServer(ctx, server.ID, MCPInput{Name: server.Name, Description: "revision two", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAffected, err := st.PrepareAffectedProfileUpdates(ctx, draft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.Profile(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAffected, err := st.PrepareAffectedProfileUpdates(ctx, draft.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.Profile(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstAffected) != 1 || len(secondAffected) != 1 || firstAffected[0] != profile.ID || secondAffected[0] != profile.ID {
+		t.Fatalf("affected Profiles first=%v second=%v", firstAffected, secondAffected)
+	}
+	if second.CurrentRevisionID != first.CurrentRevisionID || second.Revision != first.Revision {
+		t.Fatalf("retry created another candidate first=%s/r%d second=%s/r%d", first.CurrentRevisionID, first.Revision, second.CurrentRevisionID, second.Revision)
+	}
+}
+
+func TestPrepareAffectedProfileUpdatesRejectsCurrentDraft(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)
 	server, _, profile, _ := setupPublishedRelayProfile(t, st, "published-baseline")
@@ -694,15 +730,15 @@ func TestPrepareAffectedProfileUpdatesClonesPublishedRevisionNotCurrentDraft(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.PrepareAffectedProfileUpdates(ctx, relayDraft.ID); err != nil {
-		t.Fatal(err)
+	if _, err := st.PrepareAffectedProfileUpdates(ctx, relayDraft.ID); err != ErrConflict {
+		t.Fatalf("prepare with current draft returned %v, want conflict", err)
 	}
-	candidate, err := st.Profile(ctx, profile.ID)
+	current, err := st.Profile(ctx, profile.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if candidate.Description != profile.Description {
-		t.Fatalf("Relay update candidate inherited unpublished draft description %q", candidate.Description)
+	if current.CurrentRevisionID != draftProfile.CurrentRevisionID || current.Description != draftProfile.Description {
+		t.Fatalf("prepare replaced current draft: got=%+v want revision=%s description=%q", current, draftProfile.CurrentRevisionID, draftProfile.Description)
 	}
 	var stillPublished string
 	if err := st.pool.QueryRow(ctx, `SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1`, profile.ID).Scan(&stillPublished); err != nil {

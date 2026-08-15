@@ -60,6 +60,8 @@ Bridge transport failures return `503`. The Browser allowlist contains only
 identity/revision hashes, bounded names and reason codes, scalar type/length
 summaries, decisions, outcome classes, and duration buckets. Arguments, results,
 prompts, raw errors, secret values, and session identifiers are never forwarded.
+Argument-summary pointers use only anonymous structural ordinals (`/oN` for an
+object member and `/aN` for an array member), never original object keys.
 
 Confirmation challenges and one-shot 60-second grants live only in the mcpm
 Relay process. They are not stored in PostgreSQL, desired snapshots, operations,
