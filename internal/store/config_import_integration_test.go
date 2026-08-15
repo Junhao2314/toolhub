@@ -50,6 +50,18 @@ func TestConfigImportRollsBackEveryPhaseIntegration(t *testing.T) {
 	}
 }
 
+func TestConfigImportDestinationNeedsBootstrapAcceptsCurrentSchemaIntegration(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	needsBootstrap, err := st.ConfigImportDestinationNeedsBootstrap(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !needsBootstrap {
+		t.Fatal("fresh current schema was not recognized as needing bootstrap")
+	}
+}
+
 func TestConfigImportReencryptsVerifiesAndIsIdempotentIntegration(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)

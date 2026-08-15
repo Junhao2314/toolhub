@@ -617,18 +617,19 @@ func (s *Store) ArchiveProfile(ctx context.Context, id string, expectedRevision 
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var published, isDefault bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM published_profiles WHERE profile_id=$1),EXISTS(SELECT 1 FROM relay_configuration_state WHERE singleton AND default_profile_id=$1)`, id).Scan(&published, &isDefault); err != nil {
+		return err
+	}
+	if published || isDefault {
+		return ErrConflict
+	}
 	command, err := tx.Exec(ctx, `UPDATE profiles SET archived_at=now(),updated_at=now() WHERE id=$1 AND revision=$2 AND archived_at IS NULL`, id, expectedRevision)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
 		return ErrConflict
-	}
-	if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET default_profile_id=NULL,updated_at=now() WHERE default_profile_id=$1`, id); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `DELETE FROM published_profiles WHERE profile_id=$1`, id); err != nil {
-		return err
 	}
 	return tx.Commit(ctx)
 }

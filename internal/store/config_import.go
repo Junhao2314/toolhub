@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	configImportMarkerKey = "legacy_config_import_v1"
-	configImportLock      = int64(1848002)
+	configImportMarkerKey              = "legacy_config_import_v1"
+	configImportLock                   = int64(1848002)
+	configImportExpectedMigrationCount = 6
 )
 
 var ErrConfigImportConflict = errors.New("legacy configuration import conflict")
@@ -131,7 +132,7 @@ func (s *Store) ConfigImportDestinationNeedsBootstrap(ctx context.Context) (bool
 		{"generation marker", "SELECT count(*) FROM app_meta WHERE key='schema_generation' AND value='2'", 1},
 		{"application metadata", "SELECT count(*) FROM app_meta", 1},
 		{"migration ledger", "SELECT count(*) FROM schema_migrations WHERE version=1", 1},
-		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", 5},
+		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", configImportExpectedMigrationCount},
 		{"sessions", "SELECT count(*) FROM sessions", 0},
 		{"settings", "SELECT count(*) FROM settings", 0},
 		{"nodes", "SELECT count(*) FROM nodes", 0},
@@ -441,7 +442,7 @@ func validatePristineConfigImportDestination(ctx context.Context, tx pgx.Tx) err
 		{"generation marker", "SELECT count(*) FROM app_meta WHERE key='schema_generation' AND value='2'", 1},
 		{"application metadata", "SELECT count(*) FROM app_meta", 1},
 		{"migration ledger", "SELECT count(*) FROM schema_migrations WHERE version=1", 1},
-		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", 5},
+		{"migration ledger entries", "SELECT count(*) FROM schema_migrations", configImportExpectedMigrationCount},
 		{"singleton account", "SELECT count(*) FROM account", 1},
 		{"sessions", "SELECT count(*) FROM sessions", 0},
 		{"settings", "SELECT count(*) FROM settings", 1},

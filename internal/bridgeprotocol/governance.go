@@ -10,7 +10,7 @@ import (
 	"io"
 	"strings"
 
-	canonicaljson "github.com/gibson042/canonicaljson-go"
+	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/google/uuid"
 )
 
@@ -249,7 +249,11 @@ func (r RoutingBundle) Canonical() ([]byte, string, error) {
 	if err := r.Validate(); err != nil {
 		return nil, "", err
 	}
-	body, err := canonicaljson.Marshal(r)
+	encoded, err := json.Marshal(r)
+	if err != nil {
+		return nil, "", err
+	}
+	body, err := jsoncanonicalizer.Transform(encoded)
 	if err != nil {
 		return nil, "", err
 	}

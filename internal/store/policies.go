@@ -147,6 +147,16 @@ func (s *Store) FinalizeGlobalPolicyApply(ctx context.Context, operationID, revi
 	if stringMetadata(metadata, "revisionId") != revisionID {
 		return ErrConflict
 	}
+	var appliedRevisionID string
+	if err := tx.QueryRow(ctx, `SELECT applied_revision_id::text FROM global_policy_state WHERE singleton FOR UPDATE`).Scan(&appliedRevisionID); err != nil {
+		return err
+	}
+	if appliedRevisionID != stringMetadata(metadata, "expectedAppliedGlobalPolicyRevisionId") {
+		return ErrConflict
+	}
+	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{GlobalPolicyRevisionID: revisionID}, stringMetadata(metadata, "routingHash")); err != nil {
+		return err
+	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM global_policy_revisions WHERE id=$1)`, revisionID).Scan(&exists); err != nil {
 		return err
@@ -155,6 +165,9 @@ func (s *Store) FinalizeGlobalPolicyApply(ctx context.Context, operationID, revi
 		return ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `UPDATE global_policy_state SET applied_revision_id=$1,updated_at=now() WHERE singleton`, revisionID); err != nil {
+		return err
+	}
+	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "global_policy_apply"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

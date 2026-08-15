@@ -34,10 +34,6 @@ func (s *Store) ResolveProfileManifest(ctx context.Context, profileID, targetID 
 	if profile.ArchivedAt != nil || profile.PendingBindings {
 		return bridgeprotocol.DesiredManifest{}, ErrConflict
 	}
-	settings, err := s.Settings(ctx)
-	if err != nil {
-		return bridgeprotocol.DesiredManifest{}, err
-	}
 	manifest := bridgeprotocol.DesiredManifest{SchemaVersion: bridgeprotocol.ManifestSchemaVersion, Target: bridgeTarget(target), ProfileID: profile.ID, ProfileRevision: profile.Revision, Skills: []bridgeprotocol.SkillMember{}, MCPServers: []bridgeprotocol.MCPMember{}, ManagedMemberIDs: []string{}}
 	if target.Runtime != domain.RuntimeSharedRelay {
 		rows, err := s.pool.Query(ctx, `SELECT prs.skill_id::text,prs.skill_version_id::text,sk.slug,a.canonical_sha256,a.content_hash FROM profiles p JOIN profile_revision_skills prs ON prs.profile_revision_id=p.current_revision_id JOIN skills sk ON sk.id=prs.skill_id JOIN skill_versions v ON v.id=prs.skill_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE p.id=$1 ORDER BY prs.position`, profileID)
@@ -60,7 +56,11 @@ func (s *Store) ResolveProfileManifest(ctx context.Context, profileID, targetID 
 		}
 		rows.Close()
 	}
-	if target.Runtime == domain.RuntimeSharedRelay || target.NodeKind == bridgeprotocol.NodeKindSalt {
+	if target.Runtime == domain.RuntimeSharedRelay {
+		candidate := RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profile.ID: profile.CurrentRevisionID}}
+		return s.resolveRelayManifestCandidate(ctx, target, profile.ID, profile.Revision, candidate)
+	}
+	if target.NodeKind == bridgeprotocol.NodeKindSalt {
 		rows, err := s.pool.Query(ctx, `SELECT mr.server_id::text,mr.revision,mr.name,mr.transport,mr.command,mr.args,mr.url,mr.env_refs,mr.header_refs,mr.content_hash FROM profiles p JOIN profile_revision_mcp_servers prms ON prms.profile_revision_id=p.current_revision_id JOIN mcp_revisions mr ON mr.id=prms.mcp_revision_id WHERE p.id=$1 ORDER BY prms.position`, profileID)
 		if err != nil {
 			return bridgeprotocol.DesiredManifest{}, err
@@ -80,12 +80,6 @@ func (s *Store) ResolveProfileManifest(ctx context.Context, profileID, targetID 
 			return bridgeprotocol.DesiredManifest{}, err
 		}
 		rows.Close()
-	}
-	if target.Runtime == domain.RuntimeSharedRelay {
-		manifest.RelayPort = settings.RelayPort
-		if err := s.attachRelayGovernance(ctx, &manifest); err != nil {
-			return bridgeprotocol.DesiredManifest{}, err
-		}
 	}
 	if err := manifest.Validate(true); err != nil {
 		return bridgeprotocol.DesiredManifest{}, fmt.Errorf("resolve Profile manifest: %w", err)
@@ -242,6 +236,10 @@ func (s *Store) attachRelayGovernance(ctx context.Context, manifest *bridgeproto
 	if err != nil {
 		return err
 	}
+	return attachRenderedRelayGovernance(manifest, bundle, hash)
+}
+
+func attachRenderedRelayGovernance(manifest *bridgeprotocol.DesiredManifest, bundle RoutingBundle, hash string) error {
 	body, canonicalHash, err := bundle.Canonical()
 	if err != nil {
 		return err
@@ -257,6 +255,61 @@ func (s *Store) attachRelayGovernance(ctx context.Context, manifest *bridgeproto
 		RoutingHash:                  hash,
 	}
 	return nil
+}
+
+func (s *Store) resolveRelayManifestCandidate(ctx context.Context, target domain.Target, profileID string, profileRevision int64, candidate RoutingBundleCandidate) (bridgeprotocol.DesiredManifest, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	bundle, routingHash, err := s.RenderCandidateRoutingBundleTx(ctx, tx, candidate)
+	if err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	var relayPort int
+	if err := tx.QueryRow(ctx, `SELECT relay_port FROM settings WHERE singleton`).Scan(&relayPort); err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	manifest := bridgeprotocol.DesiredManifest{
+		SchemaVersion:    bridgeprotocol.ManifestSchemaVersionV2,
+		Target:           bridgeTarget(target),
+		ProfileID:        profileID,
+		ProfileRevision:  profileRevision,
+		Skills:           []bridgeprotocol.SkillMember{},
+		MCPServers:       []bridgeprotocol.MCPMember{},
+		ManagedMemberIDs: []string{},
+		RelayPort:        relayPort,
+	}
+	rows, err := tx.Query(ctx, `SELECT mr.server_id::text,mr.revision,mr.name,mr.transport,mr.command,mr.args,mr.url,mr.env_refs,mr.header_refs,mr.content_hash FROM relay_configuration_revision_mcp_servers pins JOIN mcp_revisions mr ON mr.id=pins.mcp_revision_id WHERE pins.relay_configuration_revision_id=$1 ORDER BY pins.position`, bundle.RelayConfigurationRevisionID)
+	if err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	for rows.Next() {
+		var member bridgeprotocol.MCPMember
+		if err := rows.Scan(&member.ServerID, &member.Revision, &member.Name, &member.Transport, &member.Command, &member.Args, &member.URL, &member.EnvRefs, &member.HeaderRefs, &member.ContentHash); err != nil {
+			rows.Close()
+			return bridgeprotocol.DesiredManifest{}, err
+		}
+		member.MemberID = stableMemberID("mcp", member.ServerID)
+		manifest.MCPServers = append(manifest.MCPServers, member)
+		manifest.ManagedMemberIDs = append(manifest.ManagedMemberIDs, member.MemberID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	rows.Close()
+	if err := attachRenderedRelayGovernance(&manifest, bundle, routingHash); err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	if err := manifest.Validate(true); err != nil {
+		return bridgeprotocol.DesiredManifest{}, fmt.Errorf("resolve relay manifest: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return bridgeprotocol.DesiredManifest{}, err
+	}
+	return manifest, nil
 }
 
 func (s *Store) ValidateManifestReferences(ctx context.Context, targetID string, manifest bridgeprotocol.DesiredManifest) error {
@@ -278,7 +331,30 @@ func (s *Store) ValidateManifestReferences(ctx context.Context, targetID string,
 			return errors.New("manifest relay port does not match Settings")
 		}
 		if manifest.SchemaVersion == bridgeprotocol.ManifestSchemaVersionV2 {
-			bundle, routingHash, err := s.RenderRoutingBundle(ctx)
+			if manifest.RelayGovernance == nil {
+				return ErrConflict
+			}
+			var pinned bridgeprotocol.RoutingBundle
+			if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &pinned); err != nil {
+				return ErrConflict
+			}
+			defaultProfileID := ""
+			if pinned.DefaultProfileID != nil {
+				defaultProfileID = *pinned.DefaultProfileID
+			}
+			published := make(map[string]string, len(pinned.Profiles))
+			for _, profile := range pinned.Profiles {
+				published[profile.ProfileID] = profile.ProfileRevisionID
+			}
+			candidate := RoutingBundleCandidate{
+				Mode:                         pinned.Mode,
+				RelayConfigurationRevisionID: pinned.RelayConfigurationRevisionID,
+				GlobalPolicyRevisionID:       pinned.GlobalPolicyRevisionID,
+				DefaultProfileID:             &defaultProfileID,
+				ReplacePublishedProfiles:     true,
+				PublishedProfileRevisions:    published,
+			}
+			bundle, routingHash, err := s.RenderCandidateRoutingBundle(ctx, candidate)
 			if err != nil {
 				return err
 			}
@@ -438,9 +514,47 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		seenTargets[item.TargetID] = true
 		confirmed = append(confirmed, item)
 	}
+	if len(confirmed) != 2 || !bridgeprotocol.IsSHA256(routingHash) {
+		return domain.Operation{}, ErrConflict
+	}
 	targetIDs := make([]string, 0, len(confirmed))
+	targetRuntime := make(map[string]string, len(confirmed))
+	var skillTargetID string
+	var relayTargetID string
 	for _, item := range confirmed {
 		targetIDs = append(targetIDs, item.TargetID)
+		var nodeKind, runtime string
+		if err := tx.QueryRow(ctx, `SELECT n.kind,t.runtime FROM targets t JOIN nodes n ON n.id=t.node_id WHERE t.id=$1 AND n.archived_at IS NULL`, item.TargetID).Scan(&nodeKind, &runtime); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return domain.Operation{}, ErrConflict
+			}
+			return domain.Operation{}, err
+		}
+		targetRuntime[item.TargetID] = runtime
+		if nodeKind != bridgeprotocol.NodeKindLocal || item.Manifest.Target.NodeKind != bridgeprotocol.NodeKindLocal || item.Manifest.Target.Runtime != runtime {
+			return domain.Operation{}, ErrConflict
+		}
+		switch runtime {
+		case profileClientKind:
+			if skillTargetID != "" {
+				return domain.Operation{}, ErrConflict
+			}
+			skillTargetID = item.TargetID
+		case domain.RuntimeSharedRelay:
+			if relayTargetID != "" || item.Manifest.RelayGovernance == nil {
+				return domain.Operation{}, ErrConflict
+			}
+			relayTargetID = item.TargetID
+		default:
+			return domain.Operation{}, ErrConflict
+		}
+	}
+	if skillTargetID == "" || relayTargetID == "" {
+		return domain.Operation{}, ErrConflict
+	}
+	var expectedPublishedProfileRevisionID string
+	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1),'')`, profileID).Scan(&expectedPublishedProfileRevisionID); err != nil {
+		return domain.Operation{}, err
 	}
 	if err := lockActiveTargets(ctx, tx, targetIDs); err != nil {
 		if errors.Is(err, ErrNotFound) {
@@ -449,24 +563,9 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		return domain.Operation{}, err
 	}
 	operationID := uuid.NewString()
-	metadata, _ := json.Marshal(map[string]any{"profileId": profileID, "profileRevisionId": currentProfileRevisionID, "targetCount": len(confirmed), "routingHash": routingHash})
+	metadata, _ := json.Marshal(map[string]any{"profileId": profileID, "profileRevisionId": currentProfileRevisionID, "targetCount": len(confirmed), "routingHash": routingHash, "expectedPublishedProfileRevisionId": expectedPublishedProfileRevisionID})
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,'apply','queued',$2,$3,$4,$5)`, operationID, profileID, nullableText(idempotencyKey), requestHash, jsonText(metadata)); err != nil {
 		return domain.Operation{}, err
-	}
-	targetRuntime := make(map[string]string, len(confirmed))
-	for _, item := range confirmed {
-		var runtime string
-		if err := tx.QueryRow(ctx, `SELECT runtime FROM targets WHERE id=$1`, item.TargetID).Scan(&runtime); err != nil {
-			return domain.Operation{}, err
-		}
-		targetRuntime[item.TargetID] = runtime
-	}
-	var skillTargetID string
-	for _, item := range confirmed {
-		if targetRuntime[item.TargetID] != domain.RuntimeSharedRelay {
-			skillTargetID = item.TargetID
-			break
-		}
 	}
 	rowIDs := make(map[string]string, len(confirmed))
 	for _, item := range confirmed {
@@ -548,6 +647,21 @@ func (s *Store) PinDesiredSnapshot(ctx context.Context, targetID, sourceKind, so
 	if manifest.Target.ID != targetID {
 		return domain.DesiredSnapshot{}, errors.New("manifest target does not match snapshot target")
 	}
+	var routingBundleCanonical any
+	if manifest.SchemaVersion == bridgeprotocol.ManifestSchemaVersionV2 {
+		if manifest.RelayGovernance == nil {
+			return domain.DesiredSnapshot{}, ErrConflict
+		}
+		var routingBundle bridgeprotocol.RoutingBundle
+		if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &routingBundle); err != nil {
+			return domain.DesiredSnapshot{}, err
+		}
+		canonicalRouting, _, err := routingBundle.Canonical()
+		if err != nil {
+			return domain.DesiredSnapshot{}, err
+		}
+		routingBundleCanonical = canonicalRouting
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return domain.DesiredSnapshot{}, err
@@ -575,7 +689,7 @@ func (s *Store) PinDesiredSnapshot(ctx context.Context, targetID, sourceKind, so
 	if uuid.Validate(sourceID) == nil {
 		sourceValue = sourceID
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO desired_snapshots(id,target_id,revision,source_kind,source_id,source_operation_target_id,profile_revision,manifest_schema_version,manifest_hash,manifest) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, id, targetID, revision, sourceKind, sourceValue, operationTargetValue, manifest.ProfileRevision, manifest.SchemaVersion, hash, jsonText(body)); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO desired_snapshots(id,target_id,revision,source_kind,source_id,source_operation_target_id,profile_revision,manifest_schema_version,manifest_hash,manifest,routing_bundle_canonical) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, id, targetID, revision, sourceKind, sourceValue, operationTargetValue, manifest.ProfileRevision, manifest.SchemaVersion, hash, jsonText(body), routingBundleCanonical); err != nil {
 		return domain.DesiredSnapshot{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO target_desired_snapshots(target_id,snapshot_id,desired_revision,health,drift_summary,error_code,error_reason,updated_at) VALUES($1,$2,$3,'healthy','{}','','',now()) ON CONFLICT(target_id) DO UPDATE SET snapshot_id=EXCLUDED.snapshot_id,desired_revision=EXCLUDED.desired_revision,health='healthy',drift_summary='{}',error_code='',error_reason='',updated_at=now()`, targetID, id, revision); err != nil {

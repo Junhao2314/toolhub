@@ -7,9 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
-	canonicaljson "github.com/gibson042/canonicaljson-go"
+	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
@@ -85,8 +86,24 @@ type RoutingBundle struct {
 	Profiles                     []RoutingProfile `json:"profiles"`
 }
 
+// RoutingBundleCandidate overlays immutable candidate revisions on top of the
+// currently applied routing pointers. An empty scalar keeps the applied value;
+// a PublishedProfileRevisions entry with an empty revision removes that Profile.
+type RoutingBundleCandidate struct {
+	Mode                         string
+	RelayConfigurationRevisionID string
+	GlobalPolicyRevisionID       string
+	DefaultProfileID             *string
+	ReplacePublishedProfiles     bool
+	PublishedProfileRevisions    map[string]string
+}
+
 func (b RoutingBundle) Canonical() ([]byte, string, error) {
-	body, err := canonicaljson.Marshal(b)
+	encoded, err := json.Marshal(b)
+	if err != nil {
+		return nil, "", err
+	}
+	body, err := jsoncanonicalizer.Transform(encoded)
 	if err != nil {
 		return nil, "", err
 	}
@@ -313,6 +330,16 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 	if stringMetadata(metadata, "revisionId") != revisionID || stringMetadata(metadata, "routingHash") != routingHash {
 		return ErrConflict
 	}
+	var appliedRevisionID string
+	if err := tx.QueryRow(ctx, `SELECT applied_revision_id::text FROM relay_configuration_state WHERE singleton FOR UPDATE`).Scan(&appliedRevisionID); err != nil {
+		return err
+	}
+	if appliedRevisionID != stringMetadata(metadata, "expectedAppliedRelayConfigurationRevisionId") {
+		return ErrConflict
+	}
+	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{RelayConfigurationRevisionID: revisionID}, routingHash); err != nil {
+		return err
+	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM relay_configuration_revisions WHERE id=$1)`, revisionID).Scan(&exists); err != nil {
 		return err
@@ -321,6 +348,9 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 		return ErrNotFound
 	}
 	if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1,updated_at=now() WHERE singleton`, revisionID); err != nil {
+		return err
+	}
+	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "relay_configuration_apply"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -343,6 +373,17 @@ func (s *Store) FinalizeRelayDefaultProfile(ctx context.Context, operationID, pr
 	if stringMetadata(metadata, "defaultProfileId") != profileID {
 		return ErrConflict
 	}
+	var currentDefaultProfileID string
+	if err := tx.QueryRow(ctx, `SELECT coalesce(default_profile_id::text,'') FROM relay_configuration_state WHERE singleton FOR UPDATE`).Scan(&currentDefaultProfileID); err != nil {
+		return err
+	}
+	if currentDefaultProfileID != stringMetadata(metadata, "expectedDefaultProfileId") {
+		return ErrConflict
+	}
+	candidateDefaultProfileID := profileID
+	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{DefaultProfileID: &candidateDefaultProfileID}, stringMetadata(metadata, "routingHash")); err != nil {
+		return err
+	}
 	var value any
 	if strings.TrimSpace(profileID) != "" {
 		if uuid.Validate(profileID) != nil {
@@ -358,6 +399,9 @@ func (s *Store) FinalizeRelayDefaultProfile(ctx context.Context, operationID, pr
 		value = profileID
 	}
 	if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET default_profile_id=$1,updated_at=now() WHERE singleton`, value); err != nil {
+		return err
+	}
+	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "relay_default_profile"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -400,7 +444,16 @@ func (s *Store) FinalizeProfilePublish(ctx context.Context, operationID, profile
 	if stringMetadata(metadata, "profileRevisionId") != revisionID || stringMetadata(metadata, "routingHash") != routingHash {
 		return ErrConflict
 	}
+	if err := validatePublishedProfilePredecessorTx(ctx, tx, profileID, stringMetadata(metadata, "expectedPublishedProfileRevisionId")); err != nil {
+		return err
+	}
+	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profileID: revisionID}}, routingHash); err != nil {
+		return err
+	}
 	if err := publishProfileTx(ctx, tx, profileID, revisionID); err != nil {
+		return err
+	}
+	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "profile_publish"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -416,8 +469,32 @@ func (s *Store) FinalizeProfileUnpublish(ctx context.Context, operationID, profi
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := validateSucceededGovernanceReloadTx(ctx, tx, operationID, "apply", profileID, ""); err != nil {
+	metadata, err := validateSucceededGovernanceReloadTx(ctx, tx, operationID, "apply", profileID, "")
+	if err != nil {
 		return err
+	}
+	if err := validatePublishedProfilePredecessorTx(ctx, tx, profileID, stringMetadata(metadata, "expectedPublishedProfileRevisionId")); err != nil {
+		return err
+	}
+	var currentDefaultProfileID string
+	if err := tx.QueryRow(ctx, `SELECT coalesce(default_profile_id::text,'') FROM relay_configuration_state WHERE singleton FOR UPDATE`).Scan(&currentDefaultProfileID); err != nil {
+		return err
+	}
+	if currentDefaultProfileID != stringMetadata(metadata, "expectedDefaultProfileId") {
+		return ErrConflict
+	}
+	candidate := RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profileID: ""}}
+	if currentDefaultProfileID == profileID {
+		emptyDefault := ""
+		candidate.DefaultProfileID = &emptyDefault
+	}
+	if err := s.validateCandidateRoutingHashTx(ctx, tx, candidate, stringMetadata(metadata, "routingHash")); err != nil {
+		return err
+	}
+	if currentDefaultProfileID == profileID {
+		if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET default_profile_id=NULL,updated_at=now() WHERE singleton`); err != nil {
+			return err
+		}
 	}
 	command, err := tx.Exec(ctx, `DELETE FROM published_profiles WHERE profile_id=$1`, profileID)
 	if err != nil {
@@ -425,6 +502,89 @@ func (s *Store) FinalizeProfileUnpublish(ctx context.Context, operationID, profi
 	}
 	if command.RowsAffected() != 1 {
 		return ErrNotFound
+	}
+	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "profile_unpublish"); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) FinalizeProfileArchive(ctx context.Context, operationID, profileID string, expectedProfileRevision int64) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	metadata, err := validateSucceededGovernanceReloadTx(ctx, tx, operationID, "apply", profileID, "")
+	if err != nil {
+		return err
+	}
+	metadataRevision, ok := int64Metadata(metadata, "archiveProfileRevision")
+	if !ok || metadataRevision != expectedProfileRevision {
+		return ErrConflict
+	}
+	expectedPublishedRevisionID := stringMetadata(metadata, "expectedPublishedProfileRevisionId")
+	if expectedPublishedRevisionID == "" {
+		return ErrConflict
+	}
+	if err := validatePublishedProfilePredecessorTx(ctx, tx, profileID, expectedPublishedRevisionID); err != nil {
+		return err
+	}
+	var currentRevision int64
+	var archived bool
+	if err := tx.QueryRow(ctx, `SELECT revision,archived_at IS NOT NULL FROM profiles WHERE id=$1 FOR UPDATE`, profileID).Scan(&currentRevision, &archived); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if archived || currentRevision != expectedProfileRevision {
+		return ErrConflict
+	}
+	var currentDefaultProfileID string
+	if err := tx.QueryRow(ctx, `SELECT coalesce(default_profile_id::text,'') FROM relay_configuration_state WHERE singleton FOR UPDATE`).Scan(&currentDefaultProfileID); err != nil {
+		return err
+	}
+	if currentDefaultProfileID != stringMetadata(metadata, "expectedDefaultProfileId") {
+		return ErrConflict
+	}
+	candidate := RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profileID: ""}}
+	if currentDefaultProfileID == profileID {
+		emptyDefault := ""
+		candidate.DefaultProfileID = &emptyDefault
+	}
+	_, candidateHash, err := s.RenderCandidateRoutingBundleTx(ctx, tx, candidate)
+	if err != nil {
+		return err
+	}
+	if candidateHash != stringMetadata(metadata, "routingHash") {
+		return ErrConflict
+	}
+	if currentDefaultProfileID == profileID {
+		if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET default_profile_id=NULL,updated_at=now() WHERE singleton`); err != nil {
+			return err
+		}
+	}
+	command, err := tx.Exec(ctx, `DELETE FROM published_profiles WHERE profile_id=$1`, profileID)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	command, err = tx.Exec(ctx, `UPDATE profiles SET archived_at=now(),updated_at=now() WHERE id=$1 AND revision=$2 AND archived_at IS NULL`, profileID, expectedProfileRevision)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	auditMetadata, _ := json.Marshal(map[string]any{"operationId": operationID, "profileRevision": expectedProfileRevision})
+	if _, err := tx.Exec(ctx, `INSERT INTO audit_events(id,action,resource_type,resource_id,outcome,metadata) VALUES($1,'profile_archive','profile',$2,'success',$3)`, uuid.NewString(), profileID, jsonText(auditMetadata)); err != nil {
+		return err
+	}
+	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "profile_archive"); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -492,6 +652,9 @@ func validateSucceededGovernanceOperationTx(ctx context.Context, tx pgx.Tx, oper
 	if kind != expectedKind || status != "succeeded" || (expectedSourceID != "" && sourceID != expectedSourceID) {
 		return nil, ErrConflict
 	}
+	if stringMetadata(metadata, "governanceFinalizedAction") != "" {
+		return nil, ErrConflict
+	}
 	return metadata, nil
 }
 
@@ -511,10 +674,29 @@ func validateSucceededGovernanceReloadTx(ctx context.Context, tx pgx.Tx, operati
 	if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE ot.status='succeeded' AND ot.result->>'routingReloaded'='true' AND ot.result->>'routingHash'=$2) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=$1 AND t.runtime='shared-relay'`, operationID, expectedRoutingHash).Scan(&relayTargets, &reloadedRelayTargets); err != nil {
 		return nil, err
 	}
-	if relayTargets == 0 || reloadedRelayTargets != relayTargets {
+	if relayTargets != 1 || reloadedRelayTargets != 1 {
+		return nil, ErrConflict
+	}
+	var manifestJSON []byte
+	if err := tx.QueryRow(ctx, `SELECT ot.request->'manifest' FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=$1 AND t.runtime='shared-relay'`, operationID).Scan(&manifestJSON); err != nil {
+		return nil, err
+	}
+	manifest, err := bridgeprotocol.DecodeManifest(manifestJSON, true)
+	if err != nil || manifest.SchemaVersion != bridgeprotocol.ManifestSchemaVersionV2 || manifest.RelayGovernance == nil || manifest.RelayGovernance.RoutingHash != expectedRoutingHash {
 		return nil, ErrConflict
 	}
 	return metadata, nil
+}
+
+func (s *Store) validateCandidateRoutingHashTx(ctx context.Context, tx pgx.Tx, candidate RoutingBundleCandidate, expectedHash string) error {
+	_, actualHash, err := s.RenderCandidateRoutingBundleTx(ctx, tx, candidate)
+	if err != nil {
+		return err
+	}
+	if !bridgeprotocol.IsSHA256(expectedHash) || actualHash != expectedHash {
+		return ErrConflict
+	}
+	return nil
 }
 
 func stringMetadata(metadata json.RawMessage, key string) string {
@@ -524,6 +706,47 @@ func stringMetadata(metadata json.RawMessage, key string) string {
 	}
 	value, _ := values[key].(string)
 	return value
+}
+
+func int64Metadata(metadata json.RawMessage, key string) (int64, bool) {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(metadata, &values) != nil {
+		return 0, false
+	}
+	value, found := values[key]
+	if !found {
+		return 0, false
+	}
+	var result int64
+	if json.Unmarshal(value, &result) != nil {
+		return 0, false
+	}
+	return result, true
+}
+
+func validatePublishedProfilePredecessorTx(ctx context.Context, tx pgx.Tx, profileID, expectedRevisionID string) error {
+	var currentRevisionID string
+	if err := tx.QueryRow(ctx, `SELECT coalesce(pp.profile_revision_id::text,'') FROM profiles p LEFT JOIN published_profiles pp ON pp.profile_id=p.id WHERE p.id=$1 FOR UPDATE OF p`, profileID).Scan(&currentRevisionID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if currentRevisionID != expectedRevisionID {
+		return ErrConflict
+	}
+	return nil
+}
+
+func markGovernanceFinalizedTx(ctx context.Context, tx pgx.Tx, operationID, action string) error {
+	command, err := tx.Exec(ctx, `UPDATE operations SET metadata=jsonb_set(metadata,'{governanceFinalizedAction}',to_jsonb($2::text),true),updated_at=now() WHERE id=$1 AND NOT (metadata ? 'governanceFinalizedAction')`, operationID, action)
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (s *Store) ListPublishedProfiles(ctx context.Context) ([]domain.PublishedProfile, error) {
@@ -544,12 +767,16 @@ func (s *Store) ListPublishedProfiles(ctx context.Context) ([]domain.PublishedPr
 }
 
 func (s *Store) RenderRoutingBundle(ctx context.Context) (RoutingBundle, string, error) {
-	tx, err := s.pool.Begin(ctx)
+	return s.RenderCandidateRoutingBundle(ctx, RoutingBundleCandidate{})
+}
+
+func (s *Store) RenderCandidateRoutingBundle(ctx context.Context, candidate RoutingBundleCandidate) (RoutingBundle, string, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return RoutingBundle{}, "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	bundle, hash, err := s.RenderRoutingBundleTx(ctx, tx)
+	bundle, hash, err := s.RenderCandidateRoutingBundleTx(ctx, tx, candidate)
 	if err != nil {
 		return RoutingBundle{}, "", err
 	}
@@ -563,11 +790,39 @@ func (s *Store) RenderRoutingBundle(ctx context.Context) (RoutingBundle, string,
 // accepted contracts, policy decisions, and published profile rows are read
 // through the same transaction so the hash cannot describe a torn state.
 func (s *Store) RenderRoutingBundleTx(ctx context.Context, tx pgx.Tx) (RoutingBundle, string, error) {
+	return s.RenderCandidateRoutingBundleTx(ctx, tx, RoutingBundleCandidate{})
+}
+
+func (s *Store) RenderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, candidate RoutingBundleCandidate) (RoutingBundle, string, error) {
 	var bundle RoutingBundle
 	var relayID, relayHash, mode, globalID, globalHash string
 	var defaultProfile string
 	if err := tx.QueryRow(ctx, `SELECT s.mode,s.applied_revision_id::text,r.canonical_hash,coalesce(s.default_profile_id::text,''),g.applied_revision_id::text,gr.canonical_hash FROM relay_configuration_state s JOIN relay_configuration_revisions r ON r.id=s.applied_revision_id CROSS JOIN global_policy_state g JOIN global_policy_revisions gr ON gr.id=g.applied_revision_id WHERE s.singleton AND g.singleton`).Scan(&mode, &relayID, &relayHash, &defaultProfile, &globalID, &globalHash); err != nil {
 		return bundle, "", err
+	}
+	if candidate.Mode != "" {
+		mode = candidate.Mode
+	}
+	if candidate.RelayConfigurationRevisionID != "" {
+		relayID = candidate.RelayConfigurationRevisionID
+		if err := tx.QueryRow(ctx, `SELECT canonical_hash FROM relay_configuration_revisions WHERE id=$1`, relayID).Scan(&relayHash); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return bundle, "", ErrNotFound
+			}
+			return bundle, "", err
+		}
+	}
+	if candidate.GlobalPolicyRevisionID != "" {
+		globalID = candidate.GlobalPolicyRevisionID
+		if err := tx.QueryRow(ctx, `SELECT canonical_hash FROM global_policy_revisions WHERE id=$1`, globalID).Scan(&globalHash); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return bundle, "", ErrNotFound
+			}
+			return bundle, "", err
+		}
+	}
+	if candidate.DefaultProfileID != nil {
+		defaultProfile = strings.TrimSpace(*candidate.DefaultProfileID)
 	}
 	bundle = RoutingBundle{SchemaVersion: 1, Mode: mode, RelayConfigurationRevisionID: relayID, RelayConfigurationHash: relayHash, GlobalPolicyRevisionID: globalID, GlobalPolicyHash: globalHash, Servers: []RoutingServer{}, Profiles: []RoutingProfile{}}
 	if defaultProfile != "" {
@@ -648,29 +903,55 @@ func (s *Store) RenderRoutingBundleTx(ctx context.Context, tx pgx.Tx) (RoutingBu
 		}
 		bundle.Servers = append(bundle.Servers, server)
 	}
-	profileRows, err := tx.Query(ctx, `SELECT pp.profile_id::text,pp.profile_revision_id::text,pr.canonical_hash,pr.name,pr.client_kind FROM published_profiles pp JOIN profile_revisions pr ON pr.id=pp.profile_revision_id JOIN profiles p ON p.id=pp.profile_id WHERE p.archived_at IS NULL ORDER BY pp.profile_id`)
+	profileRows, err := tx.Query(ctx, `SELECT pp.profile_id::text,pp.profile_revision_id::text FROM published_profiles pp JOIN profiles p ON p.id=pp.profile_id WHERE p.archived_at IS NULL ORDER BY pp.profile_id`)
 	if err != nil {
 		return bundle, "", err
 	}
-	profiles := []RoutingProfile{}
+	profileRevisionIDs := map[string]string{}
 	for profileRows.Next() {
-		var profile RoutingProfile
-		if err := profileRows.Scan(&profile.ProfileID, &profile.ProfileRevisionID, &profile.ProfileRevisionHash, &profile.ProfileName, &profile.ClientKind); err != nil {
+		var profileID, revisionID string
+		if err := profileRows.Scan(&profileID, &revisionID); err != nil {
 			profileRows.Close()
 			return bundle, "", err
 		}
-		if profile.ClientKind != domain.RuntimeClaude && profile.ClientKind != domain.RuntimeCodex {
-			profileRows.Close()
-			return bundle, "", ErrConflict
-		}
-		profiles = append(profiles, profile)
+		profileRevisionIDs[profileID] = revisionID
 	}
 	if err := profileRows.Err(); err != nil {
 		profileRows.Close()
 		return bundle, "", err
 	}
 	profileRows.Close()
-	for _, profile := range profiles {
+	if candidate.ReplacePublishedProfiles {
+		profileRevisionIDs = map[string]string{}
+	}
+	for profileID, revisionID := range candidate.PublishedProfileRevisions {
+		if uuid.Validate(profileID) != nil {
+			return bundle, "", ErrNotFound
+		}
+		if strings.TrimSpace(revisionID) == "" {
+			delete(profileRevisionIDs, profileID)
+			continue
+		}
+		profileRevisionIDs[profileID] = revisionID
+	}
+	profileIDs := make([]string, 0, len(profileRevisionIDs))
+	for profileID := range profileRevisionIDs {
+		profileIDs = append(profileIDs, profileID)
+	}
+	sort.Strings(profileIDs)
+	for _, profileID := range profileIDs {
+		profile := RoutingProfile{ProfileID: profileID, ProfileRevisionID: profileRevisionIDs[profileID]}
+		var owner string
+		var archived bool
+		if err := tx.QueryRow(ctx, `SELECT pr.profile_id::text,pr.canonical_hash,pr.name,pr.client_kind,p.archived_at IS NOT NULL FROM profile_revisions pr JOIN profiles p ON p.id=pr.profile_id WHERE pr.id=$1`, profile.ProfileRevisionID).Scan(&owner, &profile.ProfileRevisionHash, &profile.ProfileName, &profile.ClientKind, &archived); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return bundle, "", ErrNotFound
+			}
+			return bundle, "", err
+		}
+		if owner != profile.ProfileID || archived || (profile.ClientKind != domain.RuntimeClaude && profile.ClientKind != domain.RuntimeCodex) {
+			return bundle, "", ErrConflict
+		}
 		serverRows, err := tx.Query(ctx, `SELECT g.server_id::text,g.mcp_revision_id::text,g.accepted_contract_revision_id::text,g.visibility_mode FROM profile_revision_mcp_governance g WHERE g.profile_revision_id=$1 ORDER BY g.server_id`, profile.ProfileRevisionID)
 		if err != nil {
 			return bundle, "", err
@@ -857,11 +1138,20 @@ func (s *Store) FinalizeProfileApply(ctx context.Context, operationID, profileID
 	if archived {
 		return ErrConflict
 	}
+	if err := validatePublishedProfilePredecessorTx(ctx, tx, profileID, stringMetadata(operationMetadata, "expectedPublishedProfileRevisionId")); err != nil {
+		return err
+	}
+	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profileID: profileRevisionID}}, routingHash); err != nil {
+		return err
+	}
 	if err := publishProfileTx(ctx, tx, profileID, profileRevisionID); err != nil {
 		return err
 	}
 	metadata, _ := json.Marshal(map[string]string{"operationId": operationID, "profileRevisionId": profileRevisionID})
 	if _, err := tx.Exec(ctx, `INSERT INTO audit_events(id,action,resource_type,resource_id,outcome,metadata) VALUES($1,'profile_publish','profile',$2,'success',$3)`, uuid.NewString(), profileID, jsonText(metadata)); err != nil {
+		return err
+	}
+	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "profile_apply"); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

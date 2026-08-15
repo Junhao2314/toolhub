@@ -1,6 +1,7 @@
 package bridgeprotocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -44,6 +45,39 @@ func TestRoutingBundleCanonicalUsesRFC8785CompatibleBytes(t *testing.T) {
 	}
 	if hash != "b0dc0aadba0c8903ac51e6e108c6a011348cb7d149118c560b0d462829bce1af" {
 		t.Fatalf("canonical hash=%s", hash)
+	}
+}
+
+func TestRoutingBundleCanonicalMatchesRFC8785NumberSerialization(t *testing.T) {
+	bundle := RoutingBundle{
+		SchemaVersion:                1,
+		Mode:                         "compatibility",
+		RelayConfigurationRevisionID: "00000000-0000-0000-0000-000000000001",
+		RelayConfigurationHash:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		GlobalPolicyRevisionID:       "00000000-0000-0000-0000-000000000002",
+		GlobalPolicyHash:             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Servers: []ServerContractDTO{{
+			ServerID:            "00000000-0000-0000-0000-000000000003",
+			ServerName:          "acemcp",
+			MCPConfigRevisionID: "00000000-0000-0000-0000-000000000004",
+			Tools: []RoutingToolDTO{{
+				ToolID:         "00000000-0000-0000-0000-000000000005",
+				Name:           "vector",
+				InputSchema:    map[string]any{"numbers": []any{333333333.33333329, 1e30, 4.50, 2e-3, 1e-27}},
+				Annotations:    map[string]any{},
+				GlobalDecision: "allow",
+				ReasonCodes:    []string{},
+			}},
+		}},
+		Profiles: []PublishedProfileDTO{},
+	}
+	body, _, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte(`"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27]`)
+	if !bytes.Contains(body, want) {
+		t.Fatalf("canonical body does not contain RFC 8785 number vector:\n%s", body)
 	}
 }
 

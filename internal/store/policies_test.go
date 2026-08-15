@@ -52,6 +52,27 @@ func TestSaveGlobalPolicyRejectsInvalidDecision(t *testing.T) {
 	}
 }
 
+func TestGlobalPolicyFinalizerRejectsASecondOperationWithStalePredecessor(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	first, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{CatalogVersion: policy.CatalogVersion, ExplicitOverrides: map[string]string{"first": policy.DecisionDeny}, UnclassifiedMutating: policy.DecisionConfirm, ReviewedReadOnly: policy.DecisionAllow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{Revision: first.Revision, CatalogVersion: policy.CatalogVersion, ExplicitOverrides: map[string]string{"second": policy.DecisionDeny}, UnclassifiedMutating: policy.DecisionConfirm, ReviewedReadOnly: policy.DecisionAllow})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstOperation := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": first.ID})
+	secondOperation := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": second.ID})
+	if err := st.FinalizeGlobalPolicyApply(ctx, firstOperation, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.FinalizeGlobalPolicyApply(ctx, secondOperation, second.ID); err != ErrConflict {
+		t.Fatalf("stale Global Policy operation returned %v, want conflict", err)
+	}
+}
+
 func TestProfileToolRuleCannotLowerGlobalCeiling(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)

@@ -280,7 +280,7 @@ func TestRelayProjectionMigrationUpgradesGenerationTwoDatabaseIntegration(t *tes
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='target_desired_snapshots' AND column_name LIKE 'relay_%'`).Scan(&relayColumns); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 5 || relayColumns != 5 {
+	if versions != 6 || relayColumns != 5 {
 		t.Fatalf("migration versions=%d relayColumns=%d", versions, relayColumns)
 	}
 	var partialAllowed bool
@@ -822,54 +822,60 @@ func TestArchivedTargetDoesNotConsumeProfileApplyConfirmationIntegration(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	node := bridgeprotocol.NodeInfo{NodeID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("salt:profile-archive")).String(), Name: "profile-archive", Kind: bridgeprotocol.NodeKindSalt, SaltMinionID: "profile-archive", Status: "online", Version: "3008.0"}
-	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
-		t.Fatal(err)
-	}
-	target := integrationTarget(t, st, "salt:profile-archive/claude")
-	manifest, err := st.ResolveProfileManifest(ctx, profile.ID, target.ID)
+	skillTarget := integrationTarget(t, st, "local/claude")
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	skillManifest, err := st.ResolveProfileManifest(ctx, profile.ID, skillTarget.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, target.ID, strings.Repeat("a", 64), manifest, bridgeprotocol.Diff{Add: []bridgeprotocol.DiffItem{}, Replace: []bridgeprotocol.DiffItem{}, Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{}}, 5*time.Minute)
+	relayManifest, err := st.ResolveProfileManifest(ctx, profile.ID, relayTarget.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertDiscoveredNodes(ctx, nil); err != nil {
+	emptyDiff := bridgeprotocol.Diff{Add: []bridgeprotocol.DiffItem{}, Replace: []bridgeprotocol.DiffItem{}, Delete: []bridgeprotocol.DiffItem{}, Excluded: []bridgeprotocol.DiffItem{}}
+	skillToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, skillTarget.ID, strings.Repeat("a", 64), skillManifest, emptyDiff, 5*time.Minute)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{token}, "apply-archive-fail"); !errors.Is(err, ErrConflict) {
+	relayToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, relayTarget.ID, strings.Repeat("b", 64), relayManifest, emptyDiff, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE nodes SET archived_at=now(),status='archived' WHERE kind='local' AND archived_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{skillToken, relayToken}, "apply-archive-fail"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("archived Apply error=%v want conflict", err)
 	}
-	var consumedAt *time.Time
-	if err := st.pool.QueryRow(ctx, `SELECT consumed_at FROM preflight_confirmations WHERE token_hash=$1`, security.TokenHash(token)).Scan(&consumedAt); err != nil {
+	var consumedCount int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM preflight_confirmations WHERE token_hash=ANY($1::bytea[]) AND consumed_at IS NOT NULL`, [][]byte{security.TokenHash(skillToken), security.TokenHash(relayToken)}).Scan(&consumedCount); err != nil {
 		t.Fatal(err)
 	}
-	if consumedAt != nil {
-		t.Fatalf("failed archived Apply consumed confirmation at %v", consumedAt)
+	if consumedCount != 0 {
+		t.Fatalf("failed archived Apply consumed %d confirmations", consumedCount)
 	}
-	if err := st.UpsertDiscoveredNodes(ctx, []bridgeprotocol.NodeInfo{node}); err != nil {
+	if _, err := st.pool.Exec(ctx, `UPDATE nodes SET archived_at=NULL,status='online' WHERE kind='local'`); err != nil {
 		t.Fatal(err)
 	}
-	operation, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{token}, "apply-archive-success")
+	operation, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{skillToken, relayToken}, "apply-archive-success")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if operation.Status != bridgeprotocol.OperationQueued {
 		t.Fatalf("restored Apply status=%q", operation.Status)
 	}
-	var operationTargetID, operationTargetTargetID string
-	if err := st.pool.QueryRow(ctx, `SELECT id::text,target_id::text FROM operation_targets WHERE operation_id=$1`, operation.ID).Scan(&operationTargetID, &operationTargetTargetID); err != nil {
+	var operationTargets int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM operation_targets WHERE operation_id=$1`, operation.ID).Scan(&operationTargets); err != nil {
 		t.Fatal(err)
 	}
-	if operationTargetTargetID != target.ID || operationTargetID == "" {
-		t.Fatalf("restored Apply target=%s want=%s", operationTargetTargetID, target.ID)
+	if operationTargets != 2 {
+		t.Fatalf("restored Apply target count=%d want=2", operationTargets)
 	}
-	if err := st.pool.QueryRow(ctx, `SELECT consumed_at FROM preflight_confirmations WHERE token_hash=$1`, security.TokenHash(token)).Scan(&consumedAt); err != nil {
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM preflight_confirmations WHERE token_hash=ANY($1::bytea[]) AND consumed_at IS NOT NULL`, [][]byte{security.TokenHash(skillToken), security.TokenHash(relayToken)}).Scan(&consumedCount); err != nil {
 		t.Fatal(err)
 	}
-	if consumedAt == nil {
-		t.Fatal("successful Apply did not consume confirmation")
+	if consumedCount != 2 {
+		t.Fatalf("successful Apply consumed %d confirmations want=2", consumedCount)
 	}
 }
 
