@@ -3,6 +3,7 @@ package bridgeprotocol
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"testing"
@@ -87,6 +88,45 @@ func TestManifestV2SharedRelayRequiresSecretFreeGovernanceAndCanonicalRoutingHas
 	nonRelay.RelayGovernance = &RelayGovernanceManifest{RelayConfigurationRevisionID: uuid.NewString(), RelayConfigurationHash: string(bytes.Repeat([]byte{'a'}, 64)), RoutingBundle: routingBody, RoutingHash: routingHash}
 	if err := nonRelay.Validate(true); err == nil {
 		t.Fatal("non-relay v2 accepted governance")
+	}
+}
+
+func TestManifestV2CanonicalHashSurvivesJSONBObjectKeyReordering(t *testing.T) {
+	manifest := validManifest()
+	manifest.Target = Target{ID: uuid.NewString(), NodeID: uuid.NewString(), NodeKind: NodeKindLocal, Runtime: RuntimeSharedRelay, ManagedUsername: "operator"}
+	manifest.Skills = []SkillMember{}
+	manifest.MCPServers = []MCPMember{}
+	manifest.ManagedMemberIDs = []string{}
+	manifest.RelayPort = 6276
+	manifest.SchemaVersion = ManifestSchemaVersionV2
+	routing := RoutingBundle{SchemaVersion: 1, Mode: "compatibility", RelayConfigurationRevisionID: uuid.NewString(), RelayConfigurationHash: string(bytes.Repeat([]byte{'a'}, 64)), GlobalPolicyRevisionID: uuid.NewString(), GlobalPolicyHash: string(bytes.Repeat([]byte{'b'}, 64))}
+	routingBody, routingHash, err := routing.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.RelayGovernance = &RelayGovernanceManifest{RelayConfigurationRevisionID: routing.RelayConfigurationRevisionID, RelayConfigurationHash: routing.RelayConfigurationHash, RoutingBundle: routingBody, RoutingHash: routingHash}
+	_, originalHash, err := manifest.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var routingFields map[string]json.RawMessage
+	if err := json.Unmarshal(routingBody, &routingFields); err != nil {
+		t.Fatal(err)
+	}
+	reorderedRouting := []byte(fmt.Sprintf(`{"relayConfigurationRevisionId":%s,"relayConfigurationHash":%s,"globalPolicyRevisionId":%s,"globalPolicyHash":%s,"defaultProfileId":%s,"schemaVersion":%s,"profiles":%s,"servers":%s,"mode":%s}`,
+		routingFields["relayConfigurationRevisionId"], routingFields["relayConfigurationHash"], routingFields["globalPolicyRevisionId"], routingFields["globalPolicyHash"], routingFields["defaultProfileId"], routingFields["schemaVersion"], routingFields["profiles"], routingFields["servers"], routingFields["mode"]))
+	manifest.RelayGovernance.RoutingBundle = reorderedRouting
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeManifest(body, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, decodedHash, canonicalErr := decoded.Canonical()
+	if canonicalErr != nil || decodedHash != originalHash {
+		t.Fatalf("JSONB key reordering changed v2 manifest hash: original=%s decoded=%s err=%v", originalHash, decodedHash, canonicalErr)
 	}
 }
 

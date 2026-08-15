@@ -153,6 +153,24 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 	for _, pin := range pins.MCP {
 		profileServers[pin.ServerID] = struct{}{}
 	}
+	governance := make(map[string]ProfileMCPGovernanceInput, len(input.MCPGovernance))
+	for _, item := range input.MCPGovernance {
+		if item.ServerID == "" || item.VisibilityMode == "" {
+			return "", "", errors.New("invalid Profile MCP governance")
+		}
+		if item.VisibilityMode != "all_accepted" && item.VisibilityMode != "selected" && item.VisibilityMode != "hidden" {
+			return "", "", errors.New("invalid Profile MCP visibility")
+		}
+		if _, exists := governance[item.ServerID]; exists {
+			return "", "", errors.New("duplicate Profile MCP governance")
+		}
+		governance[item.ServerID] = item
+	}
+	for serverID := range governance {
+		if _, ok := profileServers[serverID]; !ok {
+			return "", "", ErrConflict
+		}
+	}
 	for _, rule := range input.ToolRules {
 		var serverID string
 		if err := tx.QueryRow(ctx, `SELECT server_id::text FROM mcp_tools WHERE id=$1`, rule.ToolID).Scan(&serverID); err != nil {
@@ -162,6 +180,17 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 			return "", "", err
 		}
 		if _, ok := profileServers[serverID]; !ok {
+			return "", "", ErrConflict
+		}
+		contractRevisionID := strings.TrimSpace(governance[serverID].AcceptedContractRevisionID)
+		if contractRevisionID == "" {
+			return "", "", ErrConflict
+		}
+		var acceptedTool bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcp_contract_revision_tools WHERE contract_revision_id=$1 AND tool_id=$2)`, contractRevisionID, rule.ToolID).Scan(&acceptedTool); err != nil {
+			return "", "", err
+		}
+		if !acceptedTool {
 			return "", "", ErrConflict
 		}
 	}
@@ -199,24 +228,6 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 			return "", "", err
 		}
 	}
-	governance := make(map[string]ProfileMCPGovernanceInput, len(input.MCPGovernance))
-	for _, item := range input.MCPGovernance {
-		if item.ServerID == "" || item.VisibilityMode == "" {
-			return "", "", errors.New("invalid Profile MCP governance")
-		}
-		if item.VisibilityMode != "all_accepted" && item.VisibilityMode != "selected" && item.VisibilityMode != "hidden" {
-			return "", "", errors.New("invalid Profile MCP visibility")
-		}
-		if _, exists := governance[item.ServerID]; exists {
-			return "", "", errors.New("duplicate Profile MCP governance")
-		}
-		governance[item.ServerID] = item
-	}
-	for serverID := range governance {
-		if _, ok := profileServers[serverID]; !ok {
-			return "", "", ErrConflict
-		}
-	}
 	for _, pin := range pins.MCP {
 		item := governance[pin.ServerID]
 		if item.MCPRevisionID != "" && item.MCPRevisionID != pin.RevisionID {
@@ -224,6 +235,14 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 		}
 		if item.VisibilityMode == "" {
 			item.VisibilityMode = "all_accepted"
+		}
+		var acceptedRevisionID string
+		err := tx.QueryRow(ctx, `SELECT coalesce(accepted_revision_id::text,'') FROM mcp_contract_state WHERE server_id=$1`, pin.ServerID).Scan(&acceptedRevisionID)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return "", "", err
+		}
+		if strings.TrimSpace(item.AcceptedContractRevisionID) != acceptedRevisionID {
+			return "", "", ErrConflict
 		}
 		var accepted any
 		if strings.TrimSpace(item.AcceptedContractRevisionID) != "" {
@@ -237,6 +256,9 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_tool_rules(profile_revision_id,tool_id,visible,decision,reason_codes) VALUES($1,$2,$3,$4,$5)`, revisionID, rule.ToolID, rule.Visible, rule.Decision, rule.ReasonCodes); err != nil {
 			return "", "", err
 		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_seals(profile_revision_id) VALUES($1)`, revisionID); err != nil {
+		return "", "", err
 	}
 	if err := replaceProfileHeadProjection(ctx, tx, id, pins); err != nil {
 		return "", "", err
@@ -590,14 +612,25 @@ func profileMCPRevisions(profile domain.Profile) map[string]string {
 }
 
 func (s *Store) ArchiveProfile(ctx context.Context, id string, expectedRevision int64) error {
-	command, err := s.pool.Exec(ctx, `UPDATE profiles SET archived_at=now(),updated_at=now() WHERE id=$1 AND revision=$2 AND archived_at IS NULL`, id, expectedRevision)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	command, err := tx.Exec(ctx, `UPDATE profiles SET archived_at=now(),updated_at=now() WHERE id=$1 AND revision=$2 AND archived_at IS NULL`, id, expectedRevision)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
 		return ErrConflict
 	}
-	return nil
+	if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET default_profile_id=NULL,updated_at=now() WHERE default_profile_id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM published_profiles WHERE profile_id=$1`, id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // DeleteProfile is retained for the existing Browser route and now performs

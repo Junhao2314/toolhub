@@ -272,6 +272,19 @@ func (m DesiredManifest) Canonical() ([]byte, string, error) {
 	if err := m.Validate(true); err != nil {
 		return nil, "", err
 	}
+	if m.SchemaVersion == ManifestSchemaVersionV2 && m.RelayGovernance != nil {
+		var bundle RoutingBundle
+		if err := decodeStrictGovernance(m.RelayGovernance.RoutingBundle, &bundle); err != nil {
+			return nil, "", fmt.Errorf("canonicalize relay routing bundle: %w", err)
+		}
+		canonicalBundle, _, err := bundle.Canonical()
+		if err != nil {
+			return nil, "", err
+		}
+		governance := *m.RelayGovernance
+		governance.RoutingBundle = canonicalBundle
+		m.RelayGovernance = &governance
+	}
 	body, err := json.Marshal(m)
 	if err != nil {
 		return nil, "", err

@@ -547,7 +547,7 @@ components:
     RoutingBundle:
       type: object
       additionalProperties: false
-      required: [schemaVersion, mode, relayConfigurationRevisionId, relayConfigurationHash, globalPolicyRevisionId, globalPolicyHash, profiles]
+      required: [schemaVersion, mode, relayConfigurationRevisionId, relayConfigurationHash, globalPolicyRevisionId, globalPolicyHash, defaultProfileId, servers, profiles]
       properties:
         schemaVersion: {const: 1}
         mode: {type: string, enum: [compatibility, enforced]}
@@ -555,37 +555,69 @@ components:
         relayConfigurationHash: {$ref: '#/components/schemas/SHA256'}
         globalPolicyRevisionId: {$ref: '#/components/schemas/UUID'}
         globalPolicyHash: {$ref: '#/components/schemas/SHA256'}
-        profiles: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/RoutingProfile'}}
-    RoutingProfile:
+        defaultProfileId: {$ref: '#/components/schemas/UUID', nullable: true}
+        servers: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ServerContract'}}
+        profiles: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/PublishedProfile'}}
+    ServerContract:
       type: object
       additionalProperties: false
-      required: [profileId, profileRevisionId, clientKind, category, variant, servers, toolRules]
+      required: [serverId, serverName, mcpConfigRevisionId, acceptedContractRevisionId, acceptedContractHash, tools]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        serverName: {type: string, minLength: 1, maxLength: 256}
+        mcpConfigRevisionId: {$ref: '#/components/schemas/UUID'}
+        acceptedContractRevisionId: {$ref: '#/components/schemas/UUID', nullable: true}
+        acceptedContractHash: {$ref: '#/components/schemas/SHA256', nullable: true}
+        tools: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/RoutingTool'}}
+    RoutingTool:
+      type: object
+      additionalProperties: false
+      required: [toolId, name, inputSchema, outputSchema, annotations, globalDecision, reasonCodes, paused]
+      properties:
+        toolId: {$ref: '#/components/schemas/UUID'}
+        name: {type: string, minLength: 1, maxLength: 256}
+        inputSchema: {type: object}
+        outputSchema: {type: object, nullable: true}
+        annotations: {type: object}
+        globalDecision: {type: string, enum: [allow, confirm, deny]}
+        reasonCodes: {type: array, maxItems: 32, items: {type: string, maxLength: 128}}
+        paused: {type: boolean}
+    PublishedProfile:
+      type: object
+      additionalProperties: false
+      required: [profileId, profileRevisionId, profileRevisionHash, profileName, clientKind, servers]
       properties:
         profileId: {$ref: '#/components/schemas/UUID'}
         profileRevisionId: {$ref: '#/components/schemas/UUID'}
-        clientKind: {type: string, enum: [claude, codex, shared]}
-        category: {type: string, maxLength: 120}
-        variant: {type: string, minLength: 1, maxLength: 64}
-        servers: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/RoutingServer'}}
-        toolRules: {type: array, maxItems: 20000, items: {$ref: '#/components/schemas/ToolRule'}}
-    RoutingServer:
+        profileRevisionHash: {$ref: '#/components/schemas/SHA256'}
+        profileName: {type: string, minLength: 1, maxLength: 256}
+        clientKind: {type: string, enum: [claude, codex]}
+        servers: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileServerRouting'}}
+    ProfileServerRouting:
       type: object
       additionalProperties: false
-      required: [serverId, mcpRevisionId, visibilityMode]
+      required: [serverId, mcpConfigRevisionId, acceptedContractRevisionId, visibilityMode, toolOverrides, toolRules]
       properties:
         serverId: {$ref: '#/components/schemas/UUID'}
-        mcpRevisionId: {$ref: '#/components/schemas/UUID'}
-        acceptedContractRevisionId: {$ref: '#/components/schemas/UUID'}
+        mcpConfigRevisionId: {$ref: '#/components/schemas/UUID'}
+        acceptedContractRevisionId: {$ref: '#/components/schemas/UUID', nullable: true}
         visibilityMode: {type: string, enum: [all_accepted, selected, hidden]}
-    ToolRule:
+        toolOverrides: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/ToolVisibilityOverride'}}
+        toolRules: {type: array, maxItems: 20000, items: {$ref: '#/components/schemas/ToolPolicyRule'}}
+    ToolVisibilityOverride:
       type: object
       additionalProperties: false
-      required: [toolId, visible, decision]
+      required: [toolId, visible]
       properties:
         toolId: {$ref: '#/components/schemas/UUID'}
         visible: {type: boolean}
+    ToolPolicyRule:
+      type: object
+      additionalProperties: false
+      required: [toolId, decision]
+      properties:
+        toolId: {$ref: '#/components/schemas/UUID'}
         decision: {type: string, enum: [allow, confirm, deny]}
-        reasonCodes: {type: array, maxItems: 16, items: {type: string, maxLength: 64}}
     RelayCapabilityResponse:
       type: object
       additionalProperties: false

@@ -77,6 +77,27 @@ func TestObserveContractsCreatesImmutableRevisionAndStatusesChanges(t *testing.T
 	if third.Statuses["list_items"] != ContractToolPausedIncompatible {
 		t.Fatalf("changed tool status=%q want %q", third.Statuses["list_items"], ContractToolPausedIncompatible)
 	}
+	rows, err := st.pool.Query(ctx, `SELECT t.name,crt.status FROM mcp_contract_revision_tools crt JOIN mcp_tools t ON t.id=crt.tool_id WHERE crt.contract_revision_id=$1 ORDER BY t.name`, third.Revision.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := map[string]string{}
+	for rows.Next() {
+		var name, status string
+		if err := rows.Scan(&name, &status); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		persisted[name] = status
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
+	rows.Close()
+	if persisted["new_item"] != ContractToolNewHidden || persisted["list_items"] != ContractToolPausedIncompatible {
+		t.Fatalf("persisted contract statuses=%v", persisted)
+	}
 	var toolID string
 	if err := st.pool.QueryRow(ctx, `SELECT id::text FROM mcp_tools WHERE server_id=$1 AND name='list_items'`, server.ID).Scan(&toolID); err != nil {
 		t.Fatal(err)
@@ -122,7 +143,8 @@ func TestSuspectedRenameConfirmationInheritsExplicitGovernance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ApplyGlobalPolicy(ctx, global.ID); err != nil {
+	opID := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": global.ID})
+	if err := st.FinalizeGlobalPolicyApply(ctx, opID, global.ID); err != nil {
 		t.Fatal(err)
 	}
 	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
@@ -130,6 +152,14 @@ func TestSuspectedRenameConfirmationInheritsExplicitGovernance(t *testing.T) {
 		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
 		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: oldObservation.Revision.ID, VisibilityMode: "all_accepted"}},
 		ToolRules:     []ProfileToolRuleInput{{ToolID: oldToolID, Decision: "deny", Visible: true, ReasonCodes: []string{"operator_review"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	implicitProfile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-rename-all", ClientKind: "claude", Category: "coding", Variant: "standard",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: oldObservation.Revision.ID, VisibilityMode: "all_accepted"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -166,5 +196,30 @@ func TestSuspectedRenameConfirmationInheritsExplicitGovernance(t *testing.T) {
 	}
 	if inherited != "confirm" {
 		t.Fatalf("inherited global override=%q", inherited)
+	}
+	implicitProfile, err = st.Profile(ctx, implicitProfile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if implicitProfile.Revision != 2 {
+		t.Fatalf("all_accepted profile did not receive rename candidate: revision=%d", implicitProfile.Revision)
+	}
+	governance, rules, err := st.profileGovernanceInputs(ctx, implicitProfile.CurrentRevisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(governance) != 1 || governance[0].AcceptedContractRevisionID != newObservation.Revision.ID {
+		t.Fatalf("all_accepted rename governance=%+v", governance)
+	}
+	expectedHash, err := CanonicalGovernedProfileHash(ProfileInput{
+		Name: implicitProfile.Name, Description: implicitProfile.Description, ClientKind: implicitProfile.ClientKind,
+		Category: implicitProfile.Category, Variant: implicitProfile.Variant, MigrationState: implicitProfile.MigrationState,
+		MCPGovernance: governance, ToolRules: rules,
+	}, implicitProfile.Skills, implicitProfile.MCPServers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if implicitProfile.CanonicalHash != expectedHash {
+		t.Fatalf("rename candidate hash=%s want canonical=%s", implicitProfile.CanonicalHash, expectedHash)
 	}
 }

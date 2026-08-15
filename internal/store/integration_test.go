@@ -280,7 +280,7 @@ func TestRelayProjectionMigrationUpgradesGenerationTwoDatabaseIntegration(t *tes
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='target_desired_snapshots' AND column_name LIKE 'relay_%'`).Scan(&relayColumns); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 4 || relayColumns != 5 {
+	if versions != 5 || relayColumns != 5 {
 		t.Fatalf("migration versions=%d relayColumns=%d", versions, relayColumns)
 	}
 	var partialAllowed bool
@@ -818,7 +818,7 @@ func TestArchivedTargetDoesNotConsumeProfileApplyConfirmationIntegration(t *test
 	if err := st.BootstrapEnvironment(ctx, "integration-host", "runner", "UTC", 6276); err != nil {
 		t.Fatal(err)
 	}
-	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "Archive race", SkillIDs: []string{}, MCPServerIDs: []string{}})
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "Archive race", ClientKind: "claude", SkillIDs: []string{}, MCPServerIDs: []string{}})
 	if err != nil {
 		t.Fatal(err)
 	}

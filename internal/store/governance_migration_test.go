@@ -88,6 +88,28 @@ func TestGovernanceMigrationBackfillIsDeterministicAndCompatibilitySafe(t *testi
 	}
 }
 
+func TestGovernanceManifestV2MigrationMatchesBridgeContract(t *testing.T) {
+	body, err := migrationFS.ReadFile("migrations/005_mcp_profile_routing_governance_contract.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"routingBundle",
+		"routingHash",
+		"jsonb_typeof(governance->'routingBundle')",
+		"validate_desired_manifest_v1",
+		"profile_revision_mcp_governance_immutable_insert",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("manifest contract migration is missing %q", required)
+		}
+	}
+	if strings.Contains(sql, "routingBundleHash") {
+		t.Fatal("manifest contract migration retains the incompatible routingBundleHash field")
+	}
+}
+
 func TestGovernanceDomainModelsHaveNoSecretOrPayloadFields(t *testing.T) {
 	forbidden := map[string]struct{}{
 		"secretValues": {}, "ciphertext": {}, "arguments": {}, "result": {},
@@ -168,7 +190,7 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 	if err := upgrade.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 4 {
+	if versions != 5 {
 		t.Fatalf("migration reran or skipped: versions=%d", versions)
 	}
 }
@@ -199,8 +221,8 @@ func assertGovernanceMigrationState(t *testing.T, st *Store) {
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 4 {
-		t.Fatalf("migration versions=%d want 4", versions)
+	if versions != 5 {
+		t.Fatalf("migration versions=%d want 5", versions)
 	}
 	var generation string
 	if err := st.pool.QueryRow(ctx, `SELECT value FROM app_meta WHERE key='schema_generation'`).Scan(&generation); err != nil {
@@ -308,7 +330,8 @@ func TestGovernanceSchemaInvariantsIntegration(t *testing.T) {
 	v2["relayGovernance"] = map[string]any{
 		"relayConfigurationRevisionId": uuid.NewString(),
 		"relayConfigurationHash":       strings.Repeat("d", 64),
-		"routingBundleHash":            strings.Repeat("e", 64),
+		"routingBundle":                map[string]any{"schemaVersion": 1},
+		"routingHash":                  strings.Repeat("e", 64),
 	}
 	v2Body, err := json.Marshal(v2)
 	if err != nil {

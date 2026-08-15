@@ -83,6 +83,9 @@ func (s *Store) ResolveProfileManifest(ctx context.Context, profileID, targetID 
 	}
 	if target.Runtime == domain.RuntimeSharedRelay {
 		manifest.RelayPort = settings.RelayPort
+		if err := s.attachRelayGovernance(ctx, &manifest); err != nil {
+			return bridgeprotocol.DesiredManifest{}, err
+		}
 	}
 	if err := manifest.Validate(true); err != nil {
 		return bridgeprotocol.DesiredManifest{}, fmt.Errorf("resolve Profile manifest: %w", err)
@@ -170,6 +173,9 @@ func (s *Store) ResolveTargetManifest(ctx context.Context, targetID string, skil
 			return bridgeprotocol.DesiredManifest{}, err
 		}
 		manifest.RelayPort = settings.RelayPort
+		if err := s.attachRelayGovernance(ctx, &manifest); err != nil {
+			return bridgeprotocol.DesiredManifest{}, err
+		}
 	}
 	manifest.Normalize()
 	if err := manifest.Validate(true); err != nil {
@@ -224,8 +230,33 @@ func (s *Store) DesiredManifestOrEmpty(ctx context.Context, targetID string) (br
 			return bridgeprotocol.DesiredManifest{}, err
 		}
 		manifest.RelayPort = settings.RelayPort
+		if err := s.attachRelayGovernance(ctx, &manifest); err != nil {
+			return bridgeprotocol.DesiredManifest{}, err
+		}
 	}
 	return manifest, manifest.Validate(true)
+}
+
+func (s *Store) attachRelayGovernance(ctx context.Context, manifest *bridgeprotocol.DesiredManifest) error {
+	bundle, hash, err := s.RenderRoutingBundle(ctx)
+	if err != nil {
+		return err
+	}
+	body, canonicalHash, err := bundle.Canonical()
+	if err != nil {
+		return err
+	}
+	if canonicalHash != hash {
+		return errors.New("routing bundle hash changed during render")
+	}
+	manifest.SchemaVersion = bridgeprotocol.ManifestSchemaVersionV2
+	manifest.RelayGovernance = &bridgeprotocol.RelayGovernanceManifest{
+		RelayConfigurationRevisionID: bundle.RelayConfigurationRevisionID,
+		RelayConfigurationHash:       bundle.RelayConfigurationHash,
+		RoutingBundle:                json.RawMessage(body),
+		RoutingHash:                  hash,
+	}
+	return nil
 }
 
 func (s *Store) ValidateManifestReferences(ctx context.Context, targetID string, manifest bridgeprotocol.DesiredManifest) error {
@@ -245,6 +276,15 @@ func (s *Store) ValidateManifestReferences(ctx context.Context, targetID string,
 		}
 		if manifest.RelayPort != settings.RelayPort {
 			return errors.New("manifest relay port does not match Settings")
+		}
+		if manifest.SchemaVersion == bridgeprotocol.ManifestSchemaVersionV2 {
+			bundle, routingHash, err := s.RenderRoutingBundle(ctx)
+			if err != nil {
+				return err
+			}
+			if manifest.RelayGovernance == nil || manifest.RelayGovernance.RelayConfigurationRevisionID != bundle.RelayConfigurationRevisionID || manifest.RelayGovernance.RelayConfigurationHash != bundle.RelayConfigurationHash || manifest.RelayGovernance.RoutingHash != routingHash {
+				return ErrConflict
+			}
 		}
 	}
 	if err := manifest.Validate(true); err != nil {
@@ -349,13 +389,16 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		}
 	}
 	var currentProfileRevision int64
-	if err := tx.QueryRow(ctx, `SELECT p.revision FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1 AND p.archived_at IS NULL AND NOT pr.pending_bindings FOR SHARE OF p`, profileID).Scan(&currentProfileRevision); errors.Is(err, pgx.ErrNoRows) {
+	var currentProfileRevisionID string
+	var profileClientKind string
+	if err := tx.QueryRow(ctx, `SELECT p.revision,p.current_revision_id::text,p.client_kind FROM profiles p JOIN profile_revisions pr ON pr.id=p.current_revision_id WHERE p.id=$1 AND p.archived_at IS NULL AND NOT pr.pending_bindings FOR SHARE OF p`, profileID).Scan(&currentProfileRevision, &currentProfileRevisionID, &profileClientKind); errors.Is(err, pgx.ErrNoRows) {
 		return domain.Operation{}, ErrNotFound
 	} else if err != nil {
 		return domain.Operation{}, err
 	}
 	confirmed := make([]ConfirmedPreflight, 0, len(tokens))
 	seenTargets := map[string]bool{}
+	routingHash := ""
 	for _, token := range tokens {
 		var item ConfirmedPreflight
 		var manifestJSON, diffJSON []byte
@@ -380,6 +423,18 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		if err := json.Unmarshal(diffJSON, &item.Diff); err != nil {
 			return domain.Operation{}, err
 		}
+		if item.Manifest.Target.Runtime == domain.RuntimeClaude && profileClientKind != domain.RuntimeClaude {
+			return domain.Operation{}, ErrConflict
+		}
+		if item.Manifest.Target.Runtime == domain.RuntimeCodex && profileClientKind != domain.RuntimeCodex {
+			return domain.Operation{}, ErrConflict
+		}
+		if item.Manifest.RelayGovernance != nil {
+			if routingHash != "" && routingHash != item.Manifest.RelayGovernance.RoutingHash {
+				return domain.Operation{}, ErrConflict
+			}
+			routingHash = item.Manifest.RelayGovernance.RoutingHash
+		}
 		seenTargets[item.TargetID] = true
 		confirmed = append(confirmed, item)
 	}
@@ -394,7 +449,7 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		return domain.Operation{}, err
 	}
 	operationID := uuid.NewString()
-	metadata, _ := json.Marshal(map[string]any{"profileId": profileID, "targetCount": len(confirmed)})
+	metadata, _ := json.Marshal(map[string]any{"profileId": profileID, "profileRevisionId": currentProfileRevisionID, "targetCount": len(confirmed), "routingHash": routingHash})
 	if _, err := tx.Exec(ctx, `INSERT INTO operations(id,kind,status,source_id,idempotency_key,request_hash,metadata) VALUES($1,'apply','queued',$2,$3,$4,$5)`, operationID, profileID, nullableText(idempotencyKey), requestHash, jsonText(metadata)); err != nil {
 		return domain.Operation{}, err
 	}
@@ -422,15 +477,19 @@ func (s *Store) CreateProfileApplyOperation(ctx context.Context, profileID strin
 		if err != nil {
 			return domain.Operation{}, err
 		}
-		var dependency any
-		if targetRuntime[item.TargetID] == domain.RuntimeSharedRelay && skillTargetID != "" {
-			dependency = rowIDs[skillTargetID]
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,request) VALUES($1,$2,$3,$4,$5)`, rowIDs[item.TargetID], operationID, item.TargetID, dependency, jsonText(targetRequest)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,request) VALUES($1,$2,$3,$4)`, rowIDs[item.TargetID], operationID, item.TargetID, jsonText(targetRequest)); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 				return domain.Operation{}, ErrOperationActive
 			}
+			return domain.Operation{}, err
+		}
+	}
+	for _, item := range confirmed {
+		if targetRuntime[item.TargetID] != domain.RuntimeSharedRelay || skillTargetID == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET depends_on_target_id=$2 WHERE id=$1`, rowIDs[item.TargetID], rowIDs[skillTargetID]); err != nil {
 			return domain.Operation{}, err
 		}
 	}

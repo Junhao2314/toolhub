@@ -28,7 +28,8 @@ func TestSaveGlobalPolicyOnlyMovesDraftPointerUntilApply(t *testing.T) {
 	if current != 2 || applied != 1 {
 		t.Fatalf("policy pointers=%d/%d", current, applied)
 	}
-	if err := st.ApplyGlobalPolicy(ctx, created.ID); err != nil {
+	opID := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": created.ID})
+	if err := st.FinalizeGlobalPolicyApply(ctx, opID, created.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.pool.QueryRow(ctx, `SELECT r.revision,ar.revision FROM global_policy_state s JOIN global_policy_revisions r ON r.id=s.current_revision_id JOIN global_policy_revisions ar ON ar.id=s.applied_revision_id WHERE s.singleton`).Scan(&current, &applied); err != nil {
@@ -73,7 +74,8 @@ func TestProfileToolRuleCannotLowerGlobalCeiling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ApplyGlobalPolicy(ctx, global.ID); err != nil {
+	opID := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": global.ID})
+	if err := st.FinalizeGlobalPolicyApply(ctx, opID, global.ID); err != nil {
 		t.Fatal(err)
 	}
 	_, err = st.SaveProfile(ctx, uuid.NewString(), ProfileInput{

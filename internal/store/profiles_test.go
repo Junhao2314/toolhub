@@ -60,3 +60,70 @@ func TestProfileReportsEffectiveVisibleCount(t *testing.T) {
 		t.Fatalf("effective visible count=%d want 1", profile.EffectiveVisibleCount)
 	}
 }
+
+func TestSaveProfileRequiresCurrentAcceptedContractPin(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "accepted-pin", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, accepted.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}, {Name: "new_item", Mutating: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := ProfileInput{Name: "claude-pin", ClientKind: "claude", Category: "coding", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}}
+	for name, contractID := range map[string]string{"missing": "", "latest-unaccepted": latest.Revision.ID} {
+		t.Run(name, func(t *testing.T) {
+			input := base
+			input.Name += "-" + name
+			input.MCPGovernance = []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: contractID, VisibilityMode: "all_accepted"}}
+			if _, err := st.SaveProfile(ctx, uuid.NewString(), input); err != ErrConflict {
+				t.Fatalf("contract pin %q returned %v, want conflict", contractID, err)
+			}
+		})
+	}
+	base.MCPGovernance = []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: accepted.Revision.ID, VisibilityMode: "all_accepted"}}
+	if _, err := st.SaveProfile(ctx, uuid.NewString(), base); err != nil {
+		t.Fatalf("current accepted contract pin rejected: %v", err)
+	}
+}
+
+func TestSaveProfileRejectsToolRuleOutsideAcceptedContract(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "accepted-tools", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, accepted.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}, {Name: "pending_item", Mutating: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	var pendingToolID string
+	if err := st.pool.QueryRow(ctx, `SELECT id::text FROM mcp_tools WHERE server_id=$1 AND name='pending_item'`, server.ID).Scan(&pendingToolID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-accepted-tools", ClientKind: "claude", Category: "coding",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: accepted.Revision.ID, VisibilityMode: "all_accepted"}},
+		ToolRules:     []ProfileToolRuleInput{{ToolID: pendingToolID, Visible: true, Decision: "confirm", ReasonCodes: []string{"operator_review"}}},
+	})
+	if err != ErrConflict {
+		t.Fatalf("tool outside accepted contract returned %v, want conflict", err)
+	}
+}

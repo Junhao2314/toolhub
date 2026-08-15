@@ -204,7 +204,7 @@ func (s *Store) ObserveContractsTx(ctx context.Context, tx pgx.Tx, input Contrac
 		outputJSON, _ := json.Marshal(normalized["outputSchema"])
 		annotationsJSON, _ := json.Marshal(normalized["annotations"])
 		presentationJSON, _ := json.Marshal(normalized["presentation"])
-		if _, err := tx.Exec(ctx, `INSERT INTO mcp_contract_revision_tools(contract_revision_id,tool_id,position,input_schema,output_schema,annotations,presentation) VALUES($1,$2,$3,$4,$5,$6,$7)`, revisionID, toolID, position, jsonText(inputJSON), jsonText(outputJSON), jsonText(annotationsJSON), jsonText(presentationJSON)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO mcp_contract_revision_tools(contract_revision_id,tool_id,position,input_schema,output_schema,annotations,presentation,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, revisionID, toolID, position, jsonText(inputJSON), jsonText(outputJSON), jsonText(annotationsJSON), jsonText(presentationJSON), statuses[tool.Name]); err != nil {
 			return ContractObservationResult{}, err
 		}
 	}
@@ -281,7 +281,7 @@ func (s *Store) ConfirmToolRename(ctx context.Context, proposalID string) error 
 	if err := cloneGlobalPolicyForRenameTx(ctx, tx, oldToolID, newToolID); err != nil {
 		return err
 	}
-	if err := cloneProfilesForRenameTx(ctx, tx, oldToolID, newToolID, oldContractID, newContractID); err != nil {
+	if err := cloneProfilesForRenameTx(ctx, tx, serverID, oldToolID, newToolID, oldContractID, newContractID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE mcp_tool_rename_proposals SET status='confirmed' WHERE id=$1`, proposalID); err != nil {
@@ -374,8 +374,21 @@ func cloneGlobalPolicyForRenameTx(ctx context.Context, tx pgx.Tx, oldToolID, new
 	return err
 }
 
-func cloneProfilesForRenameTx(ctx context.Context, tx pgx.Tx, oldToolID, newToolID, oldContractID, newContractID string) error {
-	rows, err := tx.Query(ctx, `SELECT p.id::text,p.current_revision_id::text FROM profiles p JOIN profile_revision_tool_rules r ON r.profile_revision_id=p.current_revision_id WHERE r.tool_id=$1 ORDER BY p.id FOR UPDATE OF p`, oldToolID)
+func cloneProfilesForRenameTx(ctx context.Context, tx pgx.Tx, serverID, oldToolID, newToolID, oldContractID, newContractID string) error {
+	rows, err := tx.Query(ctx, `
+		SELECT p.id::text,p.current_revision_id::text
+		FROM profiles p
+		WHERE EXISTS (
+			SELECT 1 FROM profile_revision_tool_rules r
+			WHERE r.profile_revision_id=p.current_revision_id AND r.tool_id=$1
+		) OR EXISTS (
+			SELECT 1 FROM profile_revision_mcp_governance g
+			WHERE g.profile_revision_id=p.current_revision_id
+			  AND g.server_id=$2
+			  AND g.accepted_contract_revision_id=$3
+			  AND g.visibility_mode='all_accepted'
+		)
+		ORDER BY p.id FOR UPDATE OF p`, oldToolID, serverID, oldContractID)
 	if err != nil {
 		return err
 	}
@@ -394,15 +407,16 @@ func cloneProfilesForRenameTx(ctx context.Context, tx pgx.Tx, oldToolID, newTool
 	}
 	for _, candidate := range candidates {
 		var revision int64
-		var name, description, clientKind, category, variant, migrationState, canonicalHash string
+		var name, description, clientKind, category, variant, migrationState string
 		var pending, archivedRestore bool
-		if err := tx.QueryRow(ctx, `SELECT revision,name,description,client_kind,category,variant,migration_state,canonical_hash,pending_bindings,archived_restore FROM profile_revisions WHERE id=$1`, candidate.revisionID).Scan(&revision, &name, &description, &clientKind, &category, &variant, &migrationState, &canonicalHash, &pending, &archivedRestore); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT revision,name,description,client_kind,category,variant,migration_state,pending_bindings,archived_restore FROM profile_revisions WHERE id=$1`, candidate.revisionID).Scan(&revision, &name, &description, &clientKind, &category, &variant, &migrationState, &pending, &archivedRestore); err != nil {
 			return err
 		}
 		newRevisionID := uuid.NewString()
-		hashInput := canonicalHash + ":rename:" + oldToolID + ":" + newToolID + ":" + newContractID
-		hashSum := sha256.Sum256([]byte(hashInput))
-		candidateHash := hex.EncodeToString(hashSum[:])
+		candidateHash, err := canonicalRenamedProfileHashTx(ctx, tx, candidate.revisionID, ProfileInput{Name: name, Description: description, ClientKind: clientKind, Category: category, Variant: variant, MigrationState: migrationState}, oldToolID, newToolID, oldContractID, newContractID)
+		if err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO profile_revisions(id,profile_id,revision,name,description,client_kind,category,variant,migration_state,canonical_hash,pending_bindings,archived_restore) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, newRevisionID, candidate.profileID, revision+1, name, description, clientKind, category, variant, migrationState, candidateHash, pending, archivedRestore); err != nil {
 			return err
 		}
@@ -418,11 +432,95 @@ func cloneProfilesForRenameTx(ctx context.Context, tx pgx.Tx, oldToolID, newTool
 		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_tool_rules(profile_revision_id,tool_id,visible,decision,reason_codes) SELECT $1,CASE WHEN tool_id=$3 THEN $4 ELSE tool_id END,visible,decision,reason_codes FROM profile_revision_tool_rules WHERE profile_revision_id=$2`, newRevisionID, candidate.revisionID, oldToolID, newToolID); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx, `INSERT INTO pending_secret_bindings(profile_revision_id,mcp_revision_id,namespace,key,slot_hash,secret_id,bound_at) SELECT $1,mcp_revision_id,namespace,key,slot_hash,secret_id,bound_at FROM pending_secret_bindings WHERE profile_revision_id=$2`, newRevisionID, candidate.revisionID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_seals(profile_revision_id) VALUES($1)`, newRevisionID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE profiles SET revision=$2,current_revision_id=$3,updated_at=now() WHERE id=$1`, candidate.profileID, revision+1, newRevisionID); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func canonicalRenamedProfileHashTx(ctx context.Context, tx pgx.Tx, revisionID string, input ProfileInput, oldToolID, newToolID, oldContractID, newContractID string) (string, error) {
+	skills := []domain.ProfileSkillPin{}
+	rows, err := tx.Query(ctx, `SELECT prs.skill_id::text,prs.skill_version_id::text,sk.slug,sk.name,a.canonical_sha256,a.content_hash,prs.skill_version_id=sk.current_version_id FROM profile_revision_skills prs JOIN skills sk ON sk.id=prs.skill_id JOIN skill_versions sv ON sv.id=prs.skill_version_id JOIN skill_artifacts a ON a.id=sv.artifact_id WHERE prs.profile_revision_id=$1 ORDER BY prs.position`, revisionID)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var pin domain.ProfileSkillPin
+		if err := rows.Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.SHA256, &pin.ContentHash, &pin.Current); err != nil {
+			rows.Close()
+			return "", err
+		}
+		skills = append(skills, pin)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	rows.Close()
+	servers := []domain.ProfileMCPPin{}
+	rows, err = tx.Query(ctx, `SELECT prms.server_id::text,prms.mcp_revision_id::text,mr.revision,mr.name,mr.description,mr.transport,mr.command,mr.args,mr.url,mr.env_slots,mr.header_slots,mr.content_hash,prms.mcp_revision_id=ms.current_revision_id FROM profile_revision_mcp_servers prms JOIN mcp_revisions mr ON mr.id=prms.mcp_revision_id JOIN mcp_servers ms ON ms.id=prms.server_id WHERE prms.profile_revision_id=$1 ORDER BY prms.position`, revisionID)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var pin domain.ProfileMCPPin
+		if err := rows.Scan(&pin.ServerID, &pin.RevisionID, &pin.Revision, &pin.Name, &pin.Description, &pin.Transport, &pin.Command, &pin.Args, &pin.URL, &pin.EnvKeys, &pin.HeaderKeys, &pin.ContentHash, &pin.Current); err != nil {
+			rows.Close()
+			return "", err
+		}
+		servers = append(servers, pin)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text,coalesce(accepted_contract_revision_id::text,''),visibility_mode FROM profile_revision_mcp_governance WHERE profile_revision_id=$1 ORDER BY server_id`, revisionID)
+	if err != nil {
+		return "", err
+	}
+	for rows.Next() {
+		var item ProfileMCPGovernanceInput
+		if err := rows.Scan(&item.ServerID, &item.MCPRevisionID, &item.AcceptedContractRevisionID, &item.VisibilityMode); err != nil {
+			rows.Close()
+			return "", err
+		}
+		if item.AcceptedContractRevisionID == oldContractID {
+			item.AcceptedContractRevisionID = newContractID
+		}
+		input.MCPGovernance = append(input.MCPGovernance, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return "", err
+	}
+	rows.Close()
+	rows, err = tx.Query(ctx, `SELECT tool_id::text,visible,decision,reason_codes FROM profile_revision_tool_rules WHERE profile_revision_id=$1 ORDER BY tool_id`, revisionID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item ProfileToolRuleInput
+		if err := rows.Scan(&item.ToolID, &item.Visible, &item.Decision, &item.ReasonCodes); err != nil {
+			return "", err
+		}
+		if item.ToolID == oldToolID {
+			item.ToolID = newToolID
+		}
+		input.ToolRules = append(input.ToolRules, item)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return CanonicalGovernedProfileHash(input, skills, servers)
 }
 
 type storedContractTool struct {

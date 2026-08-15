@@ -131,11 +131,22 @@ func (s *Store) GlobalPolicy(ctx context.Context, id string) (domain.GlobalPolic
 }
 
 func (s *Store) ApplyGlobalPolicy(ctx context.Context, revisionID string) error {
+	return ErrConflict
+}
+
+func (s *Store) FinalizeGlobalPolicyApply(ctx context.Context, operationID, revisionID string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	metadata, err := validateSucceededGovernanceReloadTx(ctx, tx, operationID, "policy_apply", "", "")
+	if err != nil {
+		return err
+	}
+	if stringMetadata(metadata, "revisionId") != revisionID {
+		return ErrConflict
+	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM global_policy_revisions WHERE id=$1)`, revisionID).Scan(&exists); err != nil {
 		return err
