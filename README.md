@@ -86,7 +86,7 @@ Bridge/relay units. Record the printed Bridge GID and HMAC key in the ToolHub
 environment. The HMAC key is independent from `TOOLHUB_MASTER_KEY`.
 
 The services execute directly from `/root/docker/toolhub/bin/toolhub-bridge`
-and `/root/docker/toolhub/mcpm/.venv/bin/mcpm`; no second mcpm checkout, global
+and `/usr/libexec/toolhub-mcpm`; no second mcpm checkout, global
 `/usr/bin/mcpm`, or copied `/usr/local/sbin` runtime is required. After updating
 this repository, rebuild, rerun the installer, and restart the affected unit.
 

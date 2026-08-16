@@ -7,6 +7,11 @@ toolhub_repository="${2:?$usage}"
 managed_group="${3:-$managed_user}"
 bridge_group="${4:-toolhub}"
 source_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+install_root=/var/lib/toolhub-bridge
+runtime_root="$install_root/mcpm"
+bridge_install=/usr/libexec/toolhub-bridge
+mcpm_install=/usr/libexec/toolhub-mcpm
+port_check_install=/usr/libexec/toolhub-relay-port-check
 
 [ "$(id -u)" -eq 0 ] || { printf '%s\n' 'installer must run as root' >&2; exit 1; }
 getent passwd "$managed_user" >/dev/null || { printf 'managed user %s does not exist\n' "$managed_user" >&2; exit 1; }
@@ -57,9 +62,8 @@ for required in "$bridge_binary" "$mcpm_launcher"; do
     [ "$(stat -c %u -- "$required")" -eq 0 ] || { printf 'required path must be root-owned: %s\n' "$required" >&2; exit 1; }
     [ -x "$required" ] || { printf 'required path must be executable: %s\n' "$required" >&2; exit 1; }
 done
+[ -x "$mcpm_python" ] || { printf 'mcpm interpreter must be executable: %s\n' "$mcpm_python" >&2; exit 1; }
 
-shebang="$(sed -n '1p' -- "$mcpm_launcher")"
-[ "$shebang" = "#!$mcpm_python" ] || { printf 'mcpm launcher shebang must be %s\n' "#!$mcpm_python" >&2; exit 1; }
 resolved_interpreter="$(readlink -f -- "$mcpm_python")"
 case "$resolved_interpreter" in
     /root/.local/share/uv/python/*) ;;
@@ -113,6 +117,22 @@ raise SystemExit(0 if valid else 1)
     exit 1
 fi
 
+site_packages="$(find "$mcpm_repository/.venv/lib" -type d -name site-packages -print -quit 2>/dev/null || true)"
+[ -n "$site_packages" ] || { printf '%s\n' 'mcpm site-packages directory is missing' >&2; exit 1; }
+install -d -m 0700 "$install_root" /usr/libexec
+rm -rf -- "$runtime_root/src" "$runtime_root/site-packages"
+install -d -m 0700 "$runtime_root"
+cp -a -- "$mcpm_repository/src" "$runtime_root/src"
+cp -a -- "$site_packages" "$runtime_root/site-packages"
+install -m 0755 "$bridge_binary" "$bridge_install"
+install -m 0755 "$source_dir/toolhub-relay-port-check.sh" "$port_check_install"
+sed -e "s|@MCPM_SOURCE_ROOT@|$runtime_root/src|g" \
+    -e "s|@MCPM_SITE_PACKAGES@|$runtime_root/site-packages|g" \
+    -e "s|@MCPM_INTERPRETER@|$resolved_interpreter|g" \
+    "$source_dir/toolhub-mcpm-launcher.sh" > "$mcpm_install"
+chown root:root "$bridge_install" "$mcpm_install" "$port_check_install"
+chmod 0755 "$bridge_install" "$mcpm_install" "$port_check_install"
+
 install -d -m 0700 /etc/toolhub-bridge /var/lib/toolhub-bridge
 if [ ! -f /etc/toolhub-bridge/hmac.key ]; then
     umask 077
@@ -126,13 +146,11 @@ fi
 chown root:root /var/lib/toolhub-bridge/mcpm-relay.env
 chmod 0600 /var/lib/toolhub-bridge/mcpm-relay.env
 
-sed -e "s|@TOOLHUB_REPOSITORY@|$toolhub_repository|g" \
-    -e "s|@MCPM_INTERPRETER@|$resolved_interpreter|g" \
+sed -e "s|@MCPM_INTERPRETER@|$resolved_interpreter|g" \
     -e "s|@TOOLHUB_MANAGED_HOME@|$managed_home|g" \
     -e "s|@TOOLHUB_BRIDGE_GROUP@|$bridge_group|g" \
     "$source_dir/toolhub-bridge.service" > /etc/systemd/system/toolhub-bridge.service
-sed -e "s|@TOOLHUB_REPOSITORY@|$toolhub_repository|g" \
-    -e "s|@MCPM_INTERPRETER@|$resolved_interpreter|g" \
+sed -e "s|@MCPM_INTERPRETER@|$resolved_interpreter|g" \
     -e "s|@TOOLHUB_MANAGED_USER@|$managed_user|g" \
     -e "s|@TOOLHUB_MANAGED_GROUP@|$managed_group|g" \
     -e "s|@TOOLHUB_MANAGED_HOME@|$managed_home|g" \

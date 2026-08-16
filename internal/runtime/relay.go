@@ -32,10 +32,10 @@ const (
 	RelayUnitName = "toolhub-mcpm-relay.service"
 	RelayProfile  = "toolhub"
 	RelayAnchor   = "toolhub-relay"
-	// The shared relay is a repository-owned runtime. Keep this path fixed in
-	// the privileged Bridge; callers and environment variables must not select
-	// an alternate executable.
-	MCPMExecutable         = "/root/docker/toolhub/mcpm/.venv/bin/mcpm"
+	// The installer materializes mcpm under a stable host path. The Bridge and
+	// relay therefore keep working when the ToolHub checkout is moved or
+	// re-cloned.
+	MCPMExecutable         = "/usr/libexec/toolhub-mcpm"
 	relayReadinessInterval = 250 * time.Millisecond
 	relayReadinessTimeout  = 90 * time.Second
 	relayContentHashField  = "toolhub_content_hash"
@@ -1237,7 +1237,9 @@ func relayProfileName(manifest bridgeprotocol.DesiredManifest) (string, error) {
 		selectedID = *bundle.DefaultProfileID
 	}
 	if selectedID == "" {
-		return "", errors.New("a published relay Profile is required")
+		// Compatibility relay mode has no published client Profile. The relay's
+		// default session intentionally exposes every configured MCP tool.
+		return "", nil
 	}
 	for _, profile := range bundle.Profiles {
 		if profile.ProfileID == selectedID {
@@ -1253,6 +1255,9 @@ func relayProfileName(manifest bridgeprotocol.DesiredManifest) (string, error) {
 var relayProfileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 func relayClientURL(port int, profileName string) string {
+	if profileName == "" {
+		return fmt.Sprintf("http://127.0.0.1:%d/mcp", port)
+	}
 	return fmt.Sprintf("http://127.0.0.1:%d/mcp?profile=%s", port, url.QueryEscape(profileName))
 }
 

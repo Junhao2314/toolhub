@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -140,6 +141,11 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 	if err != nil {
 		return "", "", err
 	}
+	if input.ClientKind != "shared" {
+		if err := validateRequiredSkillsTx(ctx, tx, input.SkillIDs); err != nil {
+			return "", "", err
+		}
+	}
 	profileServers := make(map[string]struct{}, len(pins.MCP))
 	for _, pin := range pins.MCP {
 		profileServers[pin.ServerID] = struct{}{}
@@ -265,7 +271,7 @@ func resolveProfilePinsTx(ctx context.Context, tx pgx.Tx, input ProfileInput) (p
 		}
 		versionID := strings.TrimSpace(input.SkillVersionIDs[skillID])
 		var pin domain.ProfileSkillPin
-		err := tx.QueryRow(ctx, `SELECT sk.id::text,v.id::text,sk.slug,sk.name,a.canonical_sha256,a.content_hash,v.id=sk.current_version_id FROM skills sk JOIN skill_versions v ON v.skill_id=sk.id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND v.id=coalesce(nullif($2,'')::uuid,sk.current_version_id) AND sk.archived_at IS NULL`, skillID, versionID).Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.SHA256, &pin.ContentHash, &pin.Current)
+		err := tx.QueryRow(ctx, `SELECT sk.id::text,v.id::text,sk.slug,sk.name,sk.tags,a.canonical_sha256,a.content_hash,v.id=sk.current_version_id FROM skills sk JOIN skill_versions v ON v.skill_id=sk.id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND v.id=coalesce(nullif($2,'')::uuid,sk.current_version_id) AND sk.archived_at IS NULL`, skillID, versionID).Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.Tags, &pin.SHA256, &pin.ContentHash, &pin.Current)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return profilePins{}, ErrNotFound
 		}
@@ -290,6 +296,28 @@ func resolveProfilePinsTx(ctx context.Context, tx pgx.Tx, input ProfileInput) (p
 		result.MCP = append(result.MCP, pin)
 	}
 	return result, nil
+}
+
+func validateRequiredSkillsTx(ctx context.Context, tx pgx.Tx, selected []string) error {
+	selectedSet := make(map[string]struct{}, len(selected))
+	for _, id := range selected {
+		selectedSet[id] = struct{}{}
+	}
+	rows, err := tx.Query(ctx, `SELECT id::text,slug FROM skills WHERE archived_at IS NULL AND 'required'=ANY(tags) ORDER BY slug`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, slug string
+		if err := rows.Scan(&id, &slug); err != nil {
+			return err
+		}
+		if _, ok := selectedSet[id]; !ok {
+			return fmt.Errorf("Profile must include required Skill %q", slug)
+		}
+	}
+	return rows.Err()
 }
 
 func replaceProfileHeadProjection(ctx context.Context, tx pgx.Tx, profileID string, pins profilePins) error {
@@ -535,13 +563,13 @@ func (s *Store) ProfileRevision(ctx context.Context, id string) (domain.ProfileR
 		return domain.ProfileRevision{}, err
 	}
 	revision.Skills = []domain.ProfileSkillPin{}
-	rows, err := s.pool.Query(ctx, `SELECT prs.skill_id::text,prs.skill_version_id::text,sk.slug,sk.name,a.canonical_sha256,a.content_hash,prs.skill_version_id=sk.current_version_id FROM profile_revision_skills prs JOIN skills sk ON sk.id=prs.skill_id JOIN skill_versions sv ON sv.id=prs.skill_version_id JOIN skill_artifacts a ON a.id=sv.artifact_id WHERE prs.profile_revision_id=$1 ORDER BY prs.position`, id)
+	rows, err := s.pool.Query(ctx, `SELECT prs.skill_id::text,prs.skill_version_id::text,sk.slug,sk.name,sk.tags,a.canonical_sha256,a.content_hash,prs.skill_version_id=sk.current_version_id FROM profile_revision_skills prs JOIN skills sk ON sk.id=prs.skill_id JOIN skill_versions sv ON sv.id=prs.skill_version_id JOIN skill_artifacts a ON a.id=sv.artifact_id WHERE prs.profile_revision_id=$1 ORDER BY prs.position`, id)
 	if err != nil {
 		return domain.ProfileRevision{}, err
 	}
 	for rows.Next() {
 		var pin domain.ProfileSkillPin
-		if err := rows.Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.SHA256, &pin.ContentHash, &pin.Current); err != nil {
+		if err := rows.Scan(&pin.SkillID, &pin.VersionID, &pin.Slug, &pin.Name, &pin.Tags, &pin.SHA256, &pin.ContentHash, &pin.Current); err != nil {
 			rows.Close()
 			return domain.ProfileRevision{}, err
 		}

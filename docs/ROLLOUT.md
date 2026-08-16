@@ -56,7 +56,7 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
 
 ### Local Shared Relay
 
-1. Verify `/root/docker/toolhub/mcpm/.venv/bin/mcpm toolhub contract --json` and that port `6276` (or the configured
+1. Verify `/usr/libexec/toolhub-mcpm toolhub contract --json` and that port `6276` (or the configured
    fixed port) is free.
 2. Apply a Profile to `local/shared-relay`.
 3. Connect at least one Claude, Codex, and local Hermes client to the same endpoint.
@@ -68,7 +68,7 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
 6. Restart and run the explicit health action.
 7. Require every desired MCP member to be `ready`; for the current canary this
    means eight namespaces and 75 tools. Call the safe read-only ACEMCP indexing
-   status, Desktop Commander config, Grok config info, and Trellis UI info tools.
+   status, Grok config info, and Trellis UI info tools.
 8. Wait through one 30-minute full member-health cadence and repeat the check.
 
 ### Relay Governance Transition

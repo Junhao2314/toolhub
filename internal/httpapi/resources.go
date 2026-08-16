@@ -39,6 +39,23 @@ func (a *API) listSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	writeItems(w, value)
 }
+
+func (a *API) updateSkillTags(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Tags []string `json:"tags"`
+	}
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	skill, err := a.store.UpdateSkillTags(r.Context(), chi.URLParam(r, "skillID"), input.Tags)
+	if err != nil {
+		a.handleStoreError(w, r, err)
+		return
+	}
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "skill_tags_update", ResourceType: "skill", ResourceID: skill.ID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"tags": skill.Tags}})
+	writeJSON(w, http.StatusOK, skill)
+}
 func (a *API) listMCPServers(w http.ResponseWriter, r *http.Request) {
 	value, err := a.store.ListMCPServers(r.Context())
 	if err != nil {

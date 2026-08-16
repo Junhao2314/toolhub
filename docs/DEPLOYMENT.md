@@ -14,9 +14,9 @@ database. Keep the old volume as a whole-stack rollback artifact.
 - One existing local managed user with a real, non-symlink home.
 - `/root/docker/toolhub` as the canonical, root-owned repository root, including
   its embedded `mcpm/` project.
-- A root-owned `/root/docker/toolhub/bin/toolhub-bridge` and
-  `/root/docker/toolhub/mcpm/.venv/bin/mcpm`; its shebang must use the repository
-  `.venv/bin/python3`, resolving into `/root/.local/share/uv/python`.
+- A root-owned ToolHub build and embedded mcpm project. The installer verifies
+  them and materializes `/usr/libexec/toolhub-mcpm` with its runtime under
+  `/var/lib/toolhub-bridge/mcpm`.
 - Salt Master/minions `3008.x` when remote targets are required.
 - Existing Salt `base` file root at `/srv/salt/states`.
 
@@ -49,7 +49,7 @@ sudo systemctl status toolhub-bridge.service
 ```
 
 The installer validates repository ownership, the embedded mcpm project,
-executable ownership/modes, the mcpm shebang and uv interpreter, and the
+executable ownership/modes, the mcpm launcher and uv interpreter, and the
 ToolHub capability contract before writing units. It prints the shared Bridge GID. Read the
 root-only HMAC key locally and place its exact value in `.env`; do not commit or
 log it. The units bind the repositories read-only inside their `ProtectHome`
@@ -137,7 +137,7 @@ credentials have no effect after the account exists.
 1. Refresh nodes and verify only accepted Salt keys are shown.
 2. Restore Salt connectivity until remote nodes report `3008.x`.
 3. Scan `local/claude`, `local/codex`, `local/hermes`, and `local/shared-relay`.
-4. For local MCP, verify `/root/docker/toolhub/mcpm/.venv/bin/mcpm` and its capability
+4. For local MCP, verify `/usr/libexec/toolhub-mcpm` and its capability
    contract, configure the fixed port, and Apply
    a Profile to `local/shared-relay`.
 5. Canary one non-critical Salt minion before a fleet Apply.

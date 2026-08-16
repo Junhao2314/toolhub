@@ -72,6 +72,7 @@ type Skill struct {
 	Slug               string          `json:"slug"`
 	Name               string          `json:"name"`
 	Description        string          `json:"description"`
+	Tags               []string        `json:"tags"`
 	SourceKind         string          `json:"sourceKind"`
 	SourceURL          string          `json:"sourceUrl,omitempty"`
 	SourceCommit       string          `json:"sourceCommit,omitempty"`
@@ -131,13 +132,14 @@ type MCPRevision struct {
 }
 
 type ProfileSkillPin struct {
-	SkillID     string `json:"skillId"`
-	VersionID   string `json:"versionId"`
-	Slug        string `json:"slug"`
-	Name        string `json:"name"`
-	SHA256      string `json:"sha256"`
-	ContentHash string `json:"contentHash"`
-	Current     bool   `json:"current"`
+	SkillID     string   `json:"skillId"`
+	VersionID   string   `json:"versionId"`
+	Slug        string   `json:"slug"`
+	Name        string   `json:"name"`
+	Tags        []string `json:"tags,omitempty"`
+	SHA256      string   `json:"sha256"`
+	ContentHash string   `json:"contentHash"`
+	Current     bool     `json:"current"`
 }
 
 type ProfileMCPPin struct {

@@ -30,7 +30,7 @@ sudo packaging/systemd/install-toolhub-services.sh \
 - creates the shared Bridge group when necessary;
 - creates `/etc/toolhub-bridge/hmac.key` as a root-only file;
 - creates `/var/lib/toolhub-bridge/mcpm-relay.env` with port `6276`;
-- renders both units with repository executables and read-only repository binds;
+- renders both units with installation-owned executables and read-only runtime binds;
   only the selected canonical managed home is writable in their private home
   namespaces;
 - enables and starts `toolhub-bridge.service`;

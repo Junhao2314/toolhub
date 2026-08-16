@@ -104,7 +104,7 @@ func (s *Store) importSkillTx(ctx context.Context, tx pgx.Tx, source SourceInput
 		if _, err := tx.Exec(ctx, `INSERT INTO skill_sources(id,kind,name,url,subdirectory,current_commit,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)`, sourceID, source.Kind, source.Name, source.URL, source.Subdirectory, source.Commit, jsonText(metadata)); err != nil {
 			return "", "", false, false, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO skills(id,source_id,slug,name,description) VALUES($1,$2,$3,$4,$5)`, skillID, sourceID, pkg.Slug, pkg.Name, pkg.Description); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO skills(id,source_id,slug,name,description,tags) VALUES($1,$2,$3,$4,$5,'{}'::text[])`, skillID, sourceID, pkg.Slug, pkg.Name, pkg.Description); err != nil {
 			return "", "", false, false, err
 		}
 	} else if err != nil {
@@ -188,18 +188,54 @@ func validateSourceInput(input SourceInput) error {
 }
 
 func (s *Store) ListSkills(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT sk.id::text,sk.slug,sk.name,sk.description,ss.kind AS "sourceKind",ss.url AS "sourceUrl",ss.current_commit AS "sourceCommit",v.id::text AS "currentVersionId",a.canonical_sha256 AS "currentSha256",a.content_hash AS "currentContentHash",a.manifest,a.scan_report AS "scanReport",sk.created_at AS "createdAt",sk.updated_at AS "updatedAt" FROM skills sk JOIN skill_sources ss ON ss.id=sk.source_id JOIN skill_versions v ON v.id=sk.current_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.archived_at IS NULL ORDER BY lower(sk.name),sk.id`)
+	return s.JSONList(ctx, `SELECT sk.id::text,sk.slug,sk.name,sk.description,sk.tags,ss.kind AS "sourceKind",ss.url AS "sourceUrl",ss.current_commit AS "sourceCommit",v.id::text AS "currentVersionId",a.canonical_sha256 AS "currentSha256",a.content_hash AS "currentContentHash",a.manifest,a.scan_report AS "scanReport",sk.created_at AS "createdAt",sk.updated_at AS "updatedAt" FROM skills sk JOIN skill_sources ss ON ss.id=sk.source_id JOIN skill_versions v ON v.id=sk.current_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.archived_at IS NULL ORDER BY lower(sk.name),sk.id`)
 }
 
 func (s *Store) Skill(ctx context.Context, id string) (domain.Skill, error) {
 	var skill domain.Skill
-	err := s.pool.QueryRow(ctx, `SELECT sk.id::text,sk.slug,sk.name,sk.description,ss.kind,ss.url,ss.current_commit,v.id::text,a.canonical_sha256,a.content_hash,a.manifest,a.scan_report,sk.created_at,sk.updated_at FROM skills sk JOIN skill_sources ss ON ss.id=sk.source_id JOIN skill_versions v ON v.id=sk.current_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND sk.archived_at IS NULL`, id).Scan(
-		&skill.ID, &skill.Slug, &skill.Name, &skill.Description, &skill.SourceKind, &skill.SourceURL, &skill.SourceCommit, &skill.CurrentVersionID, &skill.CurrentSHA256, &skill.CurrentContentHash, &skill.Manifest, &skill.ScanReport, &skill.CreatedAt, &skill.UpdatedAt,
+	err := s.pool.QueryRow(ctx, `SELECT sk.id::text,sk.slug,sk.name,sk.description,sk.tags,ss.kind,ss.url,ss.current_commit,v.id::text,a.canonical_sha256,a.content_hash,a.manifest,a.scan_report,sk.created_at,sk.updated_at FROM skills sk JOIN skill_sources ss ON ss.id=sk.source_id JOIN skill_versions v ON v.id=sk.current_version_id JOIN skill_artifacts a ON a.id=v.artifact_id WHERE sk.id=$1 AND sk.archived_at IS NULL`, id).Scan(
+		&skill.ID, &skill.Slug, &skill.Name, &skill.Description, &skill.Tags, &skill.SourceKind, &skill.SourceURL, &skill.SourceCommit, &skill.CurrentVersionID, &skill.CurrentSHA256, &skill.CurrentContentHash, &skill.Manifest, &skill.ScanReport, &skill.CreatedAt, &skill.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.Skill{}, ErrNotFound
 	}
 	return skill, err
+}
+
+func normalizeSkillTags(tags []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(tags))
+	result := make([]string, 0, len(tags))
+	for _, raw := range tags {
+		tag := strings.ToLower(strings.TrimSpace(raw))
+		if tag == "" || len(tag) > 64 || !regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`).MatchString(tag) {
+			return nil, errors.New("Skill tags must be lowercase slugs up to 64 characters")
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		result = append(result, tag)
+	}
+	if len(result) > 50 {
+		return nil, errors.New("Skill tags exceed the safety limit")
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func (s *Store) UpdateSkillTags(ctx context.Context, id string, tags []string) (domain.Skill, error) {
+	normalized, err := normalizeSkillTags(tags)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	command, err := s.pool.Exec(ctx, `UPDATE skills SET tags=$2,updated_at=now() WHERE id=$1 AND archived_at IS NULL`, id, normalized)
+	if err != nil {
+		return domain.Skill{}, err
+	}
+	if command.RowsAffected() != 1 {
+		return domain.Skill{}, ErrNotFound
+	}
+	return s.Skill(ctx, id)
 }
 
 func (s *Store) SkillArtifact(ctx context.Context, versionID string) ([]byte, string, error) {

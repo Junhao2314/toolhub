@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+export PYTHONPATH="@MCPM_SITE_PACKAGES@:@MCPM_SOURCE_ROOT@${PYTHONPATH:+:$PYTHONPATH}"
+exec "@MCPM_INTERPRETER@" -m mcpm.cli "$@"

@@ -11,10 +11,11 @@ make mcpm-contract
 make mcpm-lint
 ```
 
-The shared relay is started by `toolhub-mcpm-relay.service` from:
+The shared relay is started by `toolhub-mcpm-relay.service` from the
+installation-owned launcher:
 
 ```text
-/root/docker/toolhub/mcpm/.venv/bin/mcpm
+/usr/libexec/toolhub-mcpm
 ```
 
 ToolHub owns the relay configuration, Profile routing, confirmation policy,

@@ -5,7 +5,7 @@ Wants=salt-master.service
 
 [Service]
 Type=simple
-ExecStart=@TOOLHUB_REPOSITORY@/bin/toolhub-bridge --socket /run/toolhub-bridge/bridge.sock --group @TOOLHUB_BRIDGE_GROUP@ --key-file /etc/toolhub-bridge/hmac.key --journal /var/lib/toolhub-bridge/journal.db --staging-root /var/lib/toolhub-bridge/staging --backup-root /var/lib/toolhub-bridge/backups --salt-state-root /srv/salt/states
+ExecStart=/usr/libexec/toolhub-bridge --socket /run/toolhub-bridge/bridge.sock --group @TOOLHUB_BRIDGE_GROUP@ --key-file /etc/toolhub-bridge/hmac.key --journal /var/lib/toolhub-bridge/journal.db --staging-root /var/lib/toolhub-bridge/staging --backup-root /var/lib/toolhub-bridge/backups --salt-state-root /srv/salt/states
 Restart=on-failure
 RestartSec=3s
 User=root
@@ -22,7 +22,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=tmpfs
 BindPaths=@TOOLHUB_MANAGED_HOME@
-BindReadOnlyPaths=@TOOLHUB_REPOSITORY@ @MCPM_INTERPRETER@
+BindReadOnlyPaths=/usr/libexec/toolhub-mcpm /var/lib/toolhub-bridge/mcpm @MCPM_INTERPRETER@
 ReadWritePaths=/run/toolhub-bridge /var/lib/toolhub-bridge /srv/salt/states -/var/cache/salt/minion/toolhub-staging
 NoNewPrivileges=yes
 LockPersonality=yes

@@ -32,6 +32,7 @@ export interface Skill {
   slug: string;
   name: string;
   description: string;
+  tags: string[];
   sourceKind: string;
   sourceUrl?: string;
   sourceCommit?: string;
@@ -119,6 +120,7 @@ export interface ProfileSkillPin {
   versionId: string;
   slug: string;
   name: string;
+  tags?: string[];
   sha256: string;
   contentHash: string;
   current: boolean;
@@ -734,6 +736,10 @@ class ToolHubClient {
     const form = new FormData();
     form.append("file", file);
     return this.request("/skills/upload", { method: "POST", body: form });
+  }
+
+  updateSkillTags(skillID: string, tags: string[]): Promise<Skill> {
+    return this.put<Skill>(`/skills/${skillID}/tags`, { tags });
   }
 
   async download(path: string, body: unknown = {}): Promise<Blob> {

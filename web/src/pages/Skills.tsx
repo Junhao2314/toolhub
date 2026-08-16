@@ -26,9 +26,21 @@ export default function Skills() {
     </>} />
     {notice && <div className="inline-notice">{notice}</div>}
     <div className="toolbar"><label className="search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search skills')} /></label><Button variant="secondary" disabled={busy} onClick={() => act(api.post<Operation>('/updates/check'), t('Update check queued'))}><RefreshCw size={16} />{t('Check now')}</Button><IconButton label={t('Refresh')} onClick={state.reload}><RefreshCw size={17} /></IconButton></div>
-    {state.loading ? <Loading label={t('Loading skills')} /> : state.error ? <ErrorNotice message={state.error} retry={state.reload} /> : items.length === 0 ? <Empty title={t('No Skills in Library')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Skill')}</th><th>{t('Source')}</th><th>{t('Commit')}</th><th>{t('Artifact')}</th><th>{t('Updated')}</th></tr></thead><tbody>{items.map((skill) => <tr key={skill.id}><td><strong>{skill.name}</strong><small>{skill.slug}</small>{skill.description && <small>{skill.description}</small>}</td><td><Status value={skill.sourceKind} /></td><td><code>{skill.sourceCommit?.slice(0, 12) || '—'}</code></td><td><code>{skill.currentSha256.slice(0, 12)}</code><small>{skill.currentVersionId.slice(0, 8)}</small></td><td>{new Date(skill.updatedAt).toLocaleString()}</td></tr>)}</tbody></table></div>}
+    {state.loading ? <Loading label={t('Loading skills')} /> : state.error ? <ErrorNotice message={state.error} retry={state.reload} /> : items.length === 0 ? <Empty title={t('No Skills in Library')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Skill')}</th><th>{t('Tags')}</th><th>{t('Source')}</th><th>{t('Commit')}</th><th>{t('Artifact')}</th><th>{t('Updated')}</th></tr></thead><tbody>{items.map((skill) => <tr key={skill.id}><td><strong>{skill.name}</strong><small>{skill.slug}</small>{skill.description && <small>{skill.description}</small>}</td><td><TagToggle skill={skill} reload={state.reload} disabled={busy} /></td><td><Status value={skill.sourceKind} /></td><td><code>{skill.sourceCommit?.slice(0, 12) || '—'}</code></td><td><code>{skill.currentSha256.slice(0, 12)}</code><small>{skill.currentVersionId.slice(0, 8)}</small></td><td>{new Date(skill.updatedAt).toLocaleString()}</td></tr>)}</tbody></table></div>}
     {importing && <GitImport close={() => setImporting(false)} queued={() => { setImporting(false); setNotice(t('Import queued')) }} />}
   </>
+}
+
+function TagToggle({ skill, reload, disabled }: { skill: Skill; reload: () => void; disabled: boolean }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const required = skill.tags.includes('required')
+  const toggle = () => {
+    setBusy(true)
+    const tags = required ? skill.tags.filter((tag) => tag !== 'required') : [...skill.tags, 'required']
+    api.updateSkillTags(skill.id, tags).then(reload).finally(() => setBusy(false))
+  }
+  return <Button variant="secondary" disabled={disabled || busy} onClick={toggle}>{required ? t('Required') : t('Optional')}</Button>
 }
 
 function GitImport({ close, queued }: { close: () => void; queued: () => void }) {

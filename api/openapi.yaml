@@ -123,6 +123,26 @@ paths:
       operationId: listSkills
       responses:
         '200': {$ref: '#/components/responses/SkillList'}
+  /skills/{skillID}/tags:
+    put:
+      tags: [Library]
+      operationId: updateSkillTags
+      parameters:
+        - {$ref: '#/components/parameters/SkillID'}
+        - {$ref: '#/components/parameters/CSRFToken'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [tags]
+              properties:
+                tags: {type: array, maxItems: 50, uniqueItems: true, items: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,63}$'}}
+      responses:
+        '200': {$ref: '#/components/responses/Skill'}
+        '400': {$ref: '#/components/responses/Error'}
   /skills/upload:
     post:
       tags: [Library]
@@ -813,6 +833,7 @@ components:
     IdempotencyKey: {name: Idempotency-Key, in: header, required: true, schema: {type: string, minLength: 8, maxLength: 200}}
     NodeID: {name: nodeID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
     TargetID: {name: targetID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    SkillID: {name: skillID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
     ProfileID: {name: profileID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
     ServerID: {name: serverID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
     OperationID: {name: operationID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
@@ -936,12 +957,13 @@ components:
         metadata: {type: object}
     Skill:
       type: object
-      required: [id, slug, name, sourceKind, currentVersionId, currentSha256, currentContentHash, manifest, scanReport, createdAt, updatedAt]
+      required: [id, slug, name, sourceKind, tags, currentVersionId, currentSha256, currentContentHash, manifest, scanReport, createdAt, updatedAt]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         slug: {type: string}
         name: {type: string}
         description: {type: string}
+        tags: {type: array, maxItems: 50, uniqueItems: true, items: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,63}$'}}
         sourceKind: {type: string, enum: [zip, git, skillsmp, xiaping, local]}
         sourceUrl: {type: string}
         sourceCommit: {type: string}
@@ -1035,6 +1057,7 @@ components:
         versionId: {$ref: '#/components/schemas/UUID'}
         slug: {type: string}
         name: {type: string}
+        tags: {type: array, items: {type: string}}
         sha256: {$ref: '#/components/schemas/SHA256'}
         contentHash: {$ref: '#/components/schemas/SHA256'}
         current: {type: boolean}

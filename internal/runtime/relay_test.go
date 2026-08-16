@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -682,6 +683,29 @@ func TestRelayProfileRouteUsesManifestPublishedProfileName(t *testing.T) {
 
 	if got, err := relayProfileName(manifest); err != nil || got != "analysis" {
 		t.Fatalf("relay Profile route=%q err=%v", got, err)
+	}
+}
+
+func TestRelayDefaultRouteUsesAllToolsWhenNoProfileIsPublished(t *testing.T) {
+	_, _, _, target, port := relayFixture(t, false)
+	manifest := relayManifestV2(t, target, port, "https://example.invalid/one")
+	var bundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	bundle.DefaultProfileID = nil
+	bundle.Profiles = nil
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.RelayGovernance.RoutingBundle = body
+	manifest.RelayGovernance.RoutingHash = hash
+	if got, err := relayProfileName(manifest); err != nil || got != "" {
+		t.Fatalf("default relay Profile route=%q err=%v", got, err)
+	}
+	if got, want := relayClientURL(port, ""), fmt.Sprintf("http://127.0.0.1:%d/mcp", port); got != want {
+		t.Fatalf("default relay URL=%q, want %q", got, want)
 	}
 }
 

@@ -48,6 +48,7 @@ func (a *API) Router() http.Handler {
 			auth.Get("/skills", a.listSkills)
 			auth.Post("/skills/upload", a.uploadSkill)
 			auth.Post("/skills/import", a.importSkill)
+			auth.Put("/skills/{skillID}/tags", a.updateSkillTags)
 			auth.Get("/market/search", a.searchMarket)
 			auth.Post("/recommendations", a.recommend)
 			auth.Get("/mcp/servers", a.listMCPServers)
