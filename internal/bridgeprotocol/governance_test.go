@@ -36,6 +36,9 @@ func TestGovernanceBodyRejectsPayloadFieldsOutsideJSONSchemas(t *testing.T) {
 		[]byte(`{"inputSchema":{},"prompt":"payload"}`),
 		[]byte(`{"inputSchema":{},"prompts":"payload"}`),
 		[]byte(`{"metadata":{"secretValue":"payload"}}`),
+		[]byte(`{"annotations":{"inputSchema":{"prompt":"payload"}}}`),
+		[]byte(`{"annotations":{"input_schema":{"secret_value":"payload"}}}`),
+		[]byte(`{"metadata":{"output-schema":{"results":"payload"}}}`),
 	} {
 		if err := ValidateGovernanceBody(body); err == nil {
 			t.Fatalf("governance body accepted payload field: %s", body)

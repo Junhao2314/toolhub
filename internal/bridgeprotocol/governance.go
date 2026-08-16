@@ -654,7 +654,7 @@ func ValidateGovernanceBody(body []byte) error {
 		maxDepth = GovernanceMaxRoutingDepth
 	}
 	items := 0
-	return validateGovernanceValue(value, 0, &items, maxDepth, false)
+	return validateGovernanceValue(value, 0, &items, maxDepth, false, "")
 }
 
 func DecodeGovernanceBody(body []byte, target any) error {
@@ -684,7 +684,7 @@ func ensureGovernanceEOF(decoder *json.Decoder) error {
 	return nil
 }
 
-func validateGovernanceValue(value any, depth int, items *int, maxDepth int, schemaData bool) error {
+func validateGovernanceValue(value any, depth int, items *int, maxDepth int, schemaData bool, path string) error {
 	if depth > maxDepth || *items >= GovernanceMaxItems {
 		return errors.New("governance body exceeds nesting or item limit")
 	}
@@ -700,14 +700,14 @@ func validateGovernanceValue(value any, depth int, items *int, maxDepth int, sch
 			if len(key) > 256 {
 				return errors.New("governance key is too long")
 			}
-			childIsSchemaData := schemaData || lower == "inputschema" || lower == "outputschema"
-			if err := validateGovernanceValue(child, depth+1, items, maxDepth, childIsSchemaData); err != nil {
+			childIsSchemaData := schemaData || isGovernanceSchemaField(path, lower)
+			if err := validateGovernanceValue(child, depth+1, items, maxDepth, childIsSchemaData, governanceChildPath(path, lower)); err != nil {
 				return err
 			}
 		}
 	case []any:
 		for _, child := range typed {
-			if err := validateGovernanceValue(child, depth+1, items, maxDepth, schemaData); err != nil {
+			if err := validateGovernanceValue(child, depth+1, items, maxDepth, schemaData, path+"[]"); err != nil {
 				return err
 			}
 		}
@@ -717,6 +717,20 @@ func validateGovernanceValue(value any, depth int, items *int, maxDepth int, sch
 		}
 	}
 	return nil
+}
+
+func isGovernanceSchemaField(path, key string) bool {
+	if key != "inputschema" && key != "outputschema" {
+		return false
+	}
+	return path == "servers[].tools[]" || path == "routingbundle.servers[].tools[]"
+}
+
+func governanceChildPath(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
 }
 
 func normalizedGovernanceFieldName(value string) string {
