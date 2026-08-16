@@ -18,10 +18,11 @@ installation-owned launcher:
 /usr/libexec/toolhub-mcpm
 ```
 
-ToolHub owns the relay configuration, Profile routing, confirmation policy,
-and native client anchors. The default `/mcp` endpoint exposes all tools from
-the current MCP contract subject to global deny/pause policy. An explicit
-`?profile=<name>` selects a published Profile; unknown Profiles fail closed.
+ToolHub owns the relay configuration and native client anchors. Relay routing
+governance was removed on 2026-08-16: the unit starts mcpm without
+`--toolhub-routing`, so the default `/mcp` endpoint exposes every tool from the
+current MCP contract. An explicit `?profile=<name>` query is accepted by the
+runtime but is not enforced by a published-Profile bundle.
 
 Tests, temporary files, caches, logs, and virtual environments are intentionally
 excluded by the repository `.gitignore` and `.dockerignore`.

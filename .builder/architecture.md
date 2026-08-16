@@ -47,6 +47,9 @@ members, and non-user Claude MCP scopes are always excluded.
 
 Local MCP uses one mcpm Profile named `toolhub`, one HTTP relay, and one
 `toolhub-relay` anchor in each Claude, Codex, and local Hermes user config.
+The relay runs from the installation-owned `/usr/libexec/toolhub-mcpm`
+launcher with its runtime under `/var/lib/toolhub-bridge/mcpm`; the ToolHub
+checkout is never bound into the relay unit.
 `local/shared-relay` owns the Hermes anchor; `local/hermes` remains a
 read-only Skill/inventory target. Remote MCP writes the native Claude/Codex
 user scopes directly and remote Hermes remains read-only.

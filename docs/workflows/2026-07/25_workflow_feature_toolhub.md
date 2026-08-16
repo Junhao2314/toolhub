@@ -2,7 +2,8 @@
 
 > Historical generation-1 report. The Agent/RBAC/deployment design described
 > here was replaced by the generation-2 single-user Salt Bridge architecture.
-> See the [current refactor plan](../../../plans/2026-07-30-single-user-salt-bridge-refactor.md).
+> See the [generation-2 rollout](../../../docs/ROLLOUT.md) and
+> [`docs/DEPLOYMENT.md`](../../../docs/DEPLOYMENT.md).
 
 ## 概述
 

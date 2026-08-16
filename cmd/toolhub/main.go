@@ -27,8 +27,12 @@ import (
 //go:embed dist/*
 var webAssets embed.FS
 
+// version is injected at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger.Info("ToolHub starting", "version", version)
 	if err := run(logger); err != nil {
 		logger.Error("toolhub stopped", "error", err)
 		os.Exit(1)

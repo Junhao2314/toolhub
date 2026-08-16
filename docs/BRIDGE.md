@@ -24,12 +24,15 @@ sudo packaging/systemd/install-toolhub-services.sh \
 `toolhub`. The installer:
 
 - validates the managed OS user and canonical home;
-- validates the canonical, root-owned ToolHub repository, embedded mcpm project,
-  executable ownership, modes, shebang, uv interpreter prefix, and capability
-  contract;
+- validates the canonical, root-owned ToolHub repository and its embedded mcpm
+  project, executable ownership/modes, the mcpm launcher, the resolved uv
+  interpreter prefix, and the ToolHub capability contract;
 - creates the shared Bridge group when necessary;
 - creates `/etc/toolhub-bridge/hmac.key` as a root-only file;
 - creates `/var/lib/toolhub-bridge/mcpm-relay.env` with port `6276`;
+- materializes `/usr/libexec/toolhub-bridge`, `/usr/libexec/toolhub-mcpm`
+  (launcher), and `/usr/libexec/toolhub-relay-port-check`, plus the mcpm
+  runtime copy under `/var/lib/toolhub-bridge/mcpm`;
 - renders both units with installation-owned executables and read-only runtime binds;
   only the selected canonical managed home is writable in their private home
   namespaces;
@@ -50,6 +53,10 @@ independent from `TOOLHUB_MASTER_KEY`.
 | `/var/lib/toolhub-bridge/staging` | root-only | transient Salt bundles |
 | `/var/lib/toolhub-bridge/backups` | root-only | local target backups |
 | `/var/lib/toolhub-bridge/mcpm-relay.env` | `root:root`, `0600` | fixed relay port |
+| `/var/lib/toolhub-bridge/mcpm` | root-only | materialized mcpm runtime (src + site-packages) |
+| `/usr/libexec/toolhub-bridge` | `root:root`, `0755` | Bridge binary copy |
+| `/usr/libexec/toolhub-mcpm` | `root:root`, `0755` | mcpm launcher wrapper |
+| `/usr/libexec/toolhub-relay-port-check` | `root:root`, `0755` | fixed-port pre-check |
 | `/srv/salt/states` | existing Salt base root | versioned ToolHub assets |
 
 The ToolHub container mounts only the runtime socket directory, read-only, and
@@ -141,21 +148,23 @@ The only allowed relay unit is `toolhub-mcpm-relay.service`; allowed actions are
 status, start, stop, and restart plus structured relay health. Start and
 successful Apply enable the unit; Stop disables it. Restart stops the unit,
 waits for the configured port to become bindable, and starts it without MCPM
-port fallback. Full health checks the fixed admin socket capability, exact
-routing status, and normalized upstream contract observation. It never creates
+port fallback. Full health probes the live `/mcp` endpoint and normalized
+upstream member availability; it never creates
 a synthetic client session or invokes a business tool. Running destructive
 target work cannot be force-cancelled.
 
 Apply and Restore back up the registry, three native anchors, environment, and
 routing bundle before any write. A routing-only change uses atomic replacement
-plus admin hot reload and does not restart upstream processes. Runtime changes
+and does not restart upstream processes. Runtime changes
 use the fixed restart path. A reload, restart, or full-health failure restores
 the complete old file set and old process state, then returns a failed target;
 desired and Published pointers must not advance.
 
 All native `toolhub-relay` anchors use the same explicit Profile route:
 `http://127.0.0.1:6276/mcp?profile=<published-profile-name>`. The Profile name
-is resolved from the applied Published Profile revision. A direct `/mcp`
+is resolved from the applied Published Profile revision; with no published
+Profile (compatibility mode) the anchor falls back to the bare
+`http://127.0.0.1:6276/mcp` endpoint. A direct `/mcp`
 request without `profile` uses the default all-tools catalog; duplicated or
 unknown explicit `profile` queries still fail closed. The old `toolhub_profile`
 and `toolhub_client` query forms are rejected.
@@ -176,20 +185,29 @@ mount a managed home to work around access failures.
 
 ## Relay Governance Boundary
 
-The private governance routes are typed and remain on the same HMAC Unix
-socket: capability discovery, routing-bundle reload, contract observation,
-confirmation approve/reject, payload-free observation drain, and native-client
-inspection, plus the hash-bound session canary. They do not provide a generic
-action or body proxy.
+Routing governance was removed from the relay unit on 2026-08-16. The unit
+starts mcpm with `profile run --http --host 127.0.0.1 --port ${TOOLHUB_RELAY_PORT}
+toolhub` — no `--toolhub-routing`/`--toolhub-admin-socket` flags — so the relay
+runs in compatibility (pass-through) mode and exposes every configured MCP tool.
+Do not re-add those flags without a working contract-publication flow
+(`run.py` requires them as a pair).
 
-The session canary is the final enforcement preflight check. It accepts only an
-`enforced` candidate routing bundle whose canonical hash matches the request,
-then uses the live shared upstream pool to verify: the explicit Claude Profile
+The private governance routes remain typed on the same HMAC Unix
+socket for control-plane compatibility: capability discovery, routing-bundle
+reload, contract observation, confirmation approve/reject, payload-free
+observation drain, and native-client inspection. They do not provide a generic
+action or body proxy. The running relay no longer enforces filtered catalogs,
+session binding, or call policy.
+
+The session canary was the final enforcement preflight check of the removed
+flow. It accepted only an
+`enforced` candidate routing bundle whose canonical hash matched the request,
+then used the live shared upstream pool to verify: the explicit Claude Profile
 catalog, the explicit Codex Profile catalog, missing-Profile default all-tools
 behavior, unknown-Profile `profile_unknown` rejection, and two concurrent
-sessions while every configured upstream process count remains exactly one. It
-lists catalogs but never calls a business tool. The HMAC-authenticated result is
-ephemeral and bypasses the BoltDB idempotency journal.
+sessions while every configured upstream process count remained exactly one. It
+listed catalogs but never called a business tool. The HMAC-authenticated result was
+ephemeral and bypassed the BoltDB idempotency journal.
 
 Native-client inspection accepts only the managed username and `claude` or
 `codex` client kind. The Bridge scans only managed-home `~/.local/bin`,
@@ -207,10 +225,12 @@ entries are part of the external launch environment and cannot be verified by
 ToolHub.
 
 The relay admin protocol is a separate bounded one-line JSON protocol at the
-fixed `/run/toolhub-mcpm/relay.sock`. The systemd unit passes the fixed routing
-file `~/.config/mcpm/toolhub-routing.json`; neither path is caller-selectable.
-The installer requires a compatible repository `.venv/bin/mcpm` contract and
-does not download, install, or update mcpm. The resolved interpreter must remain
+fixed `/run/toolhub-mcpm/relay.sock`. The control plane still writes the fixed
+routing file `~/.config/mcpm/toolhub-routing.json`; neither path is
+caller-selectable. With routing governance removed (2026-08-16), the unit no
+longer passes `--toolhub-routing`, so mcpm does not read that file at runtime.
+The installer requires a compatible mcpm launcher contract (`/usr/libexec/toolhub-mcpm`)
+and does not download, install, or update mcpm. The resolved interpreter must remain
 under `/root/.local/share/uv/python`.
 
 Routing bundles contain only immutable revision IDs and hashes, accepted

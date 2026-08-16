@@ -143,13 +143,36 @@ func TestPackagedInstallerUsesInstallationRuntimeArguments(t *testing.T) {
 		t.Fatal("Bridge unit must use installation-owned executables and runtime binds")
 	}
 	relay := readPackagingFile(t, "toolhub-mcpm-relay.service")
+	execStart := ""
+	for _, line := range strings.Split(relay, "\n") {
+		if strings.HasPrefix(line, "ExecStart=") {
+			execStart = line
+			break
+		}
+	}
+	if execStart == "" {
+		t.Fatal("relay unit is missing ExecStart")
+	}
 	for _, required := range []string{
-		"WorkingDirectory=/tmp",
 		"ExecStart=/usr/libexec/toolhub-mcpm",
-		"BindReadOnlyPaths=/usr/libexec/toolhub-mcpm /var/lib/toolhub-bridge/mcpm @MCPM_INTERPRETER@",
+		"profile run --http --host 127.0.0.1 --port ${TOOLHUB_RELAY_PORT} toolhub",
+	} {
+		if !strings.Contains(execStart, required) {
+			t.Fatalf("relay ExecStart is missing %q: %s", required, execStart)
+		}
+	}
+	for _, forbidden := range []string{
 		"--toolhub-routing",
 		"--toolhub-admin-socket",
-		"--toolhub-observation-limit 100000",
+		"--toolhub-observation-limit",
+	} {
+		if strings.Contains(execStart, forbidden) {
+			t.Fatalf("relay ExecStart must not contain routing governance flag %q: %s", forbidden, execStart)
+		}
+	}
+	for _, required := range []string{
+		"WorkingDirectory=/tmp",
+		"BindReadOnlyPaths=/usr/libexec/toolhub-mcpm /var/lib/toolhub-bridge/mcpm @MCPM_INTERPRETER@",
 	} {
 		if !strings.Contains(relay, required) {
 			t.Fatalf("relay unit is missing %q", required)

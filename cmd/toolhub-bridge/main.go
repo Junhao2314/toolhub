@@ -35,6 +35,9 @@ type options struct {
 	SaltStateRoot string
 }
 
+// version is injected at build time via -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	var options options
 	flag.StringVar(&options.Socket, "socket", "/run/toolhub-bridge/bridge.sock", "Unix socket path")
@@ -55,6 +58,7 @@ func main() {
 
 func run(options options) error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger.Info("toolhub-bridge starting", "version", version)
 	key, err := loadKey(options.KeyFile)
 	if err != nil {
 		return err

@@ -32,13 +32,18 @@ Reusing a key with a different canonical request returns `409`.
 - `GET /skills`, `POST /skills/upload`, and `POST /skills/import` manage
   immutable content-addressed Skill artifacts. Git/SkillsMP/Xiaping imports are
   operations. Import and update discovery never Apply.
+- `PUT /skills/{skillID}/tags` replaces a Skill's normalized tag set (lowercase
+  slugs, unique, at most 50). The `required` tag means every non-`shared`
+  Profile revision must include that Skill; a new revision that omits a
+  required Skill is rejected. Existing revisions remain immutable.
 - `GET|POST /mcp/servers` and `PUT|DELETE /mcp/servers/{id}` manage the MCP
   Library. Responses expose only `envKeys` and `headerKeys`, never values.
 - MCP input secret semantics are write-only: a non-empty value sets/replaces;
   an existing key with an empty value is retained; an omitted key is removed.
 - `/profiles` is the only Profile model. Each immutable revision pins exact
   Skill versions and MCP revisions; current Library pointers are used only for
-  new Profiles or explicit Refresh.
+  new Profiles or explicit Refresh. Saving a new revision requires every
+  Library Skill tagged `required` (non-`shared` Profiles only).
 - Profile list/detail responses and revision history expose the pinned
   `mcpGovernance` and `toolRules` arrays so an editor can round-trip a governed
   revision without weakening or dropping policy. Current Profile responses also
@@ -175,6 +180,13 @@ rerun. Update discovery follows the singleton cron and timezone in Settings.
 Backup GC is scheduled daily with fixed 30-day/10-per-target retention.
 
 ## Relay
+
+Routing governance was removed from the relay unit on 2026-08-16; the running
+relay is a compatibility pass-through that exposes every configured tool. The
+control-plane governance endpoints below remain available and revision-bound,
+and the applied Relay Configuration is still the source of the member set, but
+no filtered catalog, session binding, canary, or call policy is enforced by the
+running relay.
 
 `POST /targets/{id}/relay/{start|stop|restart|health}` queues fixed controls for
 `local/shared-relay`. Stop persists `relayIntentionalPaused=true`; periodic

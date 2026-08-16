@@ -52,7 +52,8 @@ The installer validates repository ownership, the embedded mcpm project,
 executable ownership/modes, the mcpm launcher and uv interpreter, and the
 ToolHub capability contract before writing units. It prints the shared Bridge GID. Read the
 root-only HMAC key locally and place its exact value in `.env`; do not commit or
-log it. The units bind the repositories read-only inside their `ProtectHome`
+log it. The units bind the installation-owned executables and the materialized
+`/var/lib/toolhub-bridge/mcpm` runtime read-only inside their `ProtectHome`
 namespaces, while managed-home writes remain separately guarded.
 
 ## 3. Configure ToolHub

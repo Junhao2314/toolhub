@@ -67,36 +67,42 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
    detected/repaired.
 6. Restart and run the explicit health action.
 7. Require every desired MCP member to be `ready`; for the current canary this
-   means eight namespaces and 75 tools. Call the safe read-only ACEMCP indexing
+   means six namespaces (acemcp, agent-browser, context7, deepwiki, grok-search,
+   trellis) and 68 tools. Call the safe read-only ACEMCP indexing
    status, Grok config info, and Trellis UI info tools.
 8. Wait through one 30-minute full member-health cadence and repeat the check.
 
 ### Relay Governance Transition
 
-1. Start in `compatibility`; startup may identify the exact legacy
-   `shared-mcp` Profile but must not observe, accept, publish, Apply, or create an
-   operation.
-2. Observe and accept every current Contract, then resolve every Profile whose
+Relay routing governance was removed on 2026-08-16 (see
+[`README.md`](../README.md)); the relay unit now runs mcpm in compatibility
+pass-through mode without `--toolhub-routing`. The control-plane governance
+endpoints and routing-file writes remain for compatibility, but the running
+relay exposes all configured tools. The historical transition steps below are
+retained only as a record of the removed flow; do not follow them without a
+working contract-publication flow:
+
+1. Observe and accept every current Contract, then resolve every Profile whose
    client/category metadata is ambiguous. First Contract acceptance may create
    candidate Profile revisions but must not publish them.
-3. Preflight `enforced` and verify the fixed runtime order: mcpm capability,
+2. Preflight `enforced` and verify the fixed runtime order: mcpm capability,
    Claude native-client inspection, Codex native-client inspection, then the
    five-part session canary. Missing features, unsupported clients, an
    unhealthy/non-v2 active Relay snapshot, missing backup, or unreviewed state
    must fail closed before delivery.
-4. Verify that final canary against the candidate routing bundle: Claude
+3. Verify that final canary against the candidate routing bundle: Claude
    explicit Profile catalog, Codex explicit Profile catalog, missing Profile
    default all-tools behavior, unknown Profile `profile_unknown` failure, and two
    concurrent sessions with every upstream process count still exactly one.
-5. Apply `enforced`. Only after a healthy Applied snapshot has a Restore backup
+4. Apply `enforced`. Only after a healthy Applied snapshot has a Restore backup
    may the exact legacy Profile be marked `migrated_relay` and hidden from the
    ordinary Profile list. Keep its history, Bundle references, and Secret
    bindings.
-6. Use each Profile's **Launch session** action and copy the server-generated
+5. Use each Profile's **Launch session** action and copy the server-generated
    strict `claude --strict-mcp-config --mcp-config ...` or `codex
    --strict-config -c ...` command. Do not reuse a command for another Profile;
    its Relay URL binds the client kind and exact Profile UUID.
-7. Roll back through normal Preflight/Apply to the previous `compatibility`
+6. Roll back through normal Preflight/Apply to the previous `compatibility`
    routing bundle. Confirm upstreams are not duplicated, expired grants do not
    revive, Contract history remains, and old native clients regain the complete
    catalog.
@@ -169,14 +175,13 @@ Never point the old application at the generation-2 volume or the new
 application at the old volume. Keep the generation-2 backups intact until the
 rollback decision window closes.
 
-For a routing-governance rollback, prefer normal Preflight/Apply of the retained
-`compatibility` Relay Configuration. This does not delete Contract history or
-candidate revisions, restart unchanged upstreams, or revive consumed/expired
-confirmation grants. A binary rollback across migration `004` must restore the
-pre-`004` PostgreSQL volume at the same time; an older binary must never connect
-to a database whose governance migration has been applied. Relay runtime
-failures do not require deleting the pinned mcpm registry, Secrets, or active
-membership.
+Routing-governance rollback is no longer a live operation path: the relay unit
+was switched to compatibility pass-through mode on 2026-08-16 and the
+`enforced` flow is retained only as history. A binary rollback across migration
+`004` must restore the pre-`004` PostgreSQL volume at the same time; an older
+binary must never connect to a database whose governance migration has been
+applied. Relay runtime failures do not require deleting the pinned mcpm
+registry, Secrets, or active membership.
 
 Relay governance rollout is local to `local/shared-relay`; it does not authorize
 remote Salt MCP rollout. Keep unavailable minions excluded, preserve accepted-key

@@ -2,10 +2,15 @@
 
 MCPM_DIR := mcpm
 
+# Injected into the binaries via -ldflags; falls back to a dirty-tree marker
+# when git metadata is unavailable (e.g. shallow exports).
+VERSION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+VERSION_LDFLAGS := -X main.version=$(VERSION)
+
 build: web
-	go build -o bin/toolhub ./cmd/toolhub
-	go build -o bin/toolhub-bridge ./cmd/toolhub-bridge
-	go build -o bin/toolhub-config-migrate ./cmd/toolhub-config-migrate
+	go build -ldflags "$(VERSION_LDFLAGS)" -o bin/toolhub ./cmd/toolhub
+	go build -ldflags "$(VERSION_LDFLAGS)" -o bin/toolhub-bridge ./cmd/toolhub-bridge
+	go build -ldflags "$(VERSION_LDFLAGS)" -o bin/toolhub-config-migrate ./cmd/toolhub-config-migrate
 
 web:
 	cd web && npm ci && npm run build

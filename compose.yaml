@@ -27,6 +27,8 @@ services:
   toolhub:
     build:
       context: .
+      args:
+        VCS_REVISION: ${VCS_REVISION:-dev}
     container_name: toolhub
     logging:
       driver: "json-file"

@@ -97,8 +97,16 @@ func (s *Scheduler) enqueueContractObservation(ctx context.Context) {
 }
 
 func (s *Scheduler) enqueueTelemetryPull(ctx context.Context) {
+	healthy, err := s.store.RelayGovernanceHealthy(ctx)
+	if err != nil {
+		s.logger.Error("check relay health for telemetry pull", "error", err)
+		return
+	}
+	if !healthy {
+		return
+	}
 	scheduledAt := s.now().UTC().Truncate(time.Minute)
-	_, err := s.store.CreateOperation(ctx, store.CreateOperationInput{
+	_, err = s.store.CreateOperation(ctx, store.CreateOperationInput{
 		Kind:           "relay_telemetry_pull",
 		IdempotencyKey: "scheduled-relay-telemetry:" + scheduledAt.Format("20060102T1504Z"),
 		Request:        map[string]any{"scheduled": true, "scheduledAt": scheduledAt},

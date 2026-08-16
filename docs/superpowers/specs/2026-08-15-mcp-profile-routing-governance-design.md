@@ -2,6 +2,14 @@
 
 Date: 2026-08-15
 
+> Status: the control-plane governance endpoints, revision history, and
+> routing-file writes were implemented, but relay routing governance was
+> removed from the relay unit on 2026-08-16 (`3cc4fac`): the
+> contract-publication flow never worked and an empty bundle hid every tool.
+> The running relay is a compatibility pass-through without
+> `--toolhub-routing`/`--toolhub-admin-socket`; this document is retained as
+> the design record of the removed flow.
+
 ## Goal
 
 Keep one persistent local mcpm relay in which every configured upstream MCP

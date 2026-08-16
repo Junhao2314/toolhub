@@ -88,7 +88,7 @@ func TestSchedulerEnqueuesHealthyContractObservationOnBoundedCadence(t *testing.
 }
 
 func TestSchedulerEnqueuesTelemetryPullWithMinuteIdempotency(t *testing.T) {
-	fake := &fakeSchedulerStore{}
+	fake := &fakeSchedulerStore{relayHealthy: true}
 	scheduler := &Scheduler{store: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: func() time.Time {
 		return time.Date(2026, 8, 16, 12, 44, 29, 0, time.UTC)
 	}}
@@ -99,5 +99,14 @@ func TestSchedulerEnqueuesTelemetryPullWithMinuteIdempotency(t *testing.T) {
 	input := fake.created[0]
 	if input.Kind != "relay_telemetry_pull" || input.IdempotencyKey != "scheduled-relay-telemetry:20260816T1244Z" {
 		t.Fatalf("telemetry pull=%+v", input)
+	}
+}
+
+func TestSchedulerSkipsTelemetryPullWhenRelayUnhealthy(t *testing.T) {
+	fake := &fakeSchedulerStore{relayHealthy: false}
+	scheduler := &Scheduler{store: fake, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), now: time.Now}
+	scheduler.enqueueTelemetryPull(context.Background())
+	if len(fake.created) != 0 {
+		t.Fatalf("unhealthy relay queued telemetry pull: %d", len(fake.created))
 	}
 }

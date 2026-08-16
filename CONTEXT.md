@@ -10,6 +10,12 @@ The central collection of immutable, content-addressed Skill artifacts and MCP
 definitions available for reuse.
 _Avoid_: Runtime inventory, deployment target
 
+**Skill Tag**:
+A normalized lowercase metadata label (slug, up to 50 per Skill) on a Library
+Skill. The reserved `required` tag means every non-`shared` Profile revision
+must include that Skill; new revisions that omit it are rejected.
+_Avoid_: Free-text category, profile membership flag
+
 **Skill Import**:
 Copying a Skill discovered on a local runtime into the Library. Import changes
 the Library only and never changes a runtime target.

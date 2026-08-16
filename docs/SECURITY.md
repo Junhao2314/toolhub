@@ -63,28 +63,34 @@ prompts, raw errors, secret values, and session identifiers are never forwarded.
 Argument-summary pointers use only anonymous structural ordinals (`/oN` for an
 object member and `/aN` for an array member), never original object keys.
 
-Confirmation challenges and one-shot 60-second grants live only in the mcpm
-Relay process. They are not stored in PostgreSQL, desired snapshots, operations,
-or Bridge BoltDB. Approval requires the exact Profile display name and binding
-hash, rechecks the current Profile revision, and sends only the challenge ID and
-binding hash across the Bridge. It requires session authentication and CSRF but
-not password reauthentication. The synchronous audit record is payload-free and
+Confirmation challenges and one-shot 60-second grants were part of the removed
+relay-governance flow (see the canary note below); the pass-through relay no
+longer creates challenges or consumes grants. The historical design, retained
+as a record: challenges/grants lived only in the mcpm
+Relay process, were not stored in PostgreSQL, desired snapshots, operations,
+or Bridge BoltDB. Approval required the exact Profile display name and binding
+hash, rechecked the current Profile revision, and sent only the challenge ID and
+binding hash across the Bridge. It required session authentication and CSRF but
+not password reauthentication. The synchronous audit record was payload-free and
 limited to challenge/binding/argument hashes, Profile/revision/server/tool IDs,
-reason codes, and the decision outcome. A successful Relay decision is withheld
-from the Browser if that synchronous audit record cannot be persisted. A
+reason codes, and the decision outcome. A successful Relay decision was withheld
+from the Browser if that synchronous audit record could not be persisted. A
 post-dispatch transport failure or a
-decision response whose challenge/binding does not match is audited and returned
-as an unknown outcome, never retried automatically. The Relay consumes a grant
-before dispatch and never restores it, so a confirmed high-risk call is sent at
-most once. Only an adapter-proven pre-dispatch failure is `not_executed`; any
-unproven transport failure after the boundary is `execution_unknown` and
-requires state inspection before a manual retry.
+decision response whose challenge/binding did not match was audited and returned
+as an unknown outcome, never retried automatically. The Relay consumed a grant
+before dispatch and never restored it, so a confirmed high-risk call was sent at
+most once. Only an adapter-proven pre-dispatch failure was `not_executed`; any
+unproven transport failure after the boundary was `execution_unknown` and
+required state inspection before a manual retry.
 
-The typed session canary is bound to the canonical hash of an `enforced`
-candidate routing bundle. It checks Claude/Codex catalog binding,
+The typed session canary was part of the removed `enforced` routing-governance
+flow (relay routing governance was dropped from the relay unit on 2026-08-16;
+the running relay is a compatibility pass-through). The historical canary check
+is retained only as a record: it was bound to the canonical hash of an
+`enforced` candidate routing bundle, checked Claude/Codex catalog binding,
 missing/unknown Profile behavior, concurrency, and the existing shared process
-counts without invoking a business tool. Its HMAC response is ephemeral and is
-not stored in BoltDB or PostgreSQL.
+counts without invoking a business tool, and its HMAC response was ephemeral
+and not stored in BoltDB or PostgreSQL.
 
 Local MCP intake requires a separate revision-bound confirmation. Its preview
 returns sanitized transport fields and secret key names only. After confirmation,
@@ -136,9 +142,11 @@ read-only for Skills and inventory.
 
 ## MCP Scope
 
-Local MCP requires a compatible repository `.venv/bin/mcpm` whose machine-
-readable ToolHub contract advertises admin protocol 1, routing schema 1, and all
-required governance features. The installer and runtime fail closed; neither
+Local MCP requires a compatible installation-owned mcpm launcher
+(`/usr/libexec/toolhub-mcpm`, materialized by the installer with its runtime
+under `/var/lib/toolhub-bridge/mcpm`) whose machine-readable ToolHub contract
+advertises admin protocol 1, routing schema 1, and all required governance
+features. The installer and runtime fail closed; neither
 auto-finds, installs, upgrades, nor falls back to native per-server local
 delivery. ToolHub manages one profile named `toolhub`, one fixed relay unit, one
 atomic routing file at `~/.config/mcpm/toolhub-routing.json`, one admin socket at
@@ -148,11 +156,12 @@ Hermes' existing `mcp_servers` map is collapsed on Apply; reconcile preserves
 later unmanaged entries.
 
 The relay unit hides all homes with a private tmpfs and binds back only the
-selected canonical managed home as writable. It binds the ToolHub repository
-(including the embedded mcpm project) plus the resolved uv interpreter
-read-only. Its private runtime directory,
-admin socket, and files are created under a `UMask=0077`; the socket protocol is
-one-line, size/deadline bounded, and exposes fixed typed operations only.
+selected canonical managed home as writable. It binds the installation-owned
+launcher, the materialized `/var/lib/toolhub-bridge/mcpm` runtime, and the
+resolved uv interpreter read-only, not the ToolHub checkout. Its private runtime
+directory, admin socket, and files are created under a `UMask=0077`; the socket
+protocol is one-line, size/deadline bounded, and exposes fixed typed operations
+only.
 `ProtectSystem=strict`, an empty capability bounding set, private devices,
 kernel/control-group protections, and the address-family allowlist remain
 active. `MemoryDenyWriteExecute` is not used because supported Node/V8 MCPs

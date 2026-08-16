@@ -12,7 +12,8 @@ COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
 COPY --from=web /src/web/dist/ ./cmd/toolhub/dist/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/toolhub ./cmd/toolhub
+ARG VCS_REVISION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VCS_REVISION}" -o /out/toolhub ./cmd/toolhub
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates git tzdata && addgroup -S toolhub && adduser -S -G toolhub toolhub

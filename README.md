@@ -26,25 +26,26 @@ Licensed under the [MIT License](LICENSE).
   `all_accepted` (all tools from its pinned accepted MCP contract); `selected`
   and `hidden` remain explicit opt-in modes. The local Hermes MCP map is
   collapsed to that anchor on Apply; remote Hermes remains read-only.
+- `mcpm/`: the embedded, ToolHub-owned mcpm Python project. The installer
+  materializes it at `/usr/libexec/toolhub-mcpm` (launcher) with its runtime
+  under `/var/lib/toolhub-bridge/mcpm`, so the relay keeps working when the
+  checkout is moved or re-cloned.
 
 ToolHub is the MCP control plane: it versions Library inputs, Contracts,
 Profiles, policy, desired snapshots, and routing bundles, then delivers them
 through the Bridge. It never proxies MCP tool traffic. `mcpm` is the local MCP
-data plane: it owns the shared upstream process set, binds each native client
-session to an exact Published Profile revision, filters catalogs, enforces call
-policy, and emits payload-free observations.
+data plane: it owns the shared upstream process set and exposes every configured
+tool from the `toolhub` Profile through one relay endpoint.
 
-Relay governance may start in explicit `compatibility` mode while Contracts are
-being reviewed. An explicit published Profile selects a restricted catalog;
-omitting `profile` uses the default all-tools catalog. Contract review and
-Profile candidate creation never publish or Apply automatically. Switching to
-`enforced` is revision-bound and fails closed unless the applied v2 Relay state,
-Restore backup, accepted Contracts, Profile metadata, compatible mcpm features,
-and both Claude/Codex adapters are ready. Enforcement preflight runs the fixed
-sequence mcpm capability, Claude inspection, Codex inspection, then a five-part
-session-routing canary over the candidate bundle. The legacy `shared-mcp`
-Profile is retained for history and rollback, then hidden from the ordinary
-Profile list only after that transition succeeds.
+Relay routing governance was removed on 2026-08-16: the contract-publication
+flow never worked and an empty bundle hid every tool. The relay unit therefore
+runs in compatibility (pass-through) mode — `profile run ... toolhub` without
+`--toolhub-routing` — and exposes all configured MCP tools. Do not re-add
+`--toolhub-routing`/`--toolhub-admin-socket` without a working contract flow.
+The governance control endpoints, revision history, and routing-file writes
+remain in the control plane for compatibility, but the running relay no longer
+enforces filtered catalogs or call policy. The legacy `shared-mcp`
+Profile is retained for history and rollback.
 
 There is no Agent, WebSocket enrollment, SSH fallback, RBAC, multi-user API,
 review/approval workflow, deployment table, or legacy job queue.
@@ -66,9 +67,12 @@ distinct fresh database. Keep the old volume for whole-stack rollback.
 - PostgreSQL 16 (provided by Compose).
 - Salt Master/minions 3008.x for remote targets. ToolHub reuses the existing
   `base` root at `/srv/salt/states` and does not edit `/etc/salt/master`.
-- The embedded `mcpm/` project with a root-owned `.venv/bin/mcpm` launcher and
+- The embedded `mcpm/` project with a root-owned `.venv/bin/mcpm` launcher
+  (repository build/validation only) and
   uv-managed interpreter under `/root/.local/share/uv/python`. ToolHub does not
-  install or upgrade the embedded runtime automatically.
+  install or upgrade the embedded runtime automatically; the installer
+  validates it and materializes the installation-owned `/usr/libexec/toolhub-mcpm`
+  launcher plus the `/var/lib/toolhub-bridge/mcpm` runtime copy.
 
 Build and install the host services:
 
@@ -119,6 +123,11 @@ five-minute, one-use preflight token bound to the Profile revision, target
 revision, and canonical manifest. Apply mirrors the manageable scope and pins
 the exact current artifact versions, MCP revisions, secret IDs, and hashes in an
 immutable desired snapshot.
+
+Skills carry normalized tags (lowercase slugs, up to 50 per Skill). The
+`required` tag means every non-`shared` Profile revision must include that
+Skill; saving a revision without a required Skill is rejected. Existing
+revisions stay immutable — the check applies when a new revision is saved.
 
 Target edit and Restore also create new snapshots. Every five minutes,
 reconcile repairs only pinned managed members and preserves content added after
