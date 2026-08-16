@@ -442,11 +442,10 @@ func (a *API) acceptRelayContract(w http.ResponseWriter, r *http.Request) {
 		a.handleStoreError(w, r, err)
 		return
 	}
-	if err := a.store.AcceptContract(r.Context(), revision.Revision.ServerID, revisionID); err != nil {
+	if err := a.store.AcceptContract(r.Context(), revision.Revision.ServerID, revisionID, clientIP(r)); err != nil {
 		a.handleStoreError(w, r, err)
 		return
 	}
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "relay_contract_accept", ResourceType: "relay_contract", ResourceID: revisionID, Outcome: "success", IPAddress: clientIP(r), Metadata: map[string]any{"serverId": revision.Revision.ServerID, "canonicalHash": revision.Revision.CanonicalHash}})
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -375,6 +375,57 @@ func TestBootstrapFirstContractCreatesCandidateProfilesWithoutPublishing(t *test
 	}
 }
 
+func TestAcceptContractAuditFailureRollsBackPointerAndCandidateProfiles(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "contract-audit-rollback", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayRevision, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1 WHERE singleton`, relayRevision.ID); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "shared-mcp", ClientKind: "shared", Category: "relay", MigrationState: "compatibility"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET legacy_profile_id=$1,legacy_profile_state='pending' WHERE singleton`, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-contract-audit-rollback", ClientKind: "claude", Category: "coding",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "status", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `DROP TABLE audit_events`); err != nil {
+		t.Fatal(err)
+	}
+
+	acceptErr := st.AcceptContract(ctx, server.ID, observation.Revision.ID)
+	var acceptedRevisionID string
+	if err := st.pool.QueryRow(ctx, `SELECT coalesce(accepted_revision_id::text,'') FROM mcp_contract_state WHERE server_id=$1`, server.ID).Scan(&acceptedRevisionID); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := st.Profile(ctx, profile.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if acceptErr == nil || acceptedRevisionID != "" || unchanged.CurrentRevisionID != profile.CurrentRevisionID || unchanged.Revision != profile.Revision {
+		t.Fatalf("accept error=%v pointer=%q profile revision=%d/%s want rollback to %d/%s", acceptErr, acceptedRevisionID, unchanged.Revision, unchanged.CurrentRevisionID, profile.Revision, profile.CurrentRevisionID)
+	}
+}
+
 func TestFirstContractBootstrapRequiresPendingLegacyTransition(t *testing.T) {
 	for _, test := range []struct {
 		name        string

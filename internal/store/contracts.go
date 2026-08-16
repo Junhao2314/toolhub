@@ -349,14 +349,17 @@ func (s *Store) ObserveContractsTx(ctx context.Context, tx pgx.Tx, input Contrac
 	return ContractObservationResult{Revision: revision, Statuses: statuses}, nil
 }
 
-func (s *Store) AcceptContract(ctx context.Context, serverID, revisionID string) error {
+func (s *Store) AcceptContract(ctx context.Context, serverID, revisionID string, ipAddresses ...string) error {
+	if len(ipAddresses) > 1 {
+		return errors.New("contract acceptance accepts at most one IP address")
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var owner string
-	if err := tx.QueryRow(ctx, `SELECT server_id::text FROM mcp_contract_revisions WHERE id=$1 FOR SHARE`, revisionID).Scan(&owner); err != nil {
+	var owner, canonicalHash string
+	if err := tx.QueryRow(ctx, `SELECT server_id::text,canonical_hash FROM mcp_contract_revisions WHERE id=$1 FOR SHARE`, revisionID).Scan(&owner, &canonicalHash); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -380,6 +383,20 @@ func (s *Store) AcceptContract(ctx context.Context, serverID, revisionID string)
 		if err := s.bootstrapFirstContractProfilesTx(ctx, tx, serverID, mode, relayRevisionID, legacyProfileID, legacyProfileState); err != nil {
 			return err
 		}
+	}
+	ipAddress := ""
+	if len(ipAddresses) == 1 {
+		ipAddress = ipAddresses[0]
+	}
+	if err := insertAudit(ctx, tx, domain.AuditEvent{
+		Action:       "relay_contract_accept",
+		ResourceType: "relay_contract",
+		ResourceID:   revisionID,
+		Outcome:      "success",
+		IPAddress:    ipAddress,
+		Metadata:     map[string]any{"serverId": serverID, "canonicalHash": canonicalHash},
+	}); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }

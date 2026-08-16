@@ -6,12 +6,21 @@ import (
 	"net"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/security"
 )
 
+type auditExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 func (s *Store) Audit(ctx context.Context, event domain.AuditEvent) error {
+	return insertAudit(ctx, s.pool, event)
+}
+
+func insertAudit(ctx context.Context, execer auditExecer, event domain.AuditEvent) error {
 	metadata, err := json.Marshal(security.RedactMap(event.Metadata))
 	if err != nil {
 		return err
@@ -20,7 +29,7 @@ func (s *Store) Audit(ctx context.Context, event domain.AuditEvent) error {
 	if parsed := net.ParseIP(event.IPAddress); parsed != nil {
 		ip = parsed.String()
 	}
-	_, err = s.pool.Exec(ctx, `INSERT INTO audit_events(id,action,resource_type,resource_id,outcome,ip_address,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)`, uuid.NewString(), event.Action, event.ResourceType, event.ResourceID, event.Outcome, ip, jsonText(metadata))
+	_, err = execer.Exec(ctx, `INSERT INTO audit_events(id,action,resource_type,resource_id,outcome,ip_address,metadata) VALUES($1,$2,$3,$4,$5,$6,$7)`, uuid.NewString(), event.Action, event.ResourceType, event.ResourceID, event.Outcome, ip, jsonText(metadata))
 	return err
 }
 
