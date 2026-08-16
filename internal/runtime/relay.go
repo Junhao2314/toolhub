@@ -59,6 +59,7 @@ func (SystemdRelayController) Action(ctx context.Context, action string) (string
 		"status":     {"is-active", RelayUnitName},
 		"is-enabled": {"is-enabled", RelayUnitName},
 		"enable":     {"enable", RelayUnitName},
+		"disable":    {"disable", RelayUnitName},
 		"start":      {"enable", "--now", RelayUnitName},
 		"start-unit": {"start", RelayUnitName},
 		"stop":       {"disable", "--now", RelayUnitName},
@@ -681,6 +682,11 @@ func (r *RelayManager) restoreRelayProcess(ctx context.Context, previous relayPr
 		status, _ := r.Status(ctx, port, false)
 		if !status.Healthy {
 			return errors.New("previous relay process did not recover")
+		}
+		if !previous.Enabled {
+			if _, err := r.Controller.Action(ctx, "disable"); err != nil {
+				return err
+			}
 		}
 		return nil
 	}

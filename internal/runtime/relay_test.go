@@ -42,6 +42,9 @@ func (f *fakeRelayController) Action(_ context.Context, action string) (string, 
 	case "enable":
 		f.enabled = true
 		return "enabled", nil
+	case "disable":
+		f.enabled = false
+		return "disabled", nil
 	case "restart", "start", "start-unit":
 		if f.failStarts > 0 {
 			f.failStarts--
@@ -490,6 +493,29 @@ func TestRelayRestorePostWriteScanFailureRestoresOldProcessAndPort(t *testing.T)
 	environment, err := os.ReadFile(manager.EnvironmentFile)
 	if err != nil || string(environment) != "TOOLHUB_RELAY_PORT="+strconv.Itoa(oldPort)+"\n" {
 		t.Fatalf("old relay environment was not restored: body=%s err=%v", environment, err)
+	}
+}
+
+func TestRelayRestoreProcessPreservesRunningAndEnabledState(t *testing.T) {
+	tests := []struct {
+		name     string
+		previous relayProcessSnapshot
+	}{
+		{name: "running and enabled", previous: relayProcessSnapshot{Running: true, Enabled: true}},
+		{name: "running and disabled", previous: relayProcessSnapshot{Running: true, Enabled: false}},
+		{name: "stopped and enabled", previous: relayProcessSnapshot{Running: false, Enabled: true}},
+		{name: "stopped and disabled", previous: relayProcessSnapshot{Running: false, Enabled: false}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, controller, _, _, port := relayFixture(t, true)
+			if err := manager.restoreRelayProcess(context.Background(), test.previous, port); err != nil {
+				t.Fatal(err)
+			}
+			if got := relayStateRunning(controller.state); got != test.previous.Running || controller.enabled != test.previous.Enabled {
+				t.Fatalf("restored process state=(running=%v, enabled=%v), want %+v; actions=%v", got, controller.enabled, test.previous, controller.actions)
+			}
+		})
 	}
 }
 

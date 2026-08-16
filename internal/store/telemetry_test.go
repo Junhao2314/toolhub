@@ -197,6 +197,110 @@ func TestTelemetryIngestTreatsEqualCursorAsNoOpAndAllowsNewBootReset(t *testing.
 	}
 }
 
+func TestTelemetryIngestAcceptsBufferedObservationsAcrossRelayConfigurationTransition(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	removedServer, _, removedProfile, _ := setupPublishedRelayProfile(t, st, "telemetry-removed")
+	removedToolID := integrationToolID(t, st, removedServer.ID, "read_item")
+
+	currentServer, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "relay-telemetry-current", Transport: "http", URL: "https://example.invalid/current"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.ObserveContracts(ctx, ContractObservationInput{ServerID: currentServer.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentProfile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-telemetry-current", ClientKind: "claude", Category: "coding",
+		MCPServerIDs: []string{currentServer.ID}, MCPRevisionIDs: map[string]string{currentServer.ID: currentServer.CurrentRevisionID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentRelay, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{
+		MCPServerIDs: []string{currentServer.ID}, MCPRevisionIDs: map[string]string{currentServer.ID: currentServer.CurrentRevisionID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1 WHERE singleton`, currentRelay.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	bootID := uuid.NewString()
+	observedAt := time.Date(2026, 8, 16, 7, 0, 0, 0, time.UTC)
+	response := bridgeprotocol.ObservationDrainResponse{
+		BootID: bootID,
+		Items: []bridgeprotocol.Observation{
+			telemetryObservation(bootID, 1, observedAt, removedProfile.ID, removedProfile.CurrentRevisionID, removedServer.ID, removedToolID, "allow", "executed", "none", "lt_10ms"),
+			telemetryObservation(bootID, 2, observedAt.Add(time.Minute), currentProfile.ID, currentProfile.CurrentRevisionID, currentServer.ID, integrationToolID(t, st, currentServer.ID, "read_item"), "allow", "executed", "none", "lt_10ms"),
+		},
+		NextSequence: 2,
+	}
+	result, err := st.IngestRelayObservations(ctx, response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := st.RelayObservationCursor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Accepted != 2 || result.Duplicates != 0 || aggregateCallCount(t, st) != 2 || cursor != (RelayObservationCursor{BootID: bootID, Sequence: 2}) {
+		t.Fatalf("transition ingest result=%+v cursor=%+v calls=%d", result, cursor, aggregateCallCount(t, st))
+	}
+}
+
+func TestRelayObservationCursorFallsBackAfterLastServerRemoval(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, _, profile, _ := setupPublishedRelayProfile(t, st, "telemetry-last-removed")
+	toolID := integrationToolID(t, st, server.ID, "read_item")
+	bootID := uuid.NewString()
+	observedAt := time.Date(2026, 8, 16, 8, 0, 0, 0, time.UTC)
+	if _, err := st.IngestRelayObservations(ctx, bridgeprotocol.ObservationDrainResponse{
+		BootID: bootID,
+		Items: []bridgeprotocol.Observation{
+			telemetryObservation(bootID, 1, observedAt, profile.ID, profile.CurrentRevisionID, server.ID, toolID, "allow", "executed", "none", "lt_10ms"),
+		},
+		NextSequence: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	emptyRelay, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPRevisionIDs: map[string]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1 WHERE singleton`, emptyRelay.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	cursor, err := st.RelayObservationCursor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor != (RelayObservationCursor{BootID: bootID, Sequence: 1}) {
+		t.Fatalf("cursor after last server removal=%+v", cursor)
+	}
+	result, err := st.IngestRelayObservations(ctx, bridgeprotocol.ObservationDrainResponse{
+		BootID: bootID,
+		Items: []bridgeprotocol.Observation{
+			telemetryObservation(bootID, 2, observedAt.Add(time.Minute), profile.ID, profile.CurrentRevisionID, server.ID, toolID, "allow", "executed", "none", "lt_10ms"),
+		},
+		NextSequence: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor, err = st.RelayObservationCursor(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Accepted != 1 || aggregateCallCount(t, st) != 2 || cursor != (RelayObservationCursor{BootID: bootID, Sequence: 2}) {
+		t.Fatalf("removed-only ingest result=%+v cursor=%+v calls=%d", result, cursor, aggregateCallCount(t, st))
+	}
+}
+
 func TestTelemetryRetentionDeletesOnlyBucketsOlderThanThirtyDays(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)

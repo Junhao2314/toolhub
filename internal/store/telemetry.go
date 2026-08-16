@@ -59,7 +59,17 @@ func (s *Store) RelayObservationCursor(ctx context.Context) (RelayObservationCur
 	if err != nil {
 		return RelayObservationCursor{}, err
 	}
-	if servers == 0 || missing != 0 || boots != 1 {
+	if servers == 0 {
+		err := s.pool.QueryRow(ctx, `SELECT boot_id,cursor FROM relay_observation_cursors WHERE boot_id<>'' ORDER BY updated_at DESC,server_id LIMIT 1`).Scan(&bootID, &sequence)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return RelayObservationCursor{}, nil
+		}
+		if err != nil {
+			return RelayObservationCursor{}, err
+		}
+		return RelayObservationCursor{BootID: bootID, Sequence: sequence}, nil
+	}
+	if missing != 0 || boots != 1 {
 		return RelayObservationCursor{}, nil
 	}
 	return RelayObservationCursor{BootID: bootID, Sequence: sequence}, nil
@@ -75,13 +85,27 @@ func (s *Store) IngestRelayObservations(ctx context.Context, response bridgeprot
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	serverIDs, err := appliedRelayServerIDsTx(ctx, tx)
+	appliedServerIDs, err := appliedRelayServerIDsTx(ctx, tx)
 	if err != nil {
 		return TelemetryIngestResult{}, err
 	}
-	initialCursors := make(map[string]RelayObservationCursor, len(serverIDs))
-	cursors := make(map[string]RelayObservationCursor, len(serverIDs))
-	for serverID := range serverIDs {
+	knownServerIDs, err := knownRelayServerIDsTx(ctx, tx)
+	if err != nil {
+		return TelemetryIngestResult{}, err
+	}
+	cursorServerIDs := make(map[string]struct{}, len(appliedServerIDs)+len(response.Items))
+	for serverID := range appliedServerIDs {
+		cursorServerIDs[serverID] = struct{}{}
+	}
+	for _, observation := range response.Items {
+		if _, ok := knownServerIDs[observation.ServerID]; !ok {
+			return TelemetryIngestResult{}, ErrConflict
+		}
+		cursorServerIDs[observation.ServerID] = struct{}{}
+	}
+	initialCursors := make(map[string]RelayObservationCursor, len(cursorServerIDs))
+	cursors := make(map[string]RelayObservationCursor, len(cursorServerIDs))
+	for serverID := range cursorServerIDs {
 		if _, err := tx.Exec(ctx, `INSERT INTO relay_observation_cursors(server_id) VALUES($1) ON CONFLICT(server_id) DO NOTHING`, serverID); err != nil {
 			return TelemetryIngestResult{}, err
 		}
@@ -89,7 +113,7 @@ func (s *Store) IngestRelayObservations(ctx context.Context, response bridgeprot
 		if err := tx.QueryRow(ctx, `SELECT boot_id,cursor FROM relay_observation_cursors WHERE server_id=$1 FOR UPDATE`, serverID).Scan(&cursor.BootID, &cursor.Sequence); err != nil {
 			return TelemetryIngestResult{}, err
 		}
-		if cursor.BootID == response.BootID && response.NextSequence < cursor.Sequence {
+		if _, applied := appliedServerIDs[serverID]; applied && cursor.BootID == response.BootID && response.NextSequence < cursor.Sequence {
 			return TelemetryIngestResult{}, ErrConflict
 		}
 		initialCursors[serverID] = cursor
@@ -98,9 +122,6 @@ func (s *Store) IngestRelayObservations(ctx context.Context, response bridgeprot
 
 	result := TelemetryIngestResult{Cursor: RelayObservationCursor{BootID: response.BootID, Sequence: response.NextSequence}}
 	for _, observation := range response.Items {
-		if _, ok := serverIDs[observation.ServerID]; !ok {
-			return TelemetryIngestResult{}, ErrConflict
-		}
 		cursor := cursors[observation.ServerID]
 		if cursor.BootID == observation.BootID && observation.Sequence <= cursor.Sequence {
 			result.Duplicates++
@@ -146,10 +167,12 @@ func (s *Store) IngestRelayObservations(ctx context.Context, response bridgeprot
 		result.Accepted++
 	}
 
-	for serverID := range serverIDs {
+	for serverID := range cursorServerIDs {
 		cursor := initialCursors[serverID]
-		if cursor.BootID == response.BootID && cursor.Sequence == response.NextSequence {
-			continue
+		if cursor.BootID == response.BootID {
+			if cursor.Sequence >= response.NextSequence {
+				continue
+			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE relay_observation_cursors SET boot_id=$2,cursor=$3,updated_at=now() WHERE server_id=$1`, serverID, response.BootID, response.NextSequence); err != nil {
 			return TelemetryIngestResult{}, err
@@ -210,6 +233,23 @@ func (s *Store) RelayGovernanceHealthy(ctx context.Context) (bool, error) {
 
 func appliedRelayServerIDsTx(ctx context.Context, tx pgx.Tx) (map[string]struct{}, error) {
 	rows, err := tx.Query(ctx, `SELECT member.server_id::text FROM relay_configuration_state state JOIN relay_configuration_revision_mcp_servers member ON member.relay_configuration_revision_id=state.applied_revision_id WHERE state.singleton ORDER BY member.position`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]struct{}{}
+	for rows.Next() {
+		var serverID string
+		if err := rows.Scan(&serverID); err != nil {
+			return nil, err
+		}
+		result[serverID] = struct{}{}
+	}
+	return result, rows.Err()
+}
+
+func knownRelayServerIDsTx(ctx context.Context, tx pgx.Tx) (map[string]struct{}, error) {
+	rows, err := tx.Query(ctx, `SELECT DISTINCT server_id::text FROM relay_configuration_revision_mcp_servers ORDER BY server_id::text`)
 	if err != nil {
 		return nil, err
 	}
