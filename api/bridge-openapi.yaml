@@ -663,7 +663,7 @@ components:
           maxItems: 2
           items: {$ref: '#/components/schemas/RelaySessionCanaryProfile'}
         missingProfile: {$ref: '#/components/schemas/RelaySessionCanaryMissing'}
-        invalidProfileErrorCode: {type: string, const: profile_invalid}
+        invalidProfileErrorCode: {type: string, const: profile_unknown}
         concurrentSessionCount: {type: integer, const: 2}
         upstreamProcesses:
           type: array

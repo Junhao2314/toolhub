@@ -198,7 +198,7 @@ func TestRelayEnforcementPreflightRunsCandidateSessionCanaryLast(t *testing.T) {
 				{ClientKind: bridgeprotocol.RuntimeClaude, ProfileID: bundle.Profiles[0].ProfileID, ProfileRevisionID: bundle.Profiles[0].ProfileRevisionID, ToolCount: 0},
 				{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: bundle.Profiles[1].ProfileID, ProfileRevisionID: bundle.Profiles[1].ProfileRevisionID, ToolCount: 0},
 			},
-			MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0}, InvalidProfileErrorCode: "profile_invalid", ConcurrentSessionCount: 2, UpstreamProcesses: []bridgeprotocol.RelaySessionCanaryProcess{},
+			MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0}, InvalidProfileErrorCode: "profile_unknown", ConcurrentSessionCount: 2, UpstreamProcesses: []bridgeprotocol.RelaySessionCanaryProcess{},
 		},
 	}
 	request := bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: hash, RoutingBundle: body}

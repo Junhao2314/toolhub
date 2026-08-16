@@ -84,7 +84,7 @@ func (f *fakeAdapter) RelaySessionCanary(_ context.Context, input bridgeprotocol
 			{ClientKind: bridgeprotocol.RuntimeClaude, ProfileID: "00000000-0000-0000-0000-000000000010", ProfileRevisionID: "00000000-0000-0000-0000-000000000011", ToolCount: 0},
 			{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: "00000000-0000-0000-0000-000000000020", ProfileRevisionID: "00000000-0000-0000-0000-000000000021", ToolCount: 0},
 		},
-		MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0}, InvalidProfileErrorCode: "profile_invalid", ConcurrentSessionCount: 2, UpstreamProcesses: []bridgeprotocol.RelaySessionCanaryProcess{},
+		MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0}, InvalidProfileErrorCode: "profile_unknown", ConcurrentSessionCount: 2, UpstreamProcesses: []bridgeprotocol.RelaySessionCanaryProcess{},
 	}, nil
 }
 func (f *fakeAdapter) ReloadRelayGovernance(_ context.Context, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {

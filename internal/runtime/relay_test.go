@@ -107,7 +107,7 @@ func (f *fakeMCPMAdmin) SessionCanary(_ context.Context, input bridgeprotocol.Re
 	for _, server := range bundle.Servers {
 		processes = append(processes, bridgeprotocol.RelaySessionCanaryProcess{ServerID: server.ServerID, ProcessCount: 1})
 	}
-	return bridgeprotocol.RelaySessionCanaryResponse{RoutingBundleHash: input.RoutingBundleHash, Profiles: profiles, MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty"}, InvalidProfileErrorCode: "profile_invalid", ConcurrentSessionCount: 2, UpstreamProcesses: processes}, nil
+	return bridgeprotocol.RelaySessionCanaryResponse{RoutingBundleHash: input.RoutingBundleHash, Profiles: profiles, MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty"}, InvalidProfileErrorCode: "profile_unknown", ConcurrentSessionCount: 2, UpstreamProcesses: processes}, nil
 }
 func (f *fakeMCPMAdmin) ReloadRouting(context.Context) (bridgeprotocol.RelayAdminStatus, error) {
 	index := f.reloadCalls

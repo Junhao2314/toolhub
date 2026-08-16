@@ -75,13 +75,18 @@ func TestRelaySessionCanaryResponseIsBoundToCandidateProfilesAndProcesses(t *tes
 			{ClientKind: RuntimeCodex, ProfileID: codexID, ProfileRevisionID: codexRevisionID, ToolCount: 0},
 		},
 		MissingProfile:          RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0},
-		InvalidProfileErrorCode: "profile_invalid",
+		InvalidProfileErrorCode: "profile_unknown",
 		ConcurrentSessionCount:  2,
 		UpstreamProcesses:       []RelaySessionCanaryProcess{{ServerID: serverID, ProcessCount: 1}},
 	}
 	if err := ValidateRelaySessionCanaryResponse(bundle, hash, response); err != nil {
 		t.Fatalf("valid session canary rejected: %v", err)
 	}
+	response.InvalidProfileErrorCode = "profile_invalid"
+	if err := ValidateRelaySessionCanaryResponse(bundle, hash, response); err == nil {
+		t.Fatal("session canary accepted a malformed-only Profile check")
+	}
+	response.InvalidProfileErrorCode = "profile_unknown"
 	response.UpstreamProcesses[0].ProcessCount = 2
 	if err := ValidateRelaySessionCanaryResponse(bundle, hash, response); err == nil {
 		t.Fatal("session canary accepted duplicate upstream processes")

@@ -424,7 +424,7 @@ func ValidateRelaySessionCanaryRequest(input RelaySessionCanaryRequest) (Routing
 }
 
 func ValidateRelaySessionCanaryResponse(bundle RoutingBundle, routingHash string, response RelaySessionCanaryResponse) error {
-	if !IsSHA256(routingHash) || response.RoutingBundleHash != routingHash || response.InvalidProfileErrorCode != "profile_invalid" || response.ConcurrentSessionCount != 2 {
+	if !IsSHA256(routingHash) || response.RoutingBundleHash != routingHash || response.InvalidProfileErrorCode != "profile_unknown" || response.ConcurrentSessionCount != 2 {
 		return errors.New("session canary response binding is invalid")
 	}
 	expectedProfiles := make([]PublishedProfileDTO, 0, 2)

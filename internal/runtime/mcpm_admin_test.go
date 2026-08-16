@@ -139,7 +139,7 @@ func TestMCPMAdminSessionCanaryUsesFixedHashBoundOperation(t *testing.T) {
 				{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: bundle.Profiles[1].ProfileID, ProfileRevisionID: bundle.Profiles[1].ProfileRevisionID, ToolCount: 0},
 			},
 			MissingProfile:          bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0},
-			InvalidProfileErrorCode: "profile_invalid",
+			InvalidProfileErrorCode: "profile_unknown",
 			ConcurrentSessionCount:  2,
 			UpstreamProcesses:       []bridgeprotocol.RelaySessionCanaryProcess{},
 		}
