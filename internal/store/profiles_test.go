@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/Junhao2314/toolhub/internal/policy"
 )
 
 func TestProfileGovernanceMetadataIsPinnedPerRevision(t *testing.T) {
@@ -34,7 +36,7 @@ func TestProfileGovernanceMetadataIsPinnedPerRevision(t *testing.T) {
 	}
 }
 
-func TestProfileReportsEffectiveVisibleCount(t *testing.T) {
+func TestProfileEffectiveVisibleCountHidesNewToolsUntilExplicitlySelected(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)
 	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "visible-count", Transport: "http", URL: "https://example.invalid/mcp"})
@@ -56,8 +58,62 @@ func TestProfileReportsEffectiveVisibleCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profile.EffectiveVisibleCount != 1 {
-		t.Fatalf("effective visible count=%d want 1", profile.EffectiveVisibleCount)
+	if profile.EffectiveVisibleCount != 0 {
+		t.Fatalf("implicit new-hidden count=%d want 0", profile.EffectiveVisibleCount)
+	}
+	toolID := integrationToolID(t, st, server.ID, "read_item")
+	explicit, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-visible-explicit", ClientKind: "claude", Category: "coding",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: observed.Revision.ID, VisibilityMode: "all_accepted"}},
+		ToolRules:     []ProfileToolRuleInput{{ToolID: toolID, Visible: true, Decision: policy.DecisionAllow, ReasonCodes: []string{}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.EffectiveVisibleCount != 1 {
+		t.Fatalf("explicit new-hidden count=%d want 1", explicit.EffectiveVisibleCount)
+	}
+}
+
+func TestProfileEffectiveVisibleCountUsesAppliedClassifier(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "classified-visible-count", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, contract.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	toolID := integrationToolID(t, st, server.ID, "read_item")
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-classified-count", ClientKind: "claude", Category: "coding",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: contract.Revision.ID, VisibilityMode: "selected"}},
+		ToolRules:     []ProfileToolRuleInput{{ToolID: toolID, Visible: true, Decision: policy.DecisionAllow, ReasonCodes: []string{}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	global, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{CatalogVersion: policy.CatalogVersion, ExplicitOverrides: map[string]string{}, UnclassifiedMutating: policy.DecisionConfirm, ReviewedReadOnly: policy.DecisionDeny})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": global.ID})
+	if err := st.FinalizeGlobalPolicyApply(ctx, operationID, global.ID); err != nil {
+		t.Fatal(err)
+	}
+	count, err := st.ProfileEffectiveVisibleCount(ctx, profile.CurrentRevisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("tightened classifier count=%d want 0", count)
 	}
 }
 

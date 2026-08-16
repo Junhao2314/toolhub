@@ -208,9 +208,12 @@ binding for a durable `policy_apply` operation.
 Contract governance is exposed through `GET /relay/contracts`, the durable
 `POST /relay/contracts/observe`, revision acceptance, and explicit rename
 confirmation routes. Contract projections contain normalized definitions and
-presentation metadata, never MCP call arguments, results, prompts, or raw
-transport errors. The projection returns at most 500 deterministically ordered
-servers and 500 most-recent rename proposals.
+presentation metadata plus each tool's contract status and decision under the
+applied Global Policy. The decision and reason chain come from the same
+versioned classifier used to render relay routing; the browser does not
+reimplement that classifier. Projections never contain MCP call arguments,
+results, prompts, or raw transport errors. The projection returns at most 500
+deterministically ordered servers and 500 most-recent rename proposals.
 
 `GET /relay/confirmations` reads bounded, payload-free, in-memory challenges
 from the Relay. Approval requires the exact case-sensitive Profile name and

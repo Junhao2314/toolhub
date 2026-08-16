@@ -2,11 +2,67 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
 )
+
+func TestContractGovernanceProjectionIncludesAppliedPolicyClassification(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "classified-contract", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{
+		{Name: "read_item", ReadOnlyHint: true},
+		{Name: "delete_item", ReadOnlyHint: true},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, observed.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	projection, err := st.ContractGovernanceProjection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projection.Items) != 1 || projection.Items[0].Accepted == nil {
+		t.Fatalf("contract projection=%+v", projection.Items)
+	}
+	type policyProjection struct {
+		Name           string   `json:"name"`
+		Status         string   `json:"status"`
+		GlobalDecision string   `json:"globalDecision"`
+		ReasonCodes    []string `json:"reasonCodes"`
+	}
+	body, err := json.Marshal(projection.Items[0].Accepted.Tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tools []policyProjection
+	if err := json.Unmarshal(body, &tools); err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("projected tools=%+v", tools)
+	}
+	byName := make(map[string]policyProjection, len(tools))
+	for _, tool := range tools {
+		byName[tool.Name] = tool
+	}
+	if got := byName["read_item"]; got.Status != ContractToolNewHidden || got.GlobalDecision != "allow" || !slices.Contains(got.ReasonCodes, "reviewed_read_only") {
+		t.Fatalf("read-only projection=%+v", got)
+	}
+	if got := byName["delete_item"]; got.Status != ContractToolNewHidden || got.GlobalDecision != "confirm" || !slices.Contains(got.ReasonCodes, "catalog_destructive") {
+		t.Fatalf("destructive projection=%+v", got)
+	}
+}
 
 func TestContractGovernanceProjectionIsBounded(t *testing.T) {
 	t.Run("servers", func(t *testing.T) {

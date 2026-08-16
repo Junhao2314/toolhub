@@ -1374,26 +1374,54 @@ func (s *Store) routingProfileRulesTx(ctx context.Context, tx pgx.Tx, profileRev
 }
 
 func classifyRoutingTool(global domain.GlobalPolicyRevision, tool RoutingTool) (string, []string) {
+	return classifyGovernanceTool(global, tool.ToolID, tool.Name, mustJSON(tool.InputSchema), mustJSON(tool.OutputSchema), tool.Annotations)
+}
+
+func classifyGovernanceTool(global domain.GlobalPolicyRevision, toolID, name string, inputSchema, outputSchema json.RawMessage, annotations map[string]any) (string, []string) {
 	var mutating, readOnly bool
-	if value, ok := tool.Annotations["mutatingHint"].(bool); ok {
+	if value, ok := annotations["mutatingHint"].(bool); ok {
 		mutating = value
 	}
-	if value, ok := tool.Annotations["readOnlyHint"].(bool); ok {
+	if value, ok := annotations["readOnlyHint"].(bool); ok {
 		readOnly = value
 	}
-	explicit := global.ExplicitOverrides[tool.ToolID]
+	explicit := global.ExplicitOverrides[toolID]
 	if explicit == "" {
-		explicit = global.ExplicitOverrides[tool.Name]
+		explicit = global.ExplicitOverrides[name]
 	}
-	classification := policy.Classify(policy.ToolDescriptor{Name: tool.Name, InputSchema: mustJSON(tool.InputSchema), OutputSchema: mustJSON(tool.OutputSchema), Annotations: tool.Annotations, ExplicitOverride: explicit, ReadOnlyHint: readOnly, Mutating: mutating})
+	classification := policy.Classify(policy.ToolDescriptor{Name: name, InputSchema: inputSchema, OutputSchema: outputSchema, Annotations: annotations, ExplicitOverride: explicit, ReadOnlyHint: readOnly, Mutating: mutating})
 	decision := classification.Decision
+	hasExplicitOverride := false
 	for _, reason := range classification.Reasons {
-		if reason.Code == policy.ReasonUnclassifiedMutating && !mutating {
-			decision = global.ReviewedReadOnly
+		if reason.Code == policy.ReasonExplicitOverride {
+			hasExplicitOverride = true
+			break
 		}
-		if reason.Code == policy.ReasonUnclassified && !mutating && readOnly {
-			decision = global.ReviewedReadOnly
+	}
+	genericMutating := false
+	classifiedRisk := false
+	for _, reason := range classification.Reasons {
+		switch reason.Code {
+		case policy.ReasonUnclassifiedMutating:
+			if !hasExplicitOverride {
+				decision = global.UnclassifiedMutating
+			}
+		case policy.ReasonReviewedReadOnly:
+			if !hasExplicitOverride {
+				decision = global.ReviewedReadOnly
+			}
+		case policy.ReasonAnnotationMutating:
+			genericMutating = true
+		case policy.ReasonExplicitOverride, policy.ReasonAnnotationDeny,
+			policy.ReasonAnnotationDestructive, policy.ReasonCatalogDestructive,
+			policy.ReasonCatalogCredential, policy.ReasonCatalogExternalPublish,
+			policy.ReasonCatalogFinancial, policy.ReasonCatalogCommand,
+			policy.ReasonSchemaMutating:
+			classifiedRisk = true
 		}
+	}
+	if genericMutating && !classifiedRisk && !hasExplicitOverride {
+		decision = global.UnclassifiedMutating
 	}
 	reasons := make([]string, 0, len(classification.Reasons))
 	for _, reason := range classification.Reasons {

@@ -16,6 +16,7 @@ import { useState } from "react";
 import {
   api,
   type BundlePreview,
+  type ContractGovernanceProjection,
   type MCPServer,
   type Operation,
   type PendingSecretBinding,
@@ -37,6 +38,8 @@ import {
 } from "../components/ui";
 import { useData } from "../hooks/useData";
 import { useI18n } from "../i18n";
+import ProfileGovernanceEditor from "../features/profiles/ProfileGovernanceEditor";
+import ProfileLaunchDialog from "../features/profiles/ProfileLaunchDialog";
 
 interface DiffItem {
   kind: string;
@@ -63,22 +66,25 @@ interface PreflightItem {
 export default function Profiles() {
   const { t } = useI18n();
   const state = useData(async () => {
-    const [profiles, skills, servers, targets] = await Promise.all([
+    const [profiles, skills, servers, targets, contracts] = await Promise.all([
       api.list<Profile>("/profiles?includeArchived=true"),
       api.list<Skill>("/skills"),
       api.list<MCPServer>("/mcp/servers"),
       api.list<Target>("/targets"),
+      api.request<ContractGovernanceProjection>("/relay/contracts"),
     ]);
     return {
       profiles: profiles.items,
       skills: skills.items,
       servers: servers.items,
       targets: targets.items,
+      contracts,
     };
   }, []);
   const [selected, setSelected] = useState<Profile | null>(null);
   const [editing, setEditing] = useState<Profile | "new" | null>(null);
   const [applying, setApplying] = useState<Profile | null>(null);
+  const [launching, setLaunching] = useState<Profile | null>(null);
   const [history, setHistory] = useState<ProfileRevision[] | null>(null);
   const [bundleFile, setBundleFile] = useState<File | null>(null);
   const [bundlePreview, setBundlePreview] = useState<BundlePreview | null>(
@@ -207,6 +213,14 @@ export default function Profiles() {
                   <td>
                     <strong>{profile.name}</strong>
                     <small>{profile.description || "—"}</small>
+                    <Status
+                      value={
+                        profile.publishedRevisionId &&
+                        profile.publishedRevisionId === profile.currentRevisionId
+                          ? "Published"
+                          : "Draft"
+                      }
+                    />
                     {archived && <Status value="archived" />}
                   </td>
                   <td>{profile.revision}</td>
@@ -288,6 +302,7 @@ export default function Profiles() {
           refresh={reloadSelected}
           edit={() => setEditing(selectedProfile)}
           apply={() => setApplying(selectedProfile)}
+          launch={() => setLaunching(selectedProfile)}
           exportBundle={exportBundle}
           restore={() => {
             api
@@ -318,13 +333,15 @@ export default function Profiles() {
         />
       )}
       {editing && (
-        <ProfileEditor
+        <ProfileGovernanceEditor
           profile={editing === "new" ? undefined : editing}
           skills={state.data.skills}
           servers={state.data.servers}
+          contracts={state.data.contracts}
           close={() => setEditing(null)}
-          saved={() => {
+          saved={(profile) => {
             setEditing(null);
+            setSelected(profile);
             state.reload();
           }}
         />
@@ -337,7 +354,14 @@ export default function Profiles() {
           queued={(operation) => {
             setApplying(null);
             setNotice(`${t("Apply queued")} · ${operation.id.slice(0, 8)}`);
+            state.reload();
           }}
+        />
+      )}
+      {launching && (
+        <ProfileLaunchDialog
+          profile={launching}
+          close={() => setLaunching(null)}
         />
       )}
       {bundlePreview && (
@@ -385,6 +409,7 @@ function ProfileDetail({
   refresh,
   edit,
   apply,
+  launch,
   restore,
   purge,
   clone,
@@ -396,6 +421,7 @@ function ProfileDetail({
   refresh: () => void;
   edit: () => void;
   apply: () => void;
+  launch: () => void;
   restore: () => void;
   purge: () => void;
   clone: () => void;
@@ -430,6 +456,10 @@ function ProfileDetail({
           {!archived && <Button onClick={apply} disabled={profile.pendingBindings}>
             <Play size={15} />
             {t("Apply")}
+          </Button>}
+          {!archived && (profile.clientKind === "claude" || profile.clientKind === "codex") && <Button variant="secondary" onClick={launch} disabled={profile.pendingBindings}>
+            <Play size={15} />
+            {t("Launch session")}
           </Button>}
           {!archived && !profile.pendingBindings && <Button variant="secondary" onClick={refreshProfile}>
             <RefreshCw size={15} />
@@ -486,6 +516,27 @@ function ProfileDetail({
               <Status value={item.current ? "current" : "historical"} />
             </div>
           )) || <span>—</span>}
+        </div>
+      </div>
+      <div className="profile-state-strip">
+        <div>
+          <span>{t("Revision state")}</span>
+          <Status
+            value={
+              profile.publishedRevisionId &&
+              profile.publishedRevisionId === profile.currentRevisionId
+                ? "Published"
+                : "Draft"
+            }
+          />
+        </div>
+        <div>
+          <span>{t("Client")}</span>
+          <strong>{profile.clientKind || "—"}</strong>
+        </div>
+        <div>
+          <span>{t("Effective visibility")}</span>
+          <strong>{profile.effectiveVisibleCount ?? 0}</strong>
         </div>
       </div>
       {profile.pendingBindings && archived && (
@@ -741,138 +792,6 @@ function BundlePreviewDialog({
         </Button>
       </div>
     </Modal>
-  );
-}
-
-function ProfileEditor({
-  profile,
-  skills,
-  servers,
-  close,
-  saved,
-}: {
-  profile?: Profile;
-  skills: Skill[];
-  servers: MCPServer[];
-  close: () => void;
-  saved: () => void;
-}) {
-  const { t } = useI18n();
-  const [name, setName] = useState(profile?.name ?? "");
-  const [description, setDescription] = useState(profile?.description ?? "");
-  const [skillIds, setSkillIds] = useState(new Set(profile?.skillIds ?? []));
-  const [serverIds, setServerIds] = useState(
-    new Set(profile?.mcpServerIds ?? []),
-  );
-  const [error, setError] = useState("");
-  const toggle = (
-    source: Set<string>,
-    id: string,
-    setter: (value: Set<string>) => void,
-  ) => {
-    const next = new Set(source);
-    next.has(id) ? next.delete(id) : next.add(id);
-    setter(next);
-  };
-  const submit = () => {
-    const payload = {
-      name,
-      description,
-      revision: profile?.revision ?? 0,
-      skillIds: [...skillIds],
-      mcpServerIds: [...serverIds],
-    };
-    const request = profile
-      ? api.put(`/profiles/${profile.id}`, payload)
-      : api.post("/profiles", payload);
-    request.then(saved).catch((reason: Error) => setError(reason.message));
-  };
-  return (
-    <Modal
-      title={profile ? `${t("Edit")} · ${profile.name}` : t("New Profile")}
-      close={close}
-    >
-      {error && <ErrorNotice message={error} />}
-      <Field label={t("Name")}>
-        <input value={name} onChange={(event) => setName(event.target.value)} />
-      </Field>
-      <Field label={t("Description")}>
-        <input
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-        />
-      </Field>
-      <div className="membership-grid">
-        <Membership
-          title={t("Skills")}
-          items={skills.map((skill) => ({
-            id: skill.id,
-            name: skill.name,
-            detail: skill.slug,
-          }))}
-          selected={skillIds}
-          toggle={(id) => toggle(skillIds, id, setSkillIds)}
-        />
-        <Membership
-          title={t("MCP servers")}
-          items={servers.map((server) => ({
-            id: server.id,
-            name: server.name,
-            detail: `${server.transport} · r${server.revision}`,
-          }))}
-          selected={serverIds}
-          toggle={(id) => toggle(serverIds, id, setServerIds)}
-        />
-      </div>
-      <div className="modal-actions">
-        <Button variant="secondary" onClick={close}>
-          {t("Cancel")}
-        </Button>
-        <Button disabled={!name.trim()} onClick={submit}>
-          {t("Save")}
-        </Button>
-      </div>
-    </Modal>
-  );
-}
-
-function Membership({
-  title,
-  items,
-  selected,
-  toggle,
-}: {
-  title: string;
-  items: Array<{ id: string; name: string; detail: string }>;
-  selected: Set<string>;
-  toggle: (id: string) => void;
-}) {
-  return (
-    <section className="membership">
-      <header>
-        <h3>{title}</h3>
-        <span>{selected.size}</span>
-      </header>
-      {items.length === 0 ? (
-        <Empty title="None" />
-      ) : (
-        <div>
-          {items.map((item) => (
-            <label key={item.id}>
-              <input
-                type="checkbox"
-                checked={selected.has(item.id)}
-                onChange={() => toggle(item.id)}
-              />
-              <span>
-                <strong>{item.name}</strong>
-                <small>{item.detail}</small>
-              </span>
-            </label>
-          ))}
-        </div>
-      )}
-    </section>
   );
 }
 

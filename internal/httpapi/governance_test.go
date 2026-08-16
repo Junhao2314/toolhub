@@ -116,6 +116,32 @@ func TestGovernanceConfigurationAndPolicyValidation(t *testing.T) {
 	assertGovernanceError(t, harness.request(t, http.MethodPut, "/api/v1/mcp/policy", `{"revision":1,"catalogVersion":1,"explicitOverrides":{},"unclassifiedMutating":"confirm","reviewedReadOnly":"deny"}`), http.StatusConflict, "state_conflict")
 }
 
+func TestRelayContractProjectionIncludesAppliedPolicyClassification(t *testing.T) {
+	harness := newGovernanceHarness(t)
+	ctx := context.Background()
+	server, err := harness.store.SaveMCPServer(ctx, "", store.MCPInput{Name: "api-classified-contract", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := harness.store.ObserveContracts(ctx, store.ContractObservationInput{ServerID: server.ID, Tools: []store.ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.store.AcceptContract(ctx, server.ID, observed.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	response := harness.request(t, http.MethodGet, "/api/v1/relay/contracts", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("contract projection status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, field := range []string{`"status":"new_hidden"`, `"globalDecision":"allow"`, `"reasonCodes":["annotation_read_only","reviewed_read_only"]`} {
+		if !strings.Contains(response.Body.String(), field) {
+			t.Fatalf("contract projection missing %s: %s", field, response.Body.String())
+		}
+	}
+}
+
 func TestGovernanceApplyRoutesCreateBoundDurableOperations(t *testing.T) {
 	const targetRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var preflightManifest bridgeprotocol.DesiredManifest

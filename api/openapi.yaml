@@ -1480,7 +1480,7 @@ components:
     ObservedContractTool:
       type: object
       additionalProperties: false
-      required: [id, serverId, name, position, inputSchema, outputSchema, annotations, presentation]
+      required: [id, serverId, name, position, inputSchema, outputSchema, annotations, presentation, status, globalDecision, reasonCodes]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         serverId: {$ref: '#/components/schemas/UUID'}
@@ -1490,6 +1490,9 @@ components:
         outputSchema: {type: object}
         annotations: {type: object}
         presentation: {type: object}
+        status: {type: string, enum: [unchanged, new_hidden, paused_incompatible, changed_presentation]}
+        globalDecision: {type: string, enum: [allow, confirm, deny]}
+        reasonCodes: {type: array, maxItems: 16, items: {$ref: '#/components/schemas/PolicyReasonCode'}}
     ToolRenameProposal:
       type: object
       additionalProperties: false

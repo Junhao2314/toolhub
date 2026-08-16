@@ -46,6 +46,7 @@ export interface Skill {
 
 export interface MCPServer {
   id: string;
+  currentRevisionId: string;
   name: string;
   description?: string;
   revision: number;
@@ -62,9 +63,16 @@ export interface MCPServer {
 
 export interface Profile {
   id: string;
-  currentRevisionId?: string;
+  currentRevisionId: string;
+  publishedRevisionId?: string;
+  publishedRevision?: number;
+  publishedAt?: string;
   name: string;
   description?: string;
+  clientKind?: ProfileClientKind;
+  category?: string;
+  variant?: string;
+  migrationState?: "ready" | "needs_review" | "compatibility";
   revision: number;
   canonicalHash?: string;
   pendingBindings?: boolean;
@@ -73,8 +81,37 @@ export interface Profile {
   mcpServerIds: string[];
   skills?: ProfileSkillPin[];
   mcpServers?: ProfileMCPPin[];
+  mcpGovernance: ProfileMCPGovernance[];
+  toolRules: ProfileToolRule[];
+  effectiveVisibleCount: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export type ProfileClientKind = "claude" | "codex" | "shared" | "unknown";
+export type MCPVisibilityMode = "all_accepted" | "selected" | "hidden";
+export type ToolDecision = "allow" | "confirm" | "deny";
+
+export interface ProfileMCPGovernance {
+  serverId: string;
+  mcpRevisionId: string;
+  acceptedContractRevisionId?: string;
+  visibilityMode: MCPVisibilityMode;
+}
+
+export interface ProfileToolRule {
+  toolId: string;
+  visible: boolean;
+  decision: ToolDecision;
+  reasonCodes?: string[];
+}
+
+export interface EffectiveToolDecision {
+  toolId: string;
+  globalDecision: ToolDecision;
+  profileDecision?: ToolDecision;
+  effectiveDecision: ToolDecision;
+  reasonCodes: string[];
 }
 
 export interface ProfileSkillPin {
@@ -114,6 +151,97 @@ export interface ProfileRevision extends Profile {
   profileId: string;
   archivedRestore?: boolean;
   createdAt: string;
+}
+
+export interface ObservedContractRevision {
+  id: string;
+  serverId: string;
+  revision: number;
+  canonicalHash: string;
+  normalizedContract: Dict;
+  createdAt: string;
+}
+
+export interface ObservedContractTool {
+  id: string;
+  serverId: string;
+  name: string;
+  position: number;
+  inputSchema: Dict;
+  outputSchema: Dict;
+  annotations: Dict;
+  presentation: Dict;
+  status:
+    | "unchanged"
+    | "new_hidden"
+    | "paused_incompatible"
+    | "changed_presentation";
+  globalDecision: ToolDecision;
+  reasonCodes: string[];
+}
+
+export interface ContractRevisionView {
+  revision: ObservedContractRevision;
+  tools: ObservedContractTool[];
+}
+
+export interface ContractState {
+  serverId: string;
+  serverName: string;
+  reviewState: "unreviewed" | "accepted" | "changed" | "paused";
+  latest: ContractRevisionView | null;
+  accepted: ContractRevisionView | null;
+}
+
+export interface ContractGovernanceProjection {
+  items: ContractState[];
+  renames: Array<{
+    id: string;
+    serverId: string;
+    removedToolId: string;
+    removedToolName: string;
+    addedToolId: string;
+    addedToolName: string;
+    removedContractRevisionId: string;
+    addedContractRevisionId: string;
+    status: "suspected" | "confirmed" | "rejected" | "ambiguous";
+    createdAt: string;
+  }>;
+}
+
+export interface GlobalPolicyRevision {
+  id: string;
+  revision: number;
+  canonicalHash: string;
+  catalogVersion: number;
+  explicitOverrides?: Record<string, ToolDecision>;
+  unclassifiedMutating: ToolDecision;
+  reviewedReadOnly: ToolDecision;
+  createdAt: string;
+}
+
+export interface GlobalPolicyProjection {
+  current: GlobalPolicyRevision;
+  applied: GlobalPolicyRevision;
+}
+
+export interface ProfileLaunchReadiness {
+  ready: boolean;
+  reasonCode?: string;
+  profileId: string;
+  profileRevisionId: string;
+  clientKind: "claude" | "codex";
+  nativeClient: {
+    clientKind: "claude" | "codex";
+    version: string;
+    supported: boolean;
+    errorCode?: string;
+  };
+  command?: {
+    executable: "claude" | "codex";
+    args: string[];
+    display: string;
+  };
 }
 export interface BundleComponentDecision {
   kind: string;

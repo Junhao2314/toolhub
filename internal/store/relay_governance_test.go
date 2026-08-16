@@ -12,6 +12,7 @@ import (
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/policy"
 )
 
 func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string, metadata map[string]any) string {
@@ -1117,6 +1118,34 @@ func TestRoutingBundleHidesNewlyAcceptedToolsWithoutExplicitProfileOverride(t *t
 	overrides := bundle.Profiles[0].Servers[0].ToolOverrides
 	if len(overrides) != 1 || overrides[0].ToolID != newToolID || overrides[0].Visible {
 		t.Fatalf("new hidden overrides=%+v", overrides)
+	}
+}
+
+func TestClassifyRoutingToolUsesConfiguredGlobalFallbacks(t *testing.T) {
+	explicitReadOnlyToolID := uuid.NewString()
+	global := domain.GlobalPolicyRevision{
+		ExplicitOverrides:    map[string]string{explicitReadOnlyToolID: policy.DecisionAllow},
+		UnclassifiedMutating: policy.DecisionDeny,
+		ReviewedReadOnly:     policy.DecisionDeny,
+	}
+	tests := []struct {
+		name string
+		tool RoutingTool
+		want string
+	}{
+		{name: "reviewed read-only", tool: RoutingTool{ToolID: uuid.NewString(), Name: "read_item", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{"readOnlyHint": true}}, want: policy.DecisionDeny},
+		{name: "explicit read-only override", tool: RoutingTool{ToolID: explicitReadOnlyToolID, Name: "read_public_item", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{"readOnlyHint": true}}, want: policy.DecisionAllow},
+		{name: "unclassified mutating", tool: RoutingTool{ToolID: uuid.NewString(), Name: "sync_records", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{"mutatingHint": true}}, want: policy.DecisionDeny},
+		{name: "classified destructive", tool: RoutingTool{ToolID: uuid.NewString(), Name: "delete_record", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{"mutatingHint": true}}, want: policy.DecisionConfirm},
+		{name: "unknown", tool: RoutingTool{ToolID: uuid.NewString(), Name: "inspect_record", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{}}, want: policy.DecisionConfirm},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decision, _ := classifyRoutingTool(global, test.tool)
+			if decision != test.want {
+				t.Fatalf("decision=%q want %q", decision, test.want)
+			}
+		})
 	}
 }
 

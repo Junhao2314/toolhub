@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Junhao2314/toolhub/internal/domain"
+	"github.com/Junhao2314/toolhub/internal/policy"
 	"github.com/Junhao2314/toolhub/internal/profilebundle"
 )
 
@@ -243,7 +244,7 @@ func (s *Store) saveProfileTx(ctx context.Context, tx pgx.Tx, id string, input P
 		}
 	}
 	for _, rule := range input.ToolRules {
-		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_tool_rules(profile_revision_id,tool_id,visible,decision,reason_codes) VALUES($1,$2,$3,$4,$5)`, revisionID, rule.ToolID, rule.Visible, rule.Decision, rule.ReasonCodes); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO profile_revision_tool_rules(profile_revision_id,tool_id,visible,decision,reason_codes) VALUES($1,$2,$3,$4,coalesce($5::text[],'{}'::text[]))`, revisionID, rule.ToolID, rule.Visible, rule.Decision, rule.ReasonCodes); err != nil {
 			return "", "", err
 		}
 	}
@@ -439,20 +440,89 @@ func (s *Store) PublishedProfileName(ctx context.Context, profileID, revisionID 
 }
 
 func (s *Store) ProfileEffectiveVisibleCount(ctx context.Context, revisionID string) (int, error) {
-	var count int
-	err := s.pool.QueryRow(ctx, `
-		SELECT count(*)
+	global, err := s.AppliedGlobalPolicy(ctx)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT g.visibility_mode,
+		       t.id::text,t.name,crt.input_schema,crt.output_schema,crt.annotations,crt.status,
+		       r.tool_id IS NOT NULL,coalesce(r.visible,false),coalesce(r.decision,''),
+		       EXISTS (
+		         SELECT 1 FROM mcp_tool_renames renamed
+		         WHERE renamed.new_tool_id=crt.tool_id
+		           AND renamed.confirmed_added_contract_revision_id=crt.contract_revision_id
+		       ),
+		       latest.tool_id IS NOT NULL,latest.input_schema,latest.output_schema,latest.annotations
 		FROM profile_revision_mcp_governance g
 		JOIN mcp_contract_revision_tools crt ON crt.contract_revision_id=g.accepted_contract_revision_id
 		JOIN mcp_tools t ON t.id=crt.tool_id
 		LEFT JOIN profile_revision_tool_rules r ON r.profile_revision_id=g.profile_revision_id AND r.tool_id=t.id
-		JOIN global_policy_state gps ON gps.singleton
-		JOIN global_policy_revisions gp ON gp.id=gps.applied_revision_id
+		LEFT JOIN mcp_contract_state state ON state.server_id=g.server_id
+		LEFT JOIN mcp_contract_revision_tools latest
+		  ON latest.contract_revision_id=state.latest_revision_id
+		 AND latest.tool_id=crt.tool_id
 		WHERE g.profile_revision_id=$1
-		  AND CASE WHEN r.tool_id IS NOT NULL THEN r.visible ELSE g.visibility_mode='all_accepted' END
-		  AND coalesce(r.decision,'allow') <> 'deny'
-		  AND coalesce(gp.explicit_overrides->>t.id::text,gp.explicit_overrides->>t.name,gp.unclassified_mutating) <> 'deny'`, revisionID).Scan(&count)
-	return count, err
+		ORDER BY g.server_id,crt.position`, revisionID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var visibilityMode, status, profileDecision string
+		var tool RoutingTool
+		var inputJSON, outputJSON, annotationsJSON []byte
+		var latestInputJSON, latestOutputJSON, latestAnnotationsJSON []byte
+		var hasRule, ruleVisible, renamed, latestExists bool
+		if err := rows.Scan(
+			&visibilityMode,
+			&tool.ToolID, &tool.Name, &inputJSON, &outputJSON, &annotationsJSON, &status,
+			&hasRule, &ruleVisible, &profileDecision, &renamed,
+			&latestExists, &latestInputJSON, &latestOutputJSON, &latestAnnotationsJSON,
+		); err != nil {
+			return 0, err
+		}
+		if err := json.Unmarshal(inputJSON, &tool.InputSchema); err != nil {
+			return 0, err
+		}
+		if err := json.Unmarshal(outputJSON, &tool.OutputSchema); err != nil {
+			return 0, err
+		}
+		if err := json.Unmarshal(annotationsJSON, &tool.Annotations); err != nil {
+			return 0, err
+		}
+		visible := visibilityMode == "all_accepted"
+		if status == ContractToolNewHidden && !renamed {
+			visible = false
+		}
+		if hasRule {
+			visible = ruleVisible
+		}
+		if !visible || routingToolPaused(tool, latestExists, latestInputJSON, latestOutputJSON, latestAnnotationsJSON) {
+			continue
+		}
+		globalDecision, _ := classifyRoutingTool(global, tool)
+		effectiveDecision := globalDecision
+		if hasRule {
+			effectiveDecision = policy.EffectiveDecision(globalDecision, profileDecision)
+		}
+		if effectiveDecision != policy.DecisionDeny {
+			count++
+		}
+	}
+	return count, rows.Err()
+}
+
+func routingToolPaused(tool RoutingTool, latestExists bool, latestInputJSON, latestOutputJSON, latestAnnotationsJSON []byte) bool {
+	if !latestExists {
+		return true
+	}
+	var latestInput, latestOutput, latestAnnotations map[string]any
+	if json.Unmarshal(latestInputJSON, &latestInput) != nil || json.Unmarshal(latestOutputJSON, &latestOutput) != nil || json.Unmarshal(latestAnnotationsJSON, &latestAnnotations) != nil {
+		return true
+	}
+	return !equalJSONMap(tool.InputSchema, latestInput) || !equalJSONMap(tool.OutputSchema, latestOutput) || !equalJSONMap(tool.Annotations, latestAnnotations)
 }
 
 func (s *Store) ProfileRevision(ctx context.Context, id string) (domain.ProfileRevision, error) {

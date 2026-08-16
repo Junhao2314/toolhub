@@ -286,6 +286,8 @@ test('Profile preflight pins confirmation tokens and partial operations remain a
     if (path === '/api/v1/profiles' && request.method() === 'GET') return route.fulfill({ json: { items: [{ id: profileID, name: 'Research', description: 'Pinned fleet profile', revision: 7, skillIds: ['skill-id'], mcpServerIds: ['server-id'], createdAt: now, updatedAt: now }] } })
     if (path === '/api/v1/skills') return route.fulfill({ json: { items: [] } })
     if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/relay/contracts') return route.fulfill({ json: { items: [], renames: [] } })
+    if (path === '/api/v1/mcp/policy') return route.fulfill({ json: { current: { id: '99999999-9999-4999-8999-999999999998', revision: 1, canonicalHash: 'b'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now }, applied: { id: '99999999-9999-4999-8999-999999999998', revision: 1, canonicalHash: 'b'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now } } })
     if (path === '/api/v1/targets') return route.fulfill({ json: { items: [target] } })
     if (path === `/api/v1/profiles/${profileID}/preflight`) {
       expect(request.headers()['idempotency-key']).toBeTruthy()
@@ -339,6 +341,371 @@ test('Profile preflight pins confirmation tokens and partial operations remain a
   expect(retryIdempotency).toBeTruthy()
   await expectNoViewportOverflow(page)
   await page.screenshot({ path: `../test-results/${testInfo.project.name}-partial-operation.png`, fullPage: true })
+})
+
+test('Profile governance pins accepted tools, tightens policy, and gates native launch', async ({ page }, testInfo) => {
+  const consoleErrors: string[] = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  const skillID = '11111111-1111-4111-8111-111111111111'
+  const skillVersionID = '12111111-1111-4111-8111-111111111111'
+  const serverID = '22222222-2222-4222-8222-222222222222'
+  const mcpRevisionID = '23222222-2222-4222-8222-222222222222'
+  const contractRevisionID = '24222222-2222-4222-8222-222222222222'
+  const searchToolID = '25222222-2222-4222-8222-222222222222'
+  const writeToolID = '26222222-2222-4222-8222-222222222222'
+  const claudeProfileID = '33333333-3333-4333-8333-333333333333'
+  const codexProfileID = '34333333-3333-4333-8333-333333333333'
+  const claudeRevisionID = '35333333-3333-4333-8333-333333333333'
+  const codexRevisionID = '36333333-3333-4333-8333-333333333333'
+  const claudeTargetID = '44444444-4444-4444-8444-444444444444'
+  const codexTargetID = '45444444-4444-4444-8444-444444444444'
+  const relayTargetID = '46444444-4444-4444-8444-444444444444'
+  const operationID = '55555555-5555-4555-8555-555555555555'
+  const skill = { id: skillID, slug: 'formatter', name: 'Formatter', description: 'Pinned formatter', sourceKind: 'git', currentVersionId: skillVersionID, currentSha256: 'a'.repeat(64), currentContentHash: 'b'.repeat(64), manifest: {}, scanReport: {}, createdAt: now, updatedAt: now }
+  const server = { id: serverID, currentRevisionId: mcpRevisionID, name: 'acemcp', description: 'Semantic code search', revision: 4, transport: 'http', args: [], url: 'http://127.0.0.1:8000/mcp', envKeys: [], headerKeys: [], contentHash: 'c'.repeat(64), createdAt: now, updatedAt: now }
+  const contract = {
+    items: [{
+      serverId: serverID,
+      serverName: 'acemcp',
+      reviewState: 'accepted',
+      latest: null,
+      accepted: {
+        revision: { id: contractRevisionID, serverId: serverID, revision: 2, canonicalHash: 'd'.repeat(64), normalizedContract: {}, createdAt: now },
+        tools: [
+          { id: searchToolID, serverId: serverID, name: 'acemcp_search_code', position: 0, inputSchema: {}, outputSchema: {}, annotations: { readOnlyHint: true }, presentation: {}, status: 'new_hidden', globalDecision: 'allow', reasonCodes: ['annotation_read_only', 'reviewed_read_only'] },
+          { id: writeToolID, serverId: serverID, name: 'acemcp_update_index', position: 1, inputSchema: {}, outputSchema: {}, annotations: { mutatingHint: true }, presentation: {}, status: 'new_hidden', globalDecision: 'confirm', reasonCodes: ['annotation_mutating'] },
+        ],
+      },
+    }],
+    renames: [],
+  }
+  const targets = [
+    { id: claudeTargetID, targetKey: 'local/claude', nodeId: '47444444-4444-4444-8444-444444444444', nodeName: 'local', nodeKind: 'local', runtime: 'claude', managedUsername: 'runner', writable: true, health: 'healthy', desiredRevision: 0, targetRevision: 'claude-target' },
+    { id: codexTargetID, targetKey: 'local/codex', nodeId: '47444444-4444-4444-8444-444444444444', nodeName: 'local', nodeKind: 'local', runtime: 'codex', managedUsername: 'runner', writable: true, health: 'healthy', desiredRevision: 0, targetRevision: 'codex-target' },
+    { id: relayTargetID, targetKey: 'local/shared-relay', nodeId: '47444444-4444-4444-8444-444444444444', nodeName: 'local', nodeKind: 'local', runtime: 'shared-relay', managedUsername: 'runner', writable: true, health: 'healthy', desiredRevision: 0, targetRevision: 'relay-target' },
+  ]
+  const profiles: Record<string, unknown>[] = []
+  const savedBodies: Record<string, unknown>[] = []
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/skills') return route.fulfill({ json: { items: [skill] } })
+    if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [server] } })
+    if (path === '/api/v1/relay/contracts') return route.fulfill({ json: contract })
+    if (path === '/api/v1/mcp/policy') return route.fulfill({ json: { current: { id: '57555555-5555-4555-8555-555555555555', revision: 1, canonicalHash: 'e'.repeat(64), catalogVersion: 1, explicitOverrides: { [searchToolID]: 'allow', [writeToolID]: 'confirm' }, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now }, applied: { id: '57555555-5555-4555-8555-555555555555', revision: 1, canonicalHash: 'e'.repeat(64), catalogVersion: 1, explicitOverrides: { [searchToolID]: 'allow', [writeToolID]: 'confirm' }, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now } } })
+    if (path === '/api/v1/targets') return route.fulfill({ json: { items: targets } })
+    if (path === '/api/v1/profiles' && request.method() === 'GET') return route.fulfill({ json: { items: profiles } })
+    if (path === '/api/v1/profiles' && request.method() === 'POST') {
+      const body = request.postDataJSON() as Record<string, unknown>
+      savedBodies.push(body)
+      const isClaude = body.clientKind === 'claude'
+      const profile = {
+        ...body,
+        id: isClaude ? claudeProfileID : codexProfileID,
+        currentRevisionId: isClaude ? claudeRevisionID : codexRevisionID,
+        revision: 1,
+        migrationState: 'ready',
+        canonicalHash: 'f'.repeat(64),
+        pendingBindings: false,
+        skills: [],
+        mcpServers: [],
+        effectiveVisibleCount: 1,
+        createdAt: now,
+        updatedAt: now,
+      }
+      profiles.push(profile)
+      return route.fulfill({ status: 201, json: profile })
+    }
+    if (path.endsWith('/preflight')) {
+      const profileID = path.split('/')[4]
+      const expectedTargetID = profileID === claudeProfileID ? claudeTargetID : codexTargetID
+      expect(request.postDataJSON()).toEqual({ targetIds: [expectedTargetID, relayTargetID] })
+      return route.fulfill({ json: { items: [expectedTargetID, relayTargetID].map((targetId) => ({ targetId, confirmationToken: `confirm-${targetId}`, expiresAt: '2099-01-01T00:05:00Z', result: { targetRevision: 'target-revision', manifestHash: '1'.repeat(64), diff: { add: [], replace: [], delete: [], excluded: [] } } })) } })
+    }
+    if (path.endsWith('/apply')) {
+      const body = request.postDataJSON() as { confirmationTokens: string[] }
+      expect(body.confirmationTokens).toHaveLength(2)
+      const profileID = path.split('/')[4]
+      const profile = profiles.find((item) => item.id === profileID)
+      if (profile) {
+        profile.publishedRevisionId = profile.currentRevisionId
+        profile.publishedRevision = profile.revision
+        profile.publishedAt = now
+      }
+      return route.fulfill({ status: 202, json: { id: operationID, kind: 'apply', status: 'succeeded', metadata: {}, cancelRequested: false, createdAt: now, updatedAt: now } })
+    }
+    if (path === `/api/v1/profiles/${claudeProfileID}/launch`) return route.fulfill({ json: { ready: true, profileId: claudeProfileID, profileRevisionId: claudeRevisionID, clientKind: 'claude', nativeClient: { clientKind: 'claude', version: '1.0.90', supported: true }, command: { executable: 'claude', args: ['--mcp-config', 'toolhub'], display: 'claude --mcp-config toolhub' } } })
+    if (path === `/api/v1/profiles/${codexProfileID}/launch`) return route.fulfill({ json: { ready: false, reasonCode: 'relay_routing_mismatch', profileId: codexProfileID, profileRevisionId: codexRevisionID, clientKind: 'codex', nativeClient: { clientKind: 'codex', version: '0.85.0', supported: true } } })
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
+  })
+
+  await page.goto('/profiles')
+  for (const [name, clientLabel] of [['claude-coding', 'Claude'], ['codex-coding', 'Codex']] as const) {
+    await page.getByRole('button', { name: 'New Profile' }).click()
+    const editor = page.getByRole('dialog', { name: 'New Profile' })
+    for (const section of ['Basic information', 'Skills', 'MCP tools', 'Tool rules', 'Application status']) await expect(editor.getByRole('tab', { name: section })).toBeVisible()
+    await editor.getByLabel('Name').fill(name)
+    await editor.getByLabel('Client').selectOption({ label: clientLabel })
+    await editor.getByLabel('Category').fill('coding')
+    await editor.getByLabel('Variant').fill('default')
+    await editor.getByRole('tab', { name: 'Skills' }).click()
+    await editor.getByRole('checkbox', { name: /Formatter/ }).check()
+    await editor.getByRole('tab', { name: 'MCP tools' }).click()
+    await editor.getByRole('checkbox', { name: /acemcp/ }).check()
+    await editor.getByLabel('Visibility · acemcp').selectOption(name === 'claude-coding' ? 'selected' : 'all_accepted')
+    await editor.getByRole('button', { name: 'Configure tools · acemcp' }).click()
+    if (name === 'claude-coding') await editor.getByRole('checkbox', { name: 'Visible · acemcp_search_code' }).check()
+    await editor.getByRole('tab', { name: 'Tool rules' }).click()
+    const mutatingDecision = editor.getByLabel('Decision · acemcp_update_index')
+    await expect(mutatingDecision.locator('option[value="allow"]')).toHaveCount(0)
+    if (name === 'claude-coding') await editor.getByLabel('Decision · acemcp_search_code').selectOption('confirm')
+    await editor.getByRole('tab', { name: 'Application status' }).click()
+    await expect(editor.getByText('Draft', { exact: true })).toBeVisible()
+    await expect(editor.getByText(new RegExp(`${name === 'claude-coding' ? 1 : 0} visible tools?`))).toBeVisible()
+    if (name === 'claude-coding') await page.screenshot({ path: `../test-results/${testInfo.project.name}-profile-governance-editor.png`, fullPage: true })
+    await editor.getByRole('button', { name: 'Save' }).click()
+    await expect(editor).toHaveCount(0)
+  }
+
+  expect(savedBodies).toHaveLength(2)
+  expect(savedBodies[0]).toMatchObject({
+    name: 'claude-coding',
+    clientKind: 'claude',
+    category: 'coding',
+    variant: 'default',
+    skillIds: [skillID],
+    mcpServerIds: [serverID],
+    skillVersionIds: { [skillID]: skillVersionID },
+    mcpRevisionIds: { [serverID]: mcpRevisionID },
+    mcpGovernance: [{ serverId: serverID, mcpRevisionId: mcpRevisionID, acceptedContractRevisionId: contractRevisionID, visibilityMode: 'selected' }],
+  })
+  expect(savedBodies[0].toolRules).toEqual(expect.arrayContaining([expect.objectContaining({ toolId: searchToolID, visible: true, decision: 'confirm' })]))
+  await expect(page.getByRole('row').filter({ hasText: 'claude-coding' })).toContainText('Draft')
+
+  const claudeRow = page.getByRole('row').filter({ hasText: 'claude-coding' })
+  await claudeRow.getByRole('button', { name: 'Preflight and Apply' }).click()
+  const applyDialog = page.getByRole('dialog', { name: 'Apply Profile · claude-coding' })
+  await applyDialog.getByRole('checkbox', { name: /local\/claude/ }).check()
+  await applyDialog.getByRole('checkbox', { name: /local\/shared-relay/ }).check()
+  await applyDialog.getByRole('button', { name: 'Run preflight' }).click()
+  await applyDialog.getByRole('button', { name: 'Confirm Apply' }).click()
+  await expect(page.getByText(/Apply queued/)).toBeVisible()
+
+  await claudeRow.click()
+  await page.getByRole('button', { name: 'Launch session' }).click()
+  let launchDialog = page.getByRole('dialog', { name: 'Launch session · claude-coding' })
+  await expect(launchDialog.getByText('claude --mcp-config toolhub')).toBeVisible()
+  await expect(launchDialog.getByRole('button', { name: 'Copy launch command' })).toBeVisible()
+  await launchDialog.getByRole('button', { name: 'Close' }).last().click()
+
+  await page.getByRole('row').filter({ hasText: 'codex-coding' }).click()
+  await page.getByRole('button', { name: 'Launch session' }).click()
+  launchDialog = page.getByRole('dialog', { name: 'Launch session · codex-coding' })
+  await expect(launchDialog.getByText('Configuration mismatch')).toBeVisible()
+  await expect(launchDialog.getByRole('button', { name: 'Copy launch command' })).toHaveCount(0)
+  await expect(launchDialog).not.toContainText('codex --')
+  await expectNoViewportOverflow(page)
+  await page.screenshot({ path: `../test-results/${testInfo.project.name}-profile-governance.png`, fullPage: true })
+  expect(consoleErrors).toEqual([])
+})
+
+test('editing a Profile preserves historical pins until explicit contract adoption', async ({ page }) => {
+  const profileID = '61333333-3333-4333-8333-333333333333'
+  const profileRevisionID = '62333333-3333-4333-8333-333333333333'
+  const skillID = '61111111-1111-4111-8111-111111111111'
+  const pinnedSkillVersionID = '62111111-1111-4111-8111-111111111111'
+  const currentSkillVersionID = '63111111-1111-4111-8111-111111111111'
+  const serverID = '61222222-2222-4222-8222-222222222222'
+  const pinnedMCPRevisionID = '62222222-2222-4222-8222-222222222222'
+  const currentMCPRevisionID = '63222222-2222-4222-8222-222222222222'
+  const pinnedContractRevisionID = '64222222-2222-4222-8222-222222222222'
+  const acceptedContractRevisionID = '65222222-2222-4222-8222-222222222222'
+  const toolID = '66222222-2222-4222-8222-222222222222'
+  const removedToolID = '67222222-2222-4222-8222-222222222222'
+  const profile = {
+    id: profileID,
+    currentRevisionId: profileRevisionID,
+    publishedRevisionId: profileRevisionID,
+    publishedRevision: 4,
+    publishedAt: now,
+    name: 'claude-historical',
+    description: 'Pinned editing fixture',
+    clientKind: 'claude',
+    category: 'coding',
+    variant: 'default',
+    migrationState: 'ready',
+    revision: 4,
+    canonicalHash: 'a'.repeat(64),
+    pendingBindings: false,
+    skillIds: [skillID],
+    mcpServerIds: [serverID],
+    skills: [{ skillId: skillID, versionId: pinnedSkillVersionID, slug: 'formatter', name: 'Formatter', sha256: 'b'.repeat(64), contentHash: 'c'.repeat(64), current: false }],
+    mcpServers: [{ serverId: serverID, revisionId: pinnedMCPRevisionID, revision: 3, name: 'acemcp', transport: 'http', url: 'http://127.0.0.1:8000/mcp', envKeys: [], headerKeys: [], contentHash: 'd'.repeat(64), current: false }],
+    mcpGovernance: [{ serverId: serverID, mcpRevisionId: pinnedMCPRevisionID, acceptedContractRevisionId: pinnedContractRevisionID, visibilityMode: 'all_accepted' }],
+    toolRules: [
+      { toolId: toolID, visible: true, decision: 'allow', reasonCodes: [] },
+      { toolId: removedToolID, visible: true, decision: 'confirm', reasonCodes: ['profile-rule'] },
+    ],
+    effectiveVisibleCount: 1,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const skill = { id: skillID, slug: 'formatter', name: 'Formatter', description: 'Current formatter', sourceKind: 'git', currentVersionId: currentSkillVersionID, currentSha256: 'e'.repeat(64), currentContentHash: 'f'.repeat(64), manifest: {}, scanReport: {}, createdAt: now, updatedAt: now }
+  const server = { id: serverID, currentRevisionId: currentMCPRevisionID, name: 'acemcp', description: 'Semantic code search', revision: 8, transport: 'http', args: [], url: 'http://127.0.0.1:8000/mcp', envKeys: [], headerKeys: [], contentHash: '1'.repeat(64), createdAt: now, updatedAt: now }
+  const contract = {
+    items: [{
+      serverId: serverID,
+      serverName: 'acemcp',
+      reviewState: 'accepted',
+      latest: null,
+      accepted: {
+        revision: { id: acceptedContractRevisionID, serverId: serverID, revision: 7, canonicalHash: '2'.repeat(64), normalizedContract: {}, createdAt: now },
+        tools: [{ id: toolID, serverId: serverID, name: 'acemcp_update_index', position: 0, inputSchema: {}, outputSchema: {}, annotations: { mutatingHint: true }, presentation: {}, status: 'unchanged', globalDecision: 'confirm', reasonCodes: ['annotation_mutating'] }],
+      },
+    }],
+    renames: [],
+  }
+  let savedBody: Record<string, unknown> | null = null
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/profiles' && request.method() === 'GET') return route.fulfill({ json: { items: [profile] } })
+    if (path === `/api/v1/profiles/${profileID}` && request.method() === 'PUT') {
+      savedBody = request.postDataJSON() as Record<string, unknown>
+      return route.fulfill({ json: { ...profile, ...savedBody, currentRevisionId: '68333333-3333-4333-8333-333333333333', revision: 5, updatedAt: now } })
+    }
+    if (path === '/api/v1/skills') return route.fulfill({ json: { items: [skill] } })
+    if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [server] } })
+    if (path === '/api/v1/targets') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/relay/contracts') return route.fulfill({ json: contract })
+    if (path === '/api/v1/mcp/policy') return route.fulfill({ json: { current: { id: '69555555-5555-4555-8555-555555555555', revision: 2, canonicalHash: '3'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now }, applied: { id: '69555555-5555-4555-8555-555555555555', revision: 2, canonicalHash: '3'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now } } })
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
+  })
+
+  await page.goto('/profiles')
+  const row = page.getByRole('row').filter({ hasText: 'claude-historical' })
+  await row.getByRole('button', { name: 'Edit' }).click()
+  const editor = page.getByRole('dialog', { name: 'Edit · claude-historical' })
+
+  await editor.getByRole('tab', { name: 'Skills' }).click()
+  await expect(editor.getByRole('checkbox', { name: /Formatter/ }).locator('..')).toContainText(pinnedSkillVersionID.slice(0, 12))
+
+  await editor.getByRole('tab', { name: 'MCP tools' }).click()
+  await expect(editor.getByText(/r3/)).toBeVisible()
+  await expect(editor.getByText('Tool definition version', { exact: true })).toBeVisible()
+  await expect(editor.getByRole('button', { name: 'Adopt accepted tool definition version · acemcp' })).toBeVisible()
+  await expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+  await editor.getByRole('tab', { name: 'Tool rules' }).click()
+  await expect(editor.getByLabel('Decision · acemcp_update_index')).toHaveCount(0)
+
+  await editor.getByRole('tab', { name: 'Application status' }).click()
+  await expect(editor.getByText('Draft', { exact: true })).toBeVisible()
+
+  await editor.getByRole('tab', { name: 'MCP tools' }).click()
+  await editor.getByRole('button', { name: 'Adopt accepted tool definition version · acemcp' }).click()
+  await editor.getByLabel('Visibility · acemcp').selectOption('hidden')
+  await editor.getByRole('tab', { name: 'Tool rules' }).click()
+  const decision = editor.getByLabel('Decision · acemcp_update_index')
+  await expect(decision).toHaveValue('confirm')
+  await expect(decision.locator('option[value="allow"]')).toHaveCount(0)
+  await editor.getByRole('button', { name: 'Save' }).click()
+  await expect(editor).toHaveCount(0)
+
+  expect(savedBody).toMatchObject({
+    revision: 4,
+    skillVersionIds: { [skillID]: pinnedSkillVersionID },
+    mcpRevisionIds: { [serverID]: pinnedMCPRevisionID },
+    mcpGovernance: [{ serverId: serverID, mcpRevisionId: pinnedMCPRevisionID, acceptedContractRevisionId: acceptedContractRevisionID, visibilityMode: 'hidden' }],
+    toolRules: [{ toolId: toolID, visible: false, decision: 'confirm', reasonCodes: [] }],
+  })
+})
+
+test('editing a pre-contract Profile requires adoption and honors confirmed renames', async ({ page }) => {
+  const profileID = '71333333-3333-4333-8333-333333333333'
+  const profileRevisionID = '72333333-3333-4333-8333-333333333333'
+  const serverID = '71222222-2222-4222-8222-222222222222'
+  const mcpRevisionID = '72222222-2222-4222-8222-222222222222'
+  const acceptedContractRevisionID = '73222222-2222-4222-8222-222222222222'
+  const toolID = '74222222-2222-4222-8222-222222222222'
+  const removedToolID = '75222222-2222-4222-8222-222222222222'
+  const profile = {
+    id: profileID,
+    currentRevisionId: profileRevisionID,
+    name: 'claude-pre-contract',
+    description: 'Created before contract review',
+    clientKind: 'claude',
+    category: 'coding',
+    variant: 'default',
+    migrationState: 'compatibility',
+    revision: 1,
+    canonicalHash: '7'.repeat(64),
+    pendingBindings: false,
+    skillIds: [],
+    mcpServerIds: [serverID],
+    skills: [],
+    mcpServers: [{ serverId: serverID, revisionId: mcpRevisionID, revision: 1, name: 'pre-contract-server', transport: 'http', url: 'http://127.0.0.1:8001/mcp', envKeys: [], headerKeys: [], contentHash: '8'.repeat(64), current: true }],
+    mcpGovernance: [{ serverId: serverID, mcpRevisionId: mcpRevisionID, visibilityMode: 'all_accepted' }],
+    toolRules: [],
+    effectiveVisibleCount: 0,
+    createdAt: now,
+    updatedAt: now,
+  }
+  const server = { id: serverID, currentRevisionId: mcpRevisionID, name: 'pre-contract-server', description: '', revision: 1, transport: 'http', args: [], url: 'http://127.0.0.1:8001/mcp', envKeys: [], headerKeys: [], contentHash: '8'.repeat(64), createdAt: now, updatedAt: now }
+  const contracts = {
+    items: [{
+      serverId: serverID,
+      serverName: server.name,
+      reviewState: 'accepted',
+      latest: null,
+      accepted: {
+        revision: { id: acceptedContractRevisionID, serverId: serverID, revision: 1, canonicalHash: '9'.repeat(64), normalizedContract: {}, createdAt: now },
+        tools: [{ id: toolID, serverId: serverID, name: 'read_item', position: 0, inputSchema: {}, outputSchema: {}, annotations: { readOnlyHint: true }, presentation: {}, status: 'new_hidden', globalDecision: 'allow', reasonCodes: ['annotation_read_only', 'reviewed_read_only'] }],
+      },
+    }],
+    renames: [{ id: '76222222-2222-4222-8222-222222222222', serverId: serverID, removedToolId: removedToolID, removedToolName: 'lookup_item', addedToolId: toolID, addedToolName: 'read_item', removedContractRevisionId: '77222222-2222-4222-8222-222222222222', addedContractRevisionId: acceptedContractRevisionID, status: 'confirmed', createdAt: now }],
+  }
+  let savedBody: Record<string, unknown> | null = null
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/profiles' && request.method() === 'GET') return route.fulfill({ json: { items: [profile] } })
+    if (path === `/api/v1/profiles/${profileID}` && request.method() === 'PUT') {
+      savedBody = request.postDataJSON() as Record<string, unknown>
+      return route.fulfill({ json: { ...profile, ...savedBody, currentRevisionId: '75333333-3333-4333-8333-333333333333', revision: 2, updatedAt: now } })
+    }
+    if (path === '/api/v1/skills') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [server] } })
+    if (path === '/api/v1/targets') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/relay/contracts') return route.fulfill({ json: contracts })
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
+  })
+
+  await page.goto('/profiles')
+  await page.getByRole('row').filter({ hasText: profile.name }).getByRole('button', { name: 'Edit' }).click()
+  const editor = page.getByRole('dialog', { name: `Edit · ${profile.name}` })
+  await editor.getByRole('tab', { name: 'MCP tools' }).click()
+  const adopt = editor.getByRole('button', { name: `Adopt accepted tool definition version · ${server.name}` })
+  await expect(adopt).toBeVisible()
+  await expect(editor.getByRole('button', { name: 'Save' })).toBeDisabled()
+  await adopt.click()
+  await expect(adopt).toHaveCount(0)
+  await expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled()
+  await editor.getByRole('button', { name: `Configure tools · ${server.name}` }).click()
+  await expect(editor.getByRole('checkbox', { name: 'Visible · read_item' })).toBeChecked()
+  await editor.getByRole('tab', { name: 'Application status' }).click()
+  await expect(editor.getByText('1 visible tool', { exact: true })).toBeVisible()
+  await editor.getByRole('button', { name: 'Save' }).click()
+  await expect(editor).toHaveCount(0)
+  expect(savedBody).toMatchObject({
+    mcpGovernance: [{ serverId: serverID, mcpRevisionId: mcpRevisionID, acceptedContractRevisionId: acceptedContractRevisionID, visibilityMode: 'all_accepted' }],
+  })
 })
 
 test('shared relay inventory, controls, and write-only MCP secrets use generation-2 contracts', async ({ page }, testInfo) => {

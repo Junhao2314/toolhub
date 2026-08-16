@@ -247,14 +247,17 @@ type ObservedContractRevision struct {
 }
 
 type ContractTool struct {
-	ID           string          `json:"id"`
-	ServerID     string          `json:"serverId"`
-	Name         string          `json:"name"`
-	Position     int             `json:"position"`
-	InputSchema  json.RawMessage `json:"inputSchema"`
-	OutputSchema json.RawMessage `json:"outputSchema"`
-	Annotations  json.RawMessage `json:"annotations"`
-	Presentation json.RawMessage `json:"presentation"`
+	ID             string          `json:"id"`
+	ServerID       string          `json:"serverId"`
+	Name           string          `json:"name"`
+	Position       int             `json:"position"`
+	InputSchema    json.RawMessage `json:"inputSchema"`
+	OutputSchema   json.RawMessage `json:"outputSchema"`
+	Annotations    json.RawMessage `json:"annotations"`
+	Presentation   json.RawMessage `json:"presentation"`
+	Status         string          `json:"status"`
+	GlobalDecision string          `json:"globalDecision"`
+	ReasonCodes    []string        `json:"reasonCodes"`
 }
 
 type PublishedProfile struct {

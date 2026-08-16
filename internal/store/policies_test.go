@@ -126,3 +126,47 @@ func TestProfileToolRuleCannotLowerGlobalCeiling(t *testing.T) {
 		t.Fatalf("profile ceiling error=%v want %v", err, ErrConflict)
 	}
 }
+
+func TestProfileToolRuleUsesClassifierForReviewedReadOnlyCeiling(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "reviewed-read-only", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "read_item", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, observed.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	toolID := integrationToolID(t, st, server.ID, "read_item")
+
+	_, err = st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-reviewed-read-only", ClientKind: "claude", Category: "coding", Variant: "standard",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: observed.Revision.ID, VisibilityMode: "selected"}},
+		ToolRules:     []ProfileToolRuleInput{{ToolID: toolID, Decision: policy.DecisionAllow, Visible: true}},
+	})
+	if err != nil {
+		t.Fatalf("reviewed read-only allow rejected: %v", err)
+	}
+	global, err := st.SaveGlobalPolicy(ctx, GlobalPolicyInput{CatalogVersion: policy.CatalogVersion, ExplicitOverrides: map[string]string{}, UnclassifiedMutating: policy.DecisionConfirm, ReviewedReadOnly: policy.DecisionDeny})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := succeededGovernanceOperation(t, st, "policy_apply", "", map[string]any{"revisionId": global.ID})
+	if err := st.FinalizeGlobalPolicyApply(ctx, operationID, global.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.SaveProfile(ctx, uuid.NewString(), ProfileInput{
+		Name: "claude-reviewed-read-only-denied", ClientKind: "claude", Category: "coding", Variant: "standard",
+		MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID},
+		MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: observed.Revision.ID, VisibilityMode: "selected"}},
+		ToolRules:     []ProfileToolRuleInput{{ToolID: toolID, Decision: policy.DecisionAllow, Visible: true, ReasonCodes: []string{}}},
+	})
+	if err != ErrConflict {
+		t.Fatalf("reviewed read-only deny ceiling returned %v, want conflict", err)
+	}
+}

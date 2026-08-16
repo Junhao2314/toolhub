@@ -88,6 +88,10 @@ type ContractGovernanceProjection struct {
 }
 
 func (s *Store) ContractGovernanceProjection(ctx context.Context) (ContractGovernanceProjection, error) {
+	global, err := s.AppliedGlobalPolicy(ctx)
+	if err != nil {
+		return ContractGovernanceProjection{}, err
+	}
 	rows, err := s.pool.Query(ctx, `SELECT server.id::text,server.name,coalesce(state.review_state,'unreviewed'),coalesce(state.latest_revision_id::text,''),coalesce(state.accepted_revision_id::text,'') FROM mcp_servers server LEFT JOIN mcp_contract_state state ON state.server_id=server.id ORDER BY server.name,server.id LIMIT 500`)
 	if err != nil {
 		return ContractGovernanceProjection{}, err
@@ -101,14 +105,14 @@ func (s *Store) ContractGovernanceProjection(ctx context.Context) (ContractGover
 			return ContractGovernanceProjection{}, err
 		}
 		if latestID != "" {
-			revision, err := s.ContractRevisionView(ctx, latestID)
+			revision, err := s.contractRevisionView(ctx, latestID, global)
 			if err != nil {
 				return ContractGovernanceProjection{}, err
 			}
 			item.Latest = &revision
 		}
 		if acceptedID != "" {
-			revision, err := s.ContractRevisionView(ctx, acceptedID)
+			revision, err := s.contractRevisionView(ctx, acceptedID, global)
 			if err != nil {
 				return ContractGovernanceProjection{}, err
 			}
@@ -135,6 +139,14 @@ func (s *Store) ContractGovernanceProjection(ctx context.Context) (ContractGover
 }
 
 func (s *Store) ContractRevisionView(ctx context.Context, revisionID string) (ContractRevisionView, error) {
+	global, err := s.AppliedGlobalPolicy(ctx)
+	if err != nil {
+		return ContractRevisionView{}, err
+	}
+	return s.contractRevisionView(ctx, revisionID, global)
+}
+
+func (s *Store) contractRevisionView(ctx context.Context, revisionID string, global domain.GlobalPolicyRevision) (ContractRevisionView, error) {
 	var revision domain.ObservedContractRevision
 	var normalized []byte
 	err := s.pool.QueryRow(ctx, `SELECT id::text,server_id::text,revision,canonical_hash,normalized_contract,created_at FROM mcp_contract_revisions WHERE id=$1`, revisionID).Scan(&revision.ID, &revision.ServerID, &revision.Revision, &revision.CanonicalHash, &normalized, &revision.CreatedAt)
@@ -146,16 +158,21 @@ func (s *Store) ContractRevisionView(ctx context.Context, revisionID string) (Co
 	}
 	revision.NormalizedContract = json.RawMessage(normalized)
 	result := ContractRevisionView{Revision: revision, Tools: []domain.ContractTool{}}
-	rows, err := s.pool.Query(ctx, `SELECT tool.id::text,tool.server_id::text,tool.name,member.position,member.input_schema,member.output_schema,member.annotations,member.presentation FROM mcp_contract_revision_tools member JOIN mcp_tools tool ON tool.id=member.tool_id WHERE member.contract_revision_id=$1 ORDER BY member.position`, revisionID)
+	rows, err := s.pool.Query(ctx, `SELECT tool.id::text,tool.server_id::text,tool.name,member.position,member.input_schema,member.output_schema,member.annotations,member.presentation,member.status FROM mcp_contract_revision_tools member JOIN mcp_tools tool ON tool.id=member.tool_id WHERE member.contract_revision_id=$1 ORDER BY member.position`, revisionID)
 	if err != nil {
 		return ContractRevisionView{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var tool domain.ContractTool
-		if err := rows.Scan(&tool.ID, &tool.ServerID, &tool.Name, &tool.Position, &tool.InputSchema, &tool.OutputSchema, &tool.Annotations, &tool.Presentation); err != nil {
+		if err := rows.Scan(&tool.ID, &tool.ServerID, &tool.Name, &tool.Position, &tool.InputSchema, &tool.OutputSchema, &tool.Annotations, &tool.Presentation, &tool.Status); err != nil {
 			return ContractRevisionView{}, err
 		}
+		annotations := map[string]any{}
+		if err := json.Unmarshal(tool.Annotations, &annotations); err != nil {
+			return ContractRevisionView{}, err
+		}
+		tool.GlobalDecision, tool.ReasonCodes = classifyGovernanceTool(global, tool.ID, tool.Name, tool.InputSchema, tool.OutputSchema, annotations)
 		result.Tools = append(result.Tools, tool)
 	}
 	return result, rows.Err()

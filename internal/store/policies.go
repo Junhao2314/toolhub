@@ -197,13 +197,6 @@ func (s *Store) AppliedGlobalPolicy(ctx context.Context) (domain.GlobalPolicyRev
 	return s.GlobalPolicy(ctx, id)
 }
 
-func globalDecisionForTool(global domain.GlobalPolicyRevision, toolID string) string {
-	if decision := global.ExplicitOverrides[toolID]; policy.ValidateDecision(decision) {
-		return decision
-	}
-	return global.UnclassifiedMutating
-}
-
 func validateProfileToolCeiling(ctx context.Context, tx pgx.Tx, rules []ProfileToolRuleInput) error {
 	if len(rules) == 0 {
 		return nil
@@ -234,24 +227,43 @@ func validateProfileToolCeiling(ctx context.Context, tx pgx.Tx, rules []ProfileT
 			return errors.New("duplicate profile tool rule")
 		}
 		seen[rule.ToolID] = struct{}{}
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mcp_tools WHERE id=$1)`, rule.ToolID).Scan(&exists); err != nil {
+		tool, err := acceptedRoutingToolTx(ctx, tx, rule.ToolID)
+		if err != nil {
 			return err
 		}
-		if !exists {
-			return ErrNotFound
-		}
-		var toolName string
-		if err := tx.QueryRow(ctx, `SELECT name FROM mcp_tools WHERE id=$1`, rule.ToolID).Scan(&toolName); err != nil {
-			return err
-		}
-		globalDecision := globalDecisionForTool(global, rule.ToolID)
-		if decision := global.ExplicitOverrides[toolName]; policy.ValidateDecision(decision) {
-			globalDecision = decision
-		}
+		globalDecision, _ := classifyRoutingTool(global, tool)
 		if policy.EffectiveDecision(globalDecision, rule.Decision) != rule.Decision {
 			return ErrConflict
 		}
 	}
 	return nil
+}
+
+func acceptedRoutingToolTx(ctx context.Context, tx pgx.Tx, toolID string) (RoutingTool, error) {
+	var tool RoutingTool
+	var inputSchema, outputSchema, annotations []byte
+	err := tx.QueryRow(ctx, `
+		SELECT tool.id::text,tool.name,member.input_schema,member.output_schema,member.annotations
+		FROM mcp_tools tool
+		JOIN mcp_contract_state state ON state.server_id=tool.server_id
+		JOIN mcp_contract_revision_tools member
+		  ON member.contract_revision_id=state.accepted_revision_id
+		 AND member.tool_id=tool.id
+		WHERE tool.id=$1`, toolID).Scan(&tool.ToolID, &tool.Name, &inputSchema, &outputSchema, &annotations)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RoutingTool{}, ErrNotFound
+	}
+	if err != nil {
+		return RoutingTool{}, err
+	}
+	if err := json.Unmarshal(inputSchema, &tool.InputSchema); err != nil {
+		return RoutingTool{}, err
+	}
+	if err := json.Unmarshal(outputSchema, &tool.OutputSchema); err != nil {
+		return RoutingTool{}, err
+	}
+	if err := json.Unmarshal(annotations, &tool.Annotations); err != nil {
+		return RoutingTool{}, err
+	}
+	return tool, nil
 }
