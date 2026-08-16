@@ -18,6 +18,29 @@ import (
 	"github.com/Junhao2314/toolhub/internal/store"
 )
 
+type relayEnforcementTestBridge struct {
+	calls       []string
+	capability  bridgeprotocol.RelayCapabilityResponse
+	inspections map[string]bridgeprotocol.NativeClientInspectionResponse
+	canary      bridgeprotocol.RelaySessionCanaryResponse
+}
+
+func (bridge *relayEnforcementTestBridge) RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
+	bridge.calls = append(bridge.calls, "capability")
+	return bridge.capability, nil
+}
+
+func (bridge *relayEnforcementTestBridge) InspectNativeClient(_ context.Context, input bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error) {
+	bridge.calls = append(bridge.calls, input.ClientKind)
+	return bridge.inspections[input.ClientKind], nil
+}
+
+func (bridge *relayEnforcementTestBridge) RelaySessionCanary(_ context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	bridge.calls = append(bridge.calls, "session-canary")
+	bridge.canary.RoutingBundleHash = input.RoutingBundleHash
+	return bridge.canary, nil
+}
+
 func TestGovernanceRoutesRequireSessionAndCSRF(t *testing.T) {
 	harness := newGovernanceHarness(t)
 	profileID := "11111111-1111-4111-8111-111111111111"
@@ -128,7 +151,7 @@ func TestRelayConfigurationProjectionIncludesBoundedRuntimeCapability(t *testing
 			AdminProtocolVersion: 1,
 			Features: []string{
 				"profile-session-binding", "tool-filtering", "call-policy",
-				"one-shot-confirmation", "payload-free-observations", "routing-hot-reload",
+				"one-shot-confirmation", "payload-free-observations", "routing-hot-reload", "session-canary",
 				"untrusted-extra-feature",
 			},
 			RoutingSchemaVersions: []int{1},
@@ -156,10 +179,57 @@ func TestRelayConfigurationProjectionIncludesBoundedRuntimeCapability(t *testing
 	if !capability.Compatible || capability.RuntimeVersion != "2.15.0-toolhub.1" || capability.ErrorCode != "" {
 		t.Fatalf("runtime capability=%+v", capability)
 	}
-	wantFeatures := "profile-session-binding,tool-filtering,call-policy,one-shot-confirmation,payload-free-observations,routing-hot-reload"
+	wantFeatures := "profile-session-binding,tool-filtering,call-policy,one-shot-confirmation,payload-free-observations,routing-hot-reload,session-canary"
 	if got := strings.Join(capability.Features, ","); got != wantFeatures {
 		t.Fatalf("runtime features=%q want=%q", got, wantFeatures)
 	}
+}
+
+func TestRelayEnforcementPreflightRunsCandidateSessionCanaryLast(t *testing.T) {
+	bundle, body, hash := httpEnforcementCanaryBundle(t)
+	bridge := &relayEnforcementTestBridge{
+		capability: bridgeprotocol.RelayCapabilityResponse{AdminProtocolVersion: 1, Features: []string{"profile-session-binding", "tool-filtering", "call-policy", "one-shot-confirmation", "payload-free-observations", "routing-hot-reload", "session-canary"}, RoutingSchemaVersions: []int{1}, Runtime: "mcpm", RuntimeVersion: "2.15.0-toolhub.1"},
+		inspections: map[string]bridgeprotocol.NativeClientInspectionResponse{
+			bridgeprotocol.RuntimeClaude: {ClientKind: bridgeprotocol.RuntimeClaude, Version: "2.1.232", Supported: true},
+			bridgeprotocol.RuntimeCodex:  {ClientKind: bridgeprotocol.RuntimeCodex, Version: "0.147.0", Supported: true},
+		},
+		canary: bridgeprotocol.RelaySessionCanaryResponse{
+			Profiles: []bridgeprotocol.RelaySessionCanaryProfile{
+				{ClientKind: bridgeprotocol.RuntimeClaude, ProfileID: bundle.Profiles[0].ProfileID, ProfileRevisionID: bundle.Profiles[0].ProfileRevisionID, ToolCount: 0},
+				{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: bundle.Profiles[1].ProfileID, ProfileRevisionID: bundle.Profiles[1].ProfileRevisionID, ToolCount: 0},
+			},
+			MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0}, InvalidProfileErrorCode: "profile_invalid", ConcurrentSessionCount: 2, UpstreamProcesses: []bridgeprotocol.RelaySessionCanaryProcess{},
+		},
+	}
+	request := bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: hash, RoutingBundle: body}
+	if apiErr := validateRelayEnforcementRuntime(context.Background(), bridge, "runner", request); apiErr != nil {
+		t.Fatalf("valid enforcement runtime rejected: %+v", apiErr)
+	}
+	if got := strings.Join(bridge.calls, ","); got != "capability,claude,codex,session-canary" {
+		t.Fatalf("enforcement check order=%s", got)
+	}
+
+	bridge.calls = nil
+	bridge.canary.ConcurrentSessionCount = 1
+	if apiErr := validateRelayEnforcementRuntime(context.Background(), bridge, "runner", request); apiErr == nil || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
+		t.Fatalf("invalid session canary error=%+v", apiErr)
+	}
+}
+
+func httpEnforcementCanaryBundle(t *testing.T) (bridgeprotocol.RoutingBundle, json.RawMessage, string) {
+	t.Helper()
+	bundle := bridgeprotocol.RoutingBundle{
+		SchemaVersion: 1, Mode: "enforced", RelayConfigurationRevisionID: "00000000-0000-0000-0000-000000000001", RelayConfigurationHash: strings.Repeat("a", 64), GlobalPolicyRevisionID: "00000000-0000-0000-0000-000000000002", GlobalPolicyHash: strings.Repeat("b", 64), Servers: []bridgeprotocol.ServerContractDTO{},
+		Profiles: []bridgeprotocol.PublishedProfileDTO{
+			{ProfileID: "00000000-0000-0000-0000-000000000010", ProfileRevisionID: "00000000-0000-0000-0000-000000000011", ProfileRevisionHash: strings.Repeat("c", 64), ProfileName: "claude", ClientKind: bridgeprotocol.RuntimeClaude, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+			{ProfileID: "00000000-0000-0000-0000-000000000020", ProfileRevisionID: "00000000-0000-0000-0000-000000000021", ProfileRevisionHash: strings.Repeat("d", 64), ProfileName: "codex", ClientKind: bridgeprotocol.RuntimeCodex, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+		},
+	}
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle, body, hash
 }
 
 func TestRelayContractProjectionIncludesAppliedPolicyClassification(t *testing.T) {

@@ -19,10 +19,11 @@ import (
 )
 
 type CompositeAdapter struct {
-	Journal      *Journal
-	Local        *runtime.Manager
-	RelayManager *runtime.RelayManager
-	Salt         *saltdriver.Driver
+	Journal           *Journal
+	Local             *runtime.Manager
+	RelayManager      *runtime.RelayManager
+	Salt              *saltdriver.Driver
+	lookupManagedUser func(string) (runtime.ManagedUser, error)
 }
 
 type saltReconcilePayload struct {
@@ -31,7 +32,14 @@ type saltReconcilePayload struct {
 }
 
 func NewCompositeAdapter(journal *Journal, local *runtime.Manager, relay *runtime.RelayManager, salt *saltdriver.Driver) *CompositeAdapter {
-	return &CompositeAdapter{Journal: journal, Local: local, RelayManager: relay, Salt: salt}
+	return &CompositeAdapter{Journal: journal, Local: local, RelayManager: relay, Salt: salt, lookupManagedUser: runtime.LookupManagedUser}
+}
+
+func (a *CompositeAdapter) managedUser(name string) (runtime.ManagedUser, error) {
+	if a.lookupManagedUser == nil {
+		return runtime.LookupManagedUser(name)
+	}
+	return a.lookupManagedUser(name)
 }
 
 func (a *CompositeAdapter) Health(ctx context.Context) error {
@@ -59,7 +67,7 @@ func (a *CompositeAdapter) RefreshNodes(ctx context.Context) (bridgeprotocol.Ref
 
 func (a *CompositeAdapter) Scan(ctx context.Context, input bridgeprotocol.ScanRequest) (bridgeprotocol.ScanResponse, error) {
 	if input.Target.NodeKind == bridgeprotocol.NodeKindLocal {
-		user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
+		user, err := a.managedUser(input.Target.ManagedUsername)
 		if err != nil {
 			return bridgeprotocol.ScanResponse{}, err
 		}
@@ -99,7 +107,7 @@ func (a *CompositeAdapter) Scan(ctx context.Context, input bridgeprotocol.ScanRe
 }
 
 func (a *CompositeAdapter) ExportLocalSkill(_ context.Context, input bridgeprotocol.LocalSkillExportRequest) (bridgeprotocol.LocalSkillExportResponse, error) {
-	user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
+	user, err := a.managedUser(input.Target.ManagedUsername)
 	if err != nil {
 		return bridgeprotocol.LocalSkillExportResponse{}, err
 	}
@@ -107,7 +115,7 @@ func (a *CompositeAdapter) ExportLocalSkill(_ context.Context, input bridgeproto
 }
 
 func (a *CompositeAdapter) ExportLocalSkillBatch(_ context.Context, input bridgeprotocol.LocalSkillBatchExportRequest) (bridgeprotocol.LocalSkillBatchExportResponse, error) {
-	user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
+	user, err := a.managedUser(input.Target.ManagedUsername)
 	if err != nil {
 		return bridgeprotocol.LocalSkillBatchExportResponse{}, err
 	}
@@ -115,7 +123,7 @@ func (a *CompositeAdapter) ExportLocalSkillBatch(_ context.Context, input bridge
 }
 
 func (a *CompositeAdapter) PreviewLocalMCP(_ context.Context, input bridgeprotocol.LocalMCPPreviewRequest) (bridgeprotocol.LocalMCPPreviewResponse, error) {
-	user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
+	user, err := a.managedUser(input.Target.ManagedUsername)
 	if err != nil {
 		return bridgeprotocol.LocalMCPPreviewResponse{}, err
 	}
@@ -123,7 +131,7 @@ func (a *CompositeAdapter) PreviewLocalMCP(_ context.Context, input bridgeprotoc
 }
 
 func (a *CompositeAdapter) CaptureLocalMCP(_ context.Context, input bridgeprotocol.LocalMCPCaptureRequest) (bridgeprotocol.LocalMCPCaptureResponse, error) {
-	user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
+	user, err := a.managedUser(input.Target.ManagedUsername)
 	if err != nil {
 		return bridgeprotocol.LocalMCPCaptureResponse{}, err
 	}
@@ -132,7 +140,7 @@ func (a *CompositeAdapter) CaptureLocalMCP(_ context.Context, input bridgeprotoc
 
 func (a *CompositeAdapter) Preflight(ctx context.Context, input bridgeprotocol.PreflightRequest) (bridgeprotocol.PreflightResponse, error) {
 	if input.Target.NodeKind == bridgeprotocol.NodeKindLocal {
-		user, err := runtime.LookupManagedUser(input.Target.ManagedUsername)
+		user, err := a.managedUser(input.Target.ManagedUsername)
 		if err != nil {
 			return bridgeprotocol.PreflightResponse{}, err
 		}
@@ -205,7 +213,7 @@ func relayDiff(current []bridgeprotocol.InventoryMember, manifest bridgeprotocol
 
 func (a *CompositeAdapter) Commit(ctx context.Context, request bridgeprotocol.CommitRequest) (bridgeprotocol.TargetResult, error) {
 	if request.Target.NodeKind == bridgeprotocol.NodeKindLocal {
-		user, err := runtime.LookupManagedUser(request.Target.ManagedUsername)
+		user, err := a.managedUser(request.Target.ManagedUsername)
 		if err != nil {
 			return bridgeprotocol.TargetResult{}, err
 		}
@@ -225,7 +233,7 @@ func (a *CompositeAdapter) Commit(ctx context.Context, request bridgeprotocol.Co
 
 func (a *CompositeAdapter) Reconcile(ctx context.Context, request bridgeprotocol.ReconcileRequest) (bridgeprotocol.TargetResult, error) {
 	if request.Target.NodeKind == bridgeprotocol.NodeKindLocal {
-		user, err := runtime.LookupManagedUser(request.Target.ManagedUsername)
+		user, err := a.managedUser(request.Target.ManagedUsername)
 		if err != nil {
 			return bridgeprotocol.TargetResult{}, err
 		}
@@ -254,7 +262,7 @@ func (a *CompositeAdapter) Reconcile(ctx context.Context, request bridgeprotocol
 
 func (a *CompositeAdapter) Restore(ctx context.Context, request bridgeprotocol.CommitRequest) (bridgeprotocol.TargetResult, error) {
 	if request.Target.NodeKind == bridgeprotocol.NodeKindLocal {
-		user, err := runtime.LookupManagedUser(request.Target.ManagedUsername)
+		user, err := a.managedUser(request.Target.ManagedUsername)
 		if err != nil {
 			return bridgeprotocol.TargetResult{}, err
 		}
@@ -681,6 +689,10 @@ func (a *CompositeAdapter) RelayCapability(ctx context.Context) (bridgeprotocol.
 	return a.RelayManager.RelayCapability(ctx)
 }
 
+func (a *CompositeAdapter) RelaySessionCanary(ctx context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	return a.RelayManager.RelaySessionCanary(ctx, input)
+}
+
 func (a *CompositeAdapter) ReloadRelayGovernance(ctx context.Context, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {
 	return a.RelayManager.ReloadRelayGovernance(ctx, input)
 }
@@ -702,7 +714,7 @@ func (a *CompositeAdapter) DrainRelayObservations(ctx context.Context, input bri
 }
 
 func (a *CompositeAdapter) InspectNativeClient(ctx context.Context, input bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error) {
-	user, err := runtime.LookupManagedUser(input.ManagedUsername)
+	user, err := a.managedUser(input.ManagedUsername)
 	if err != nil {
 		return bridgeprotocol.NativeClientInspectionResponse{}, err
 	}

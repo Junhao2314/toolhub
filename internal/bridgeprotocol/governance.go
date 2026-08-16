@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/cyberphone/json-canonicalization/go/src/webpki.org/jsoncanonicalizer"
@@ -321,6 +322,7 @@ var relayEnforcementFeatures = []string{
 	"one-shot-confirmation",
 	"payload-free-observations",
 	"routing-hot-reload",
+	"session-canary",
 }
 
 func RelayEnforcementFeatures() []string {
@@ -368,6 +370,150 @@ type RelayReloadRequest struct {
 type RelayReloadResponse struct {
 	Reloaded          bool   `json:"reloaded"`
 	RoutingBundleHash string `json:"routingBundleHash"`
+}
+
+type RelaySessionCanaryRequest struct {
+	RoutingBundleHash string          `json:"routingBundleHash"`
+	RoutingBundle     json.RawMessage `json:"routingBundle"`
+}
+
+type RelaySessionCanaryProfile struct {
+	ClientKind        string `json:"clientKind"`
+	ProfileID         string `json:"profileId"`
+	ProfileRevisionID string `json:"profileRevisionId"`
+	ToolCount         int    `json:"toolCount"`
+}
+
+type RelaySessionCanaryMissing struct {
+	Behavior          string  `json:"behavior"`
+	ProfileID         *string `json:"profileId"`
+	ProfileRevisionID *string `json:"profileRevisionId"`
+	ToolCount         int     `json:"toolCount"`
+}
+
+type RelaySessionCanaryProcess struct {
+	ServerID     string `json:"serverId"`
+	ProcessCount int    `json:"processCount"`
+}
+
+type RelaySessionCanaryResponse struct {
+	RoutingBundleHash       string                      `json:"routingBundleHash"`
+	Profiles                []RelaySessionCanaryProfile `json:"profiles"`
+	MissingProfile          RelaySessionCanaryMissing   `json:"missingProfile"`
+	InvalidProfileErrorCode string                      `json:"invalidProfileErrorCode"`
+	ConcurrentSessionCount  int                         `json:"concurrentSessionCount"`
+	UpstreamProcesses       []RelaySessionCanaryProcess `json:"upstreamProcesses"`
+}
+
+func ValidateRelaySessionCanaryRequest(input RelaySessionCanaryRequest) (RoutingBundle, error) {
+	var bundle RoutingBundle
+	if !IsSHA256(input.RoutingBundleHash) || len(input.RoutingBundle) == 0 || len(input.RoutingBundle) > GovernanceMaxBodyBytes {
+		return bundle, errors.New("session canary routing bundle binding is invalid")
+	}
+	if err := DecodeGovernanceBody(input.RoutingBundle, &bundle); err != nil {
+		return bundle, err
+	}
+	if err := bundle.Validate(); err != nil || bundle.Mode != "enforced" {
+		return bundle, errors.New("session canary requires a valid enforced routing bundle")
+	}
+	_, hash, err := bundle.Canonical()
+	if err != nil || hash != input.RoutingBundleHash {
+		return bundle, errors.New("session canary routing bundle hash does not match")
+	}
+	return bundle, nil
+}
+
+func ValidateRelaySessionCanaryResponse(bundle RoutingBundle, routingHash string, response RelaySessionCanaryResponse) error {
+	if !IsSHA256(routingHash) || response.RoutingBundleHash != routingHash || response.InvalidProfileErrorCode != "profile_invalid" || response.ConcurrentSessionCount != 2 {
+		return errors.New("session canary response binding is invalid")
+	}
+	expectedProfiles := make([]PublishedProfileDTO, 0, 2)
+	for _, clientKind := range []string{RuntimeClaude, RuntimeCodex} {
+		matches := make([]PublishedProfileDTO, 0)
+		for _, profile := range bundle.Profiles {
+			if profile.ClientKind == clientKind {
+				matches = append(matches, profile)
+			}
+		}
+		sort.Slice(matches, func(i, j int) bool { return matches[i].ProfileID < matches[j].ProfileID })
+		if len(matches) == 0 {
+			return fmt.Errorf("session canary candidate has no %s Profile", clientKind)
+		}
+		expectedProfiles = append(expectedProfiles, matches[0])
+	}
+	if len(response.Profiles) != len(expectedProfiles) {
+		return errors.New("session canary Profile count does not match candidate routing")
+	}
+	for index, expected := range expectedProfiles {
+		actual := response.Profiles[index]
+		if actual.ClientKind != expected.ClientKind || actual.ProfileID != expected.ProfileID || actual.ProfileRevisionID != expected.ProfileRevisionID || actual.ToolCount != relayCanaryToolCount(bundle, &expected) {
+			return errors.New("session canary Profile result does not match candidate routing")
+		}
+	}
+
+	if bundle.DefaultProfileID == nil {
+		if response.MissingProfile.Behavior != "empty" || response.MissingProfile.ProfileID != nil || response.MissingProfile.ProfileRevisionID != nil || response.MissingProfile.ToolCount != 0 {
+			return errors.New("session canary missing Profile behavior is invalid")
+		}
+	} else {
+		var defaultProfile *PublishedProfileDTO
+		for index := range bundle.Profiles {
+			if bundle.Profiles[index].ProfileID == *bundle.DefaultProfileID {
+				defaultProfile = &bundle.Profiles[index]
+				break
+			}
+		}
+		if defaultProfile == nil || response.MissingProfile.Behavior != "default" || response.MissingProfile.ProfileID == nil || *response.MissingProfile.ProfileID != defaultProfile.ProfileID || response.MissingProfile.ProfileRevisionID == nil || *response.MissingProfile.ProfileRevisionID != defaultProfile.ProfileRevisionID || response.MissingProfile.ToolCount != relayCanaryToolCount(bundle, defaultProfile) {
+			return errors.New("session canary default Profile behavior is invalid")
+		}
+	}
+
+	if len(response.UpstreamProcesses) != len(bundle.Servers) {
+		return errors.New("session canary upstream set does not match candidate routing")
+	}
+	for index, server := range bundle.Servers {
+		actual := response.UpstreamProcesses[index]
+		if actual.ServerID != server.ServerID || actual.ProcessCount != 1 {
+			return errors.New("session canary upstream process count is invalid")
+		}
+	}
+	return nil
+}
+
+func relayCanaryToolCount(bundle RoutingBundle, profile *PublishedProfileDTO) int {
+	count := 0
+	for _, server := range bundle.Servers {
+		var profileServer *ProfileServerRoutingDTO
+		for index := range profile.Servers {
+			if profile.Servers[index].ServerID == server.ServerID {
+				profileServer = &profile.Servers[index]
+				break
+			}
+		}
+		if profileServer == nil {
+			continue
+		}
+		for _, tool := range server.Tools {
+			visible := profileServer.VisibilityMode == "all_accepted"
+			for _, override := range profileServer.ToolOverrides {
+				if override.ToolID == tool.ToolID {
+					visible = override.Visible
+					break
+				}
+			}
+			decision := tool.GlobalDecision
+			for _, rule := range profileServer.ToolRules {
+				if rule.ToolID == tool.ToolID {
+					decision = rule.Decision
+					break
+				}
+			}
+			if visible && !tool.Paused && decision != "deny" {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 type RelayAdminProfileRevision struct {
@@ -546,8 +692,8 @@ func validateGovernanceValue(value any, depth int, items *int, maxDepth int, sch
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, child := range typed {
-			lower := strings.ToLower(key)
-			forbidden := map[string]struct{}{"secretvalues": {}, "arguments": {}, "result": {}, "prompt": {}, "rawerror": {}, "sessionid": {}, "ciphertext": {}}
+			lower := normalizedGovernanceFieldName(key)
+			forbidden := map[string]struct{}{"secretvalue": {}, "secretvalues": {}, "arguments": {}, "result": {}, "results": {}, "prompt": {}, "prompts": {}, "rawerror": {}, "sessionid": {}, "ciphertext": {}}
 			if _, ok := forbidden[lower]; ok && !schemaData {
 				return fmt.Errorf("governance body contains forbidden field %q", key)
 			}
@@ -571,6 +717,18 @@ func validateGovernanceValue(value any, depth int, items *int, maxDepth int, sch
 		}
 	}
 	return nil
+}
+
+func normalizedGovernanceFieldName(value string) string {
+	return strings.Map(func(character rune) rune {
+		if character >= 'A' && character <= 'Z' {
+			return character + ('a' - 'A')
+		}
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			return character
+		}
+		return -1
+	}, value)
 }
 
 func isRoutingGovernanceValue(value any) bool {

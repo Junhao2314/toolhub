@@ -2,6 +2,7 @@ package bridgeclient
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -19,6 +20,8 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 func TestGovernanceClientUsesFixedTypedRoutes(t *testing.T) {
 	challengeID := strings.Repeat("a", 64)
 	bindingHash := strings.Repeat("b", 64)
+	canaryBundle := `{"schemaVersion":1,"mode":"enforced","relayConfigurationRevisionId":"00000000-0000-0000-0000-000000000001","relayConfigurationHash":"` + strings.Repeat("a", 64) + `","globalPolicyRevisionId":"00000000-0000-0000-0000-000000000002","globalPolicyHash":"` + strings.Repeat("b", 64) + `","defaultProfileId":null,"servers":[],"profiles":[]}`
+	canaryHash := strings.Repeat("c", 64)
 	tests := []struct {
 		name        string
 		path        string
@@ -28,6 +31,10 @@ func TestGovernanceClientUsesFixedTypedRoutes(t *testing.T) {
 		call        func(context.Context, *Client) error
 	}{
 		{name: "capability", path: "/v1/relay/governance/capability", body: `{}`, response: `{"adminProtocolVersion":1,"features":[],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"2.15.0-toolhub.1"}`, call: func(ctx context.Context, client *Client) error { _, err := client.RelayCapability(ctx); return err }},
+		{name: "session canary", path: "/v1/relay/governance/session-canary", body: `{"routingBundleHash":"` + canaryHash + `","routingBundle":` + canaryBundle + `}`, response: `{"routingBundleHash":"` + canaryHash + `","profiles":[],"missingProfile":{"behavior":"empty","profileId":null,"profileRevisionId":null,"toolCount":0},"invalidProfileErrorCode":"profile_invalid","concurrentSessionCount":2,"upstreamProcesses":[]}`, call: func(ctx context.Context, client *Client) error {
+			_, err := client.RelaySessionCanary(ctx, bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: canaryHash, RoutingBundle: json.RawMessage(canaryBundle)})
+			return err
+		}},
 		{name: "contract observation", path: "/v1/relay/governance/contracts/observe", body: `{}`, response: `{"relayConfigurationRevisionId":"00000000-0000-0000-0000-000000000001","servers":[]}`, call: func(ctx context.Context, client *Client) error {
 			_, err := client.ObserveRelayContracts(ctx)
 			return err

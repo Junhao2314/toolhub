@@ -32,6 +32,7 @@ type MCPMAdminClient struct {
 
 type MCPMAdmin interface {
 	Capability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
+	SessionCanary(context.Context, bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error)
 	ReloadRouting(context.Context) (bridgeprotocol.RelayAdminStatus, error)
 	Status(context.Context) (bridgeprotocol.RelayAdminStatus, error)
 	ObserveContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error)
@@ -51,6 +52,17 @@ func newMCPMAdminClient(socketPath string, timeout time.Duration) *MCPMAdminClie
 func (c *MCPMAdminClient) Capability(ctx context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
 	var result bridgeprotocol.RelayCapabilityResponse
 	err := c.call(ctx, map[string]any{"operation": "contract"}, &result)
+	return result, err
+}
+
+func (c *MCPMAdminClient) SessionCanary(ctx context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	request := struct {
+		Operation         string          `json:"operation"`
+		RoutingBundleHash string          `json:"routingBundleHash"`
+		RoutingBundle     json.RawMessage `json:"routingBundle"`
+	}{Operation: "session_canary", RoutingBundleHash: input.RoutingBundleHash, RoutingBundle: input.RoutingBundle}
+	var result bridgeprotocol.RelaySessionCanaryResponse
+	err := c.call(ctx, request, &result)
 	return result, err
 }
 
@@ -230,6 +242,21 @@ func adminTransportError(err error) error {
 
 func (r *RelayManager) RelayCapability(ctx context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
 	return r.adminClient().Capability(ctx)
+}
+
+func (r *RelayManager) RelaySessionCanary(ctx context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	bundle, err := bridgeprotocol.ValidateRelaySessionCanaryRequest(input)
+	if err != nil {
+		return bridgeprotocol.RelaySessionCanaryResponse{}, err
+	}
+	response, err := r.adminClient().SessionCanary(ctx, input)
+	if err != nil {
+		return bridgeprotocol.RelaySessionCanaryResponse{}, err
+	}
+	if err := bridgeprotocol.ValidateRelaySessionCanaryResponse(bundle, input.RoutingBundleHash, response); err != nil {
+		return bridgeprotocol.RelaySessionCanaryResponse{}, incompatibleMCPMError()
+	}
+	return response, nil
 }
 
 func (r *RelayManager) ReloadRelayGovernance(ctx context.Context, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {

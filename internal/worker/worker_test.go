@@ -16,6 +16,7 @@ type enforcementReadinessBridge struct {
 	calls       []string
 	capability  bridgeprotocol.RelayCapabilityResponse
 	inspections map[string]bridgeprotocol.NativeClientInspectionResponse
+	canary      bridgeprotocol.RelaySessionCanaryResponse
 }
 
 func (bridge *enforcementReadinessBridge) RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
@@ -26,6 +27,12 @@ func (bridge *enforcementReadinessBridge) RelayCapability(context.Context) (brid
 func (bridge *enforcementReadinessBridge) InspectNativeClient(_ context.Context, input bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error) {
 	bridge.calls = append(bridge.calls, input.ClientKind)
 	return bridge.inspections[input.ClientKind], nil
+}
+
+func (bridge *enforcementReadinessBridge) RelaySessionCanary(_ context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	bridge.calls = append(bridge.calls, "session-canary")
+	bridge.canary.RoutingBundleHash = input.RoutingBundleHash
+	return bridge.canary, nil
 }
 
 func TestProjectScanHealthDetectsPinnedDriftAndIgnoresUnmanagedExtras(t *testing.T) {
@@ -216,12 +223,13 @@ func TestGovernanceApplyDefersDesiredSnapshotToFinalizer(t *testing.T) {
 }
 
 func TestEnforcementPreflightChecksCapabilityThenClaudeThenCodex(t *testing.T) {
+	bundle, body, hash := enforcementSessionCanaryBundle(t)
 	bridge := &enforcementReadinessBridge{
 		capability: bridgeprotocol.RelayCapabilityResponse{
 			AdminProtocolVersion: 1,
 			Features: []string{
 				"profile-session-binding", "tool-filtering", "call-policy",
-				"one-shot-confirmation", "payload-free-observations", "routing-hot-reload",
+				"one-shot-confirmation", "payload-free-observations", "routing-hot-reload", "session-canary",
 			},
 			RoutingSchemaVersions: []int{1}, Runtime: "mcpm", RuntimeVersion: "2.15.0-toolhub.1",
 		},
@@ -229,32 +237,56 @@ func TestEnforcementPreflightChecksCapabilityThenClaudeThenCodex(t *testing.T) {
 			"claude": {ClientKind: "claude", Version: "2.1.232", Supported: true},
 			"codex":  {ClientKind: "codex", Version: "0.147.0", Supported: true},
 		},
+		canary: bridgeprotocol.RelaySessionCanaryResponse{
+			Profiles: []bridgeprotocol.RelaySessionCanaryProfile{
+				{ClientKind: bridgeprotocol.RuntimeClaude, ProfileID: bundle.Profiles[0].ProfileID, ProfileRevisionID: bundle.Profiles[0].ProfileRevisionID, ToolCount: 0},
+				{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: bundle.Profiles[1].ProfileID, ProfileRevisionID: bundle.Profiles[1].ProfileRevisionID, ToolCount: 0},
+			},
+			MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0}, InvalidProfileErrorCode: "profile_invalid", ConcurrentSessionCount: 2, UpstreamProcesses: []bridgeprotocol.RelaySessionCanaryProcess{},
+		},
 	}
-	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner"); apiErr != nil {
+	request := bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: hash, RoutingBundle: body}
+	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner", request); apiErr != nil {
 		t.Fatalf("valid enforcement runtime rejected: %+v", apiErr)
 	}
-	if got := strings.Join(bridge.calls, ","); got != "capability,claude,codex" {
+	if got := strings.Join(bridge.calls, ","); got != "capability,claude,codex,session-canary" {
 		t.Fatalf("enforcement check order=%s", got)
 	}
 
 	bridge.calls = nil
 	bridge.capability.Features = bridge.capability.Features[:len(bridge.capability.Features)-1]
-	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner"); apiErr == nil || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
+	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner", request); apiErr == nil || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
 		t.Fatalf("incomplete capability error=%+v", apiErr)
 	}
 	if got := strings.Join(bridge.calls, ","); got != "capability" {
 		t.Fatalf("client inspection ran after incompatible capability: %s", got)
 	}
 
-	bridge.capability.Features = append(bridge.capability.Features, "routing-hot-reload")
+	bridge.capability.Features = append(bridge.capability.Features, "session-canary")
 	bridge.calls = nil
 	bridge.inspections["codex"] = bridgeprotocol.NativeClientInspectionResponse{ClientKind: "codex", ErrorCode: "native_client_not_found"}
-	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner"); apiErr == nil || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
+	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner", request); apiErr == nil || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
 		t.Fatalf("unsupported Codex error=%+v", apiErr)
 	}
 	if got := strings.Join(bridge.calls, ","); got != "capability,claude,codex" {
 		t.Fatalf("unsupported client check order=%s", got)
 	}
+}
+
+func enforcementSessionCanaryBundle(t *testing.T) (bridgeprotocol.RoutingBundle, json.RawMessage, string) {
+	t.Helper()
+	bundle := bridgeprotocol.RoutingBundle{
+		SchemaVersion: 1, Mode: "enforced", RelayConfigurationRevisionID: "00000000-0000-0000-0000-000000000001", RelayConfigurationHash: strings.Repeat("a", 64), GlobalPolicyRevisionID: "00000000-0000-0000-0000-000000000002", GlobalPolicyHash: strings.Repeat("b", 64), Servers: []bridgeprotocol.ServerContractDTO{},
+		Profiles: []bridgeprotocol.PublishedProfileDTO{
+			{ProfileID: "00000000-0000-0000-0000-000000000010", ProfileRevisionID: "00000000-0000-0000-0000-000000000011", ProfileRevisionHash: strings.Repeat("c", 64), ProfileName: "claude", ClientKind: bridgeprotocol.RuntimeClaude, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+			{ProfileID: "00000000-0000-0000-0000-000000000020", ProfileRevisionID: "00000000-0000-0000-0000-000000000021", ProfileRevisionHash: strings.Repeat("d", 64), ProfileName: "codex", ClientKind: bridgeprotocol.RuntimeCodex, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+		},
+	}
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle, body, hash
 }
 
 func assertRevisionConflict(t *testing.T, err error) {

@@ -27,6 +27,7 @@ type fakeAdapter struct {
 	restoreCalls         int
 	relayCalls           int
 	relayCapabilityCalls int
+	relayCanaryCalls     int
 	relayGovernanceCalls int
 	nativeClientCalls    int
 	nativeClientRequest  bridgeprotocol.NativeClientInspectionRequest
@@ -74,6 +75,17 @@ func (f *fakeAdapter) Relay(context.Context, string, bridgeprotocol.RelayActionR
 func (f *fakeAdapter) RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
 	f.relayCapabilityCalls++
 	return bridgeprotocol.RelayCapabilityResponse{AdminProtocolVersion: 1, Features: []string{"tool-filtering"}, RoutingSchemaVersions: []int{1}, Runtime: "mcpm", RuntimeVersion: "2.15.0-toolhub.1"}, nil
+}
+func (f *fakeAdapter) RelaySessionCanary(_ context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	f.relayCanaryCalls++
+	return bridgeprotocol.RelaySessionCanaryResponse{
+		RoutingBundleHash: input.RoutingBundleHash,
+		Profiles: []bridgeprotocol.RelaySessionCanaryProfile{
+			{ClientKind: bridgeprotocol.RuntimeClaude, ProfileID: "00000000-0000-0000-0000-000000000010", ProfileRevisionID: "00000000-0000-0000-0000-000000000011", ToolCount: 0},
+			{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: "00000000-0000-0000-0000-000000000020", ProfileRevisionID: "00000000-0000-0000-0000-000000000021", ToolCount: 0},
+		},
+		MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0}, InvalidProfileErrorCode: "profile_invalid", ConcurrentSessionCount: 2, UpstreamProcesses: []bridgeprotocol.RelaySessionCanaryProcess{},
+	}, nil
 }
 func (f *fakeAdapter) ReloadRelayGovernance(_ context.Context, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {
 	f.relayGovernanceCalls++
@@ -289,6 +301,33 @@ func TestRelayGovernanceCapabilityIsTypedAndEphemeral(t *testing.T) {
 		t.Fatalf("capability status=%d calls=%d body=%s", recorder.Code, adapter.relayCapabilityCalls, recorder.Body.String())
 	}
 	assertIdempotencyJournalEmpty(t, server.journal)
+}
+
+func TestRelaySessionCanaryIsTypedHashBoundAndEphemeral(t *testing.T) {
+	server, adapter, key := testServer(t)
+	bundle := bridgeprotocol.RoutingBundle{
+		SchemaVersion: 1, Mode: "enforced", RelayConfigurationRevisionID: "00000000-0000-0000-0000-000000000001", RelayConfigurationHash: strings.Repeat("a", 64), GlobalPolicyRevisionID: "00000000-0000-0000-0000-000000000002", GlobalPolicyHash: strings.Repeat("b", 64), Servers: []bridgeprotocol.ServerContractDTO{},
+		Profiles: []bridgeprotocol.PublishedProfileDTO{
+			{ProfileID: "00000000-0000-0000-0000-000000000010", ProfileRevisionID: "00000000-0000-0000-0000-000000000011", ProfileRevisionHash: strings.Repeat("c", 64), ProfileName: "claude", ClientKind: bridgeprotocol.RuntimeClaude, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+			{ProfileID: "00000000-0000-0000-0000-000000000020", ProfileRevisionID: "00000000-0000-0000-0000-000000000021", ProfileRevisionHash: strings.Repeat("d", 64), ProfileName: "codex", ClientKind: bridgeprotocol.RuntimeCodex, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+		},
+	}
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: hash, RoutingBundle: body}
+	recorder := serveSignedMutation(t, server, key, "/v1/relay/governance/session-canary", "governance-canary-ok", "ignored-read-key", input)
+	if recorder.Code != http.StatusOK || adapter.relayCanaryCalls != 1 || !bytes.Contains(recorder.Body.Bytes(), []byte(hash)) {
+		t.Fatalf("session canary status=%d calls=%d body=%s", recorder.Code, adapter.relayCanaryCalls, recorder.Body.String())
+	}
+	assertIdempotencyJournalEmpty(t, server.journal)
+
+	input.RoutingBundleHash = strings.Repeat("f", 64)
+	bad := serveSignedMutation(t, server, key, "/v1/relay/governance/session-canary", "governance-canary-bad", "ignored-bad-key", input)
+	if bad.Code != http.StatusBadRequest || adapter.relayCanaryCalls != 1 {
+		t.Fatalf("invalid session canary status=%d calls=%d body=%s", bad.Code, adapter.relayCanaryCalls, bad.Body.String())
+	}
 }
 
 func TestRelayGovernanceReadBatchesAreEphemeral(t *testing.T) {

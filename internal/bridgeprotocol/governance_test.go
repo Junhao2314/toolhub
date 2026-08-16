@@ -3,6 +3,7 @@ package bridgeprotocol
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -31,11 +32,59 @@ func TestGovernanceBodyRejectsPayloadFieldsOutsideJSONSchemas(t *testing.T) {
 	for _, body := range [][]byte{
 		[]byte(`{"arguments":{"id":"payload"}}`),
 		[]byte(`{"annotations":{"result":"payload"}}`),
+		[]byte(`{"annotations":{"results":"payload"}}`),
 		[]byte(`{"inputSchema":{},"prompt":"payload"}`),
+		[]byte(`{"inputSchema":{},"prompts":"payload"}`),
+		[]byte(`{"metadata":{"secretValue":"payload"}}`),
 	} {
 		if err := ValidateGovernanceBody(body); err == nil {
 			t.Fatalf("governance body accepted payload field: %s", body)
 		}
+	}
+}
+
+func TestRelaySessionCanaryResponseIsBoundToCandidateProfilesAndProcesses(t *testing.T) {
+	claudeID := "00000000-0000-0000-0000-000000000010"
+	claudeRevisionID := "00000000-0000-0000-0000-000000000011"
+	codexID := "00000000-0000-0000-0000-000000000020"
+	codexRevisionID := "00000000-0000-0000-0000-000000000021"
+	serverID := "00000000-0000-0000-0000-000000000030"
+	bundle := RoutingBundle{
+		SchemaVersion: 1, Mode: "enforced",
+		RelayConfigurationRevisionID: "00000000-0000-0000-0000-000000000001",
+		RelayConfigurationHash:       strings.Repeat("a", 64),
+		GlobalPolicyRevisionID:       "00000000-0000-0000-0000-000000000002",
+		GlobalPolicyHash:             strings.Repeat("b", 64),
+		Servers: []ServerContractDTO{{
+			ServerID: serverID, ServerName: "search", MCPConfigRevisionID: "00000000-0000-0000-0000-000000000031",
+			AcceptedContractRevisionID: stringPointer("00000000-0000-0000-0000-000000000032"), AcceptedContractHash: stringPointer(strings.Repeat("c", 64)), Tools: []RoutingToolDTO{},
+		}},
+		Profiles: []PublishedProfileDTO{
+			{ProfileID: claudeID, ProfileRevisionID: claudeRevisionID, ProfileRevisionHash: strings.Repeat("d", 64), ProfileName: "claude", ClientKind: RuntimeClaude, Servers: []ProfileServerRoutingDTO{}},
+			{ProfileID: codexID, ProfileRevisionID: codexRevisionID, ProfileRevisionHash: strings.Repeat("e", 64), ProfileName: "codex", ClientKind: RuntimeCodex, Servers: []ProfileServerRoutingDTO{}},
+		},
+	}
+	_, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := RelaySessionCanaryResponse{
+		RoutingBundleHash: hash,
+		Profiles: []RelaySessionCanaryProfile{
+			{ClientKind: RuntimeClaude, ProfileID: claudeID, ProfileRevisionID: claudeRevisionID, ToolCount: 0},
+			{ClientKind: RuntimeCodex, ProfileID: codexID, ProfileRevisionID: codexRevisionID, ToolCount: 0},
+		},
+		MissingProfile:          RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0},
+		InvalidProfileErrorCode: "profile_invalid",
+		ConcurrentSessionCount:  2,
+		UpstreamProcesses:       []RelaySessionCanaryProcess{{ServerID: serverID, ProcessCount: 1}},
+	}
+	if err := ValidateRelaySessionCanaryResponse(bundle, hash, response); err != nil {
+		t.Fatalf("valid session canary rejected: %v", err)
+	}
+	response.UpstreamProcesses[0].ProcessCount = 2
+	if err := ValidateRelaySessionCanaryResponse(bundle, hash, response); err == nil {
+		t.Fatal("session canary accepted duplicate upstream processes")
 	}
 }
 
@@ -107,7 +156,7 @@ func TestGovernanceCapabilityDTOHasNoPayloadFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{"arguments", "result", "prompt", "rawError", "secretValues", "sessionId"} {
+	for _, forbidden := range []string{"arguments", "result", "results", "prompt", "prompts", "rawError", "secretValue", "secretValues", "sessionId"} {
 		if containsJSONKey(body, forbidden) {
 			t.Fatalf("capability DTO exposed %q: %s", forbidden, body)
 		}
@@ -116,6 +165,8 @@ func TestGovernanceCapabilityDTOHasNoPayloadFields(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func stringPointer(value string) *string { return &value }
 
 func TestObservationDrainAndConfirmationDTOsRoundTrip(t *testing.T) {
 	bootID := uuid.NewString()

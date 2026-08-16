@@ -34,6 +34,7 @@ type Adapter interface {
 	RemoveBackup(context.Context, bridgeprotocol.Backup) error
 	Relay(context.Context, string, bridgeprotocol.RelayActionRequest) (bridgeprotocol.RelayStatus, error)
 	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
+	RelaySessionCanary(context.Context, bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error)
 	ReloadRelayGovernance(context.Context, bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error)
 	ObserveRelayContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error)
 	ListRelayConfirmations(context.Context) (bridgeprotocol.ConfirmationListResponse, error)
@@ -100,6 +101,7 @@ func (s *Server) Router() http.Handler {
 		router.Post("/v1/relay/"+action, s.mutation(func(ctx context.Context, body []byte) (int, any, error) { return s.relay(ctx, action, body) }))
 	}
 	router.Post("/v1/relay/governance/capability", s.ephemeral(s.relayGovernanceCapability))
+	router.Post("/v1/relay/governance/session-canary", s.ephemeral(s.relaySessionCanary))
 	router.Post("/v1/relay/governance/reload", s.mutation(s.reloadRelayGovernance))
 	router.Post("/v1/relay/governance/contracts/observe", s.ephemeral(s.observeRelayContracts))
 	router.Post("/v1/relay/governance/confirmations/list", s.ephemeral(s.listRelayConfirmations))
@@ -419,6 +421,18 @@ func (s *Server) relayGovernanceCapability(ctx context.Context, body []byte) (in
 		return 0, nil, invalidRequest(err)
 	}
 	result, err := s.adapter.RelayCapability(ctx)
+	return http.StatusOK, result, err
+}
+
+func (s *Server) relaySessionCanary(ctx context.Context, body []byte) (int, any, error) {
+	var input bridgeprotocol.RelaySessionCanaryRequest
+	if err := bridgeprotocol.DecodeGovernanceBody(body, &input); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	if _, err := bridgeprotocol.ValidateRelaySessionCanaryRequest(input); err != nil {
+		return 0, nil, invalidRequest(err)
+	}
+	result, err := s.adapter.RelaySessionCanary(ctx, input)
 	return http.StatusOK, result, err
 }
 

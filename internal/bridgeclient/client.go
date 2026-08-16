@@ -162,6 +162,12 @@ func (c *Client) RelayCapability(ctx context.Context) (bridgeprotocol.RelayCapab
 	return result, err
 }
 
+func (c *Client) RelaySessionCanary(ctx context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	var result bridgeprotocol.RelaySessionCanaryResponse
+	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/session-canary", "", input, &result)
+	return result, err
+}
+
 func (c *Client) ReloadRelayGovernance(ctx context.Context, key string, input bridgeprotocol.RelayReloadRequest) (bridgeprotocol.RelayReloadResponse, error) {
 	var result bridgeprotocol.RelayReloadResponse
 	err := c.call(ctx, http.MethodPost, "/v1/relay/governance/reload", key, input, &result)

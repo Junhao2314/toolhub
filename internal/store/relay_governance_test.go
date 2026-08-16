@@ -167,6 +167,16 @@ func governanceRoutingHash(t *testing.T, st *Store, operationID string) string {
 	return hash
 }
 
+func TestRelayGovernanceMetadataRejectsPayloadFields(t *testing.T) {
+	for _, forbidden := range []string{"arguments", "result", "results", "prompt", "prompts", "secretValue"} {
+		t.Run(forbidden, func(t *testing.T) {
+			if err := rejectGovernanceMetadata(map[string]any{"nested": map[string]any{forbidden: "must-not-persist"}}); err == nil {
+				t.Fatalf("governance metadata field %q was accepted", forbidden)
+			}
+		})
+	}
+}
+
 func failGovernanceOperation(t *testing.T, st *Store, operationID string) {
 	t.Helper()
 	if err := st.FailGovernanceFinalization(context.Background(), operationID, &bridgeprotocol.APIError{Code: bridgeprotocol.ErrRevisionConflict, Message: "test finalization conflict"}); err != nil {

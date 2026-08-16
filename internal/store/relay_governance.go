@@ -176,13 +176,13 @@ func (s *Store) SaveRelayConfiguration(ctx context.Context, input RelayConfigura
 }
 
 func rejectGovernanceMetadata(value any) error {
-	forbidden := map[string]struct{}{"secretvalues": {}, "ciphertext": {}, "password": {}, "token": {}, "apikey": {}, "arguments": {}, "result": {}, "prompt": {}, "rawerror": {}, "sessionid": {}}
+	forbidden := map[string]struct{}{"secretvalue": {}, "secretvalues": {}, "ciphertext": {}, "password": {}, "token": {}, "apikey": {}, "arguments": {}, "result": {}, "results": {}, "prompt": {}, "prompts": {}, "rawerror": {}, "sessionid": {}}
 	var walk func(any) error
 	walk = func(item any) error {
 		switch typed := item.(type) {
 		case map[string]any:
 			for key, child := range typed {
-				if _, ok := forbidden[strings.ToLower(key)]; ok {
+				if _, ok := forbidden[normalizedGovernanceMetadataKey(key)]; ok {
 					return fmt.Errorf("governance metadata contains forbidden field %q", key)
 				}
 				if err := walk(child); err != nil {
@@ -199,6 +199,18 @@ func rejectGovernanceMetadata(value any) error {
 		return nil
 	}
 	return walk(value)
+}
+
+func normalizedGovernanceMetadataKey(value string) string {
+	return strings.Map(func(character rune) rune {
+		if character >= 'A' && character <= 'Z' {
+			return character + ('a' - 'A')
+		}
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			return character
+		}
+		return -1
+	}, value)
 }
 
 func relayConfigurationPins(input RelayConfigurationInput) ([]domain.RelayConfigurationMCPServerPin, error) {

@@ -152,13 +152,15 @@ func TestObserveContractsRepeatedLatestRemainsIncompatibleWithAcceptedRevision(t
 }
 
 func TestObserveContractsRejectsPayloadFields(t *testing.T) {
-	st := newIntegrationStore(t, true)
-	_, err := st.ObserveContracts(context.Background(), ContractObservationInput{
-		ServerID: uuid.NewString(),
-		Tools:    []ObservedToolInput{{Name: "unsafe", Annotations: map[string]any{"arguments": "must-not-persist"}}},
-	})
-	if err == nil {
-		t.Fatal("payload-like observation was accepted")
+	for _, forbidden := range []string{"arguments", "result", "results", "prompt", "prompts", "secretValue"} {
+		t.Run(forbidden, func(t *testing.T) {
+			_, _, err := CanonicalContract([]ObservedToolInput{{
+				Name: "unsafe", Annotations: map[string]any{forbidden: "must-not-persist"},
+			}})
+			if err == nil {
+				t.Fatalf("payload-like observation field %q was accepted", forbidden)
+			}
+		})
 	}
 }
 

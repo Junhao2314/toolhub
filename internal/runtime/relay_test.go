@@ -88,6 +88,27 @@ func (f *fakeMCPMAdmin) Capability(context.Context) (bridgeprotocol.RelayCapabil
 	}
 	return bridgeprotocol.RelayCapabilityResponse{AdminProtocolVersion: 1, Features: append([]string(nil), requiredMCPMFeatures...), RoutingSchemaVersions: []int{1}, Runtime: "mcpm", RuntimeVersion: "1.0.0-toolhub.1"}, nil
 }
+
+func (f *fakeMCPMAdmin) SessionCanary(_ context.Context, input bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error) {
+	bundle, err := bridgeprotocol.ValidateRelaySessionCanaryRequest(input)
+	if err != nil {
+		return bridgeprotocol.RelaySessionCanaryResponse{}, err
+	}
+	profiles := []bridgeprotocol.RelaySessionCanaryProfile{}
+	for _, kind := range []string{bridgeprotocol.RuntimeClaude, bridgeprotocol.RuntimeCodex} {
+		for _, profile := range bundle.Profiles {
+			if profile.ClientKind == kind {
+				profiles = append(profiles, bridgeprotocol.RelaySessionCanaryProfile{ClientKind: kind, ProfileID: profile.ProfileID, ProfileRevisionID: profile.ProfileRevisionID})
+				break
+			}
+		}
+	}
+	processes := make([]bridgeprotocol.RelaySessionCanaryProcess, 0, len(bundle.Servers))
+	for _, server := range bundle.Servers {
+		processes = append(processes, bridgeprotocol.RelaySessionCanaryProcess{ServerID: server.ServerID, ProcessCount: 1})
+	}
+	return bridgeprotocol.RelaySessionCanaryResponse{RoutingBundleHash: input.RoutingBundleHash, Profiles: profiles, MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty"}, InvalidProfileErrorCode: "profile_invalid", ConcurrentSessionCount: 2, UpstreamProcesses: processes}, nil
+}
 func (f *fakeMCPMAdmin) ReloadRouting(context.Context) (bridgeprotocol.RelayAdminStatus, error) {
 	index := f.reloadCalls
 	f.reloadCalls++
@@ -313,6 +334,40 @@ func TestRelayProfileOnlyReloadFailureRestoresOldRoutingBundle(t *testing.T) {
 		if action == "stop" || action == "stop-unit" || action == "start" || action == "start-unit" {
 			t.Fatalf("recoverable hot reload failure restarted relay: %v", controller.actions)
 		}
+	}
+}
+
+func TestRelayRoutingCanonicalizesEquivalentJSONAfterStoreRoundTrip(t *testing.T) {
+	_, _, user, target, port := relayFixture(t, true)
+	manifest := relayManifestV2(t, target, port, "https://example.invalid/one")
+	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := append([]byte(nil), manifest.RelayGovernance.RoutingBundle...)
+	writeTestFile(t, paths.RoutingFile, canonical)
+
+	var decoded any
+	if err := json.Unmarshal(canonical, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	reformatted, err := json.MarshalIndent(decoded, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.RelayGovernance.RoutingBundle = reformatted
+	if matches, err := relayRoutingMatches(paths, manifest); err != nil || !matches {
+		t.Fatalf("semantic routing match=%v err=%v", matches, err)
+	}
+	if err := writeRelayRouting(paths, manifest, user); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(paths.RoutingFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, canonical) {
+		t.Fatalf("routing file was not canonicalized: %s", body)
 	}
 }
 
@@ -631,7 +686,7 @@ func TestValidateMCPMRejectsPlainUpstreamVersionWithoutToolHubContract(t *testin
 }
 
 func TestValidateMCPMRequiresCompleteToolHubCapabilityContract(t *testing.T) {
-	contract := `{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"2.15.0-toolhub.1"}`
+	contract := `{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload","session-canary"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"2.15.0-toolhub.1"}`
 	mcpm := filepath.Join(t.TempDir(), "mcpm")
 	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf '%s\\n' '"+contract+"'\n"), 0700); err != nil {
 		t.Fatal(err)
@@ -643,7 +698,7 @@ func TestValidateMCPMRequiresCompleteToolHubCapabilityContract(t *testing.T) {
 		t.Fatalf("ToolHub capability version=%q err=%v", version, err)
 	}
 
-	missingFeature := strings.Replace(contract, `,"routing-hot-reload"`, "", 1)
+	missingFeature := strings.Replace(contract, `,"session-canary"`, "", 1)
 	if err := os.WriteFile(mcpm, []byte("#!/bin/sh\nprintf '%s\\n' '"+missingFeature+"'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -791,7 +846,7 @@ func relayFixture(t *testing.T, healthy bool) (*RelayManager, *fakeRelayControll
 
 func writeCompatibleMCPM(t *testing.T, path, version string) {
 	t.Helper()
-	contract := `{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"` + version + `"}`
+	contract := `{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload","session-canary"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"` + version + `"}`
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '"+contract+"'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}

@@ -50,7 +50,7 @@ func TestMCPMAdminClientRejectsNonSocketAndSymlink(t *testing.T) {
 }
 
 func TestMCPMAdminClientRejectsOversizedMultilineAndUnknownResponses(t *testing.T) {
-	validContract := `{"ok":true,"data":{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"2.15.0-toolhub.1"}}`
+	validContract := `{"ok":true,"data":{"adminProtocolVersion":1,"features":["profile-session-binding","tool-filtering","call-policy","one-shot-confirmation","payload-free-observations","routing-hot-reload","session-canary"],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"2.15.0-toolhub.1"}}`
 	tests := []struct {
 		name     string
 		response string
@@ -112,6 +112,69 @@ func TestMCPMAdminConfirmationRequiresExactBindingHash(t *testing.T) {
 	if !errors.As(err, &apiErr) || apiErr.Code != bridgeprotocol.ErrRevisionConflict || apiErr.Message != "Runtime revision conflicts with the request" {
 		t.Fatalf("confirmation error=%v", err)
 	}
+}
+
+func TestMCPMAdminSessionCanaryUsesFixedHashBoundOperation(t *testing.T) {
+	bundle, body, hash := testEnforcedSessionCanaryBundle(t)
+	client := serveAdminResponse(t, func(connection net.Conn) {
+		defer connection.Close()
+		line, _ := bufio.NewReader(connection).ReadBytes('\n')
+		var request struct {
+			Operation         string                       `json:"operation"`
+			RoutingBundleHash string                       `json:"routingBundleHash"`
+			RoutingBundle     bridgeprotocol.RoutingBundle `json:"routingBundle"`
+		}
+		if err := json.Unmarshal(line, &request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		if request.Operation != "session_canary" || request.RoutingBundleHash != hash || request.RoutingBundle.Mode != "enforced" {
+			t.Errorf("session canary request=%+v", request)
+			return
+		}
+		response := bridgeprotocol.RelaySessionCanaryResponse{
+			RoutingBundleHash: hash,
+			Profiles: []bridgeprotocol.RelaySessionCanaryProfile{
+				{ClientKind: bridgeprotocol.RuntimeClaude, ProfileID: bundle.Profiles[0].ProfileID, ProfileRevisionID: bundle.Profiles[0].ProfileRevisionID, ToolCount: 0},
+				{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: bundle.Profiles[1].ProfileID, ProfileRevisionID: bundle.Profiles[1].ProfileRevisionID, ToolCount: 0},
+			},
+			MissingProfile:          bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0},
+			InvalidProfileErrorCode: "profile_invalid",
+			ConcurrentSessionCount:  2,
+			UpstreamProcesses:       []bridgeprotocol.RelaySessionCanaryProcess{},
+		}
+		encoded, _ := json.Marshal(map[string]any{"ok": true, "data": response})
+		_, _ = connection.Write(append(encoded, '\n'))
+	})
+
+	result, err := client.SessionCanary(context.Background(), bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: hash, RoutingBundle: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.RoutingBundleHash != hash || len(result.Profiles) != 2 {
+		t.Fatalf("session canary response=%+v", result)
+	}
+}
+
+func testEnforcedSessionCanaryBundle(t *testing.T) (bridgeprotocol.RoutingBundle, json.RawMessage, string) {
+	t.Helper()
+	bundle := bridgeprotocol.RoutingBundle{
+		SchemaVersion: 1, Mode: "enforced",
+		RelayConfigurationRevisionID: "00000000-0000-0000-0000-000000000001",
+		RelayConfigurationHash:       strings.Repeat("a", 64),
+		GlobalPolicyRevisionID:       "00000000-0000-0000-0000-000000000002",
+		GlobalPolicyHash:             strings.Repeat("b", 64),
+		Servers:                      []bridgeprotocol.ServerContractDTO{},
+		Profiles: []bridgeprotocol.PublishedProfileDTO{
+			{ProfileID: "00000000-0000-0000-0000-000000000010", ProfileRevisionID: "00000000-0000-0000-0000-000000000011", ProfileRevisionHash: strings.Repeat("c", 64), ProfileName: "claude", ClientKind: bridgeprotocol.RuntimeClaude, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+			{ProfileID: "00000000-0000-0000-0000-000000000020", ProfileRevisionID: "00000000-0000-0000-0000-000000000021", ProfileRevisionHash: strings.Repeat("d", 64), ProfileName: "codex", ClientKind: bridgeprotocol.RuntimeCodex, Servers: []bridgeprotocol.ProfileServerRoutingDTO{}},
+		},
+	}
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bundle, body, hash
 }
 
 func TestMCPMAdminErrorIsReducedToBoundedPublicClass(t *testing.T) {

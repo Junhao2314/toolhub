@@ -196,6 +196,17 @@ paths:
       responses:
         '200': {description: mcpm ToolHub capability contract, content: {application/json: {schema: {$ref: '#/components/schemas/RelayCapabilityResponse'}}}}
         '503': {$ref: '#/components/responses/Error'}
+  /relay/governance/session-canary:
+    post:
+      operationId: relayGovernanceSessionCanary
+      description: Ephemeral five-step candidate-routing canary. The request and response bypass the idempotency journal.
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RelaySessionCanaryRequest'}}}
+      responses:
+        '200': {description: Candidate Profile binding, fallback, rejection, concurrency, and shared-process results, content: {application/json: {schema: {$ref: '#/components/schemas/RelaySessionCanaryResponse'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /relay/governance/reload:
     post:
       operationId: relayGovernanceReload
@@ -633,6 +644,56 @@ components:
         routingSchemaVersions: {type: array, uniqueItems: true, maxItems: 8, items: {type: integer}}
         runtime: {const: mcpm}
         runtimeVersion: {type: string, maxLength: 64}
+    RelaySessionCanaryRequest:
+      type: object
+      additionalProperties: false
+      required: [routingBundleHash, routingBundle]
+      properties:
+        routingBundleHash: {$ref: '#/components/schemas/SHA256'}
+        routingBundle: {$ref: '#/components/schemas/RoutingBundle'}
+    RelaySessionCanaryResponse:
+      type: object
+      additionalProperties: false
+      required: [routingBundleHash, profiles, missingProfile, invalidProfileErrorCode, concurrentSessionCount, upstreamProcesses]
+      properties:
+        routingBundleHash: {$ref: '#/components/schemas/SHA256'}
+        profiles:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: {$ref: '#/components/schemas/RelaySessionCanaryProfile'}
+        missingProfile: {$ref: '#/components/schemas/RelaySessionCanaryMissing'}
+        invalidProfileErrorCode: {type: string, const: profile_invalid}
+        concurrentSessionCount: {type: integer, const: 2}
+        upstreamProcesses:
+          type: array
+          maxItems: 500
+          items: {$ref: '#/components/schemas/RelaySessionCanaryProcess'}
+    RelaySessionCanaryProfile:
+      type: object
+      additionalProperties: false
+      required: [clientKind, profileId, profileRevisionId, toolCount]
+      properties:
+        clientKind: {type: string, enum: [claude, codex]}
+        profileId: {$ref: '#/components/schemas/UUID'}
+        profileRevisionId: {$ref: '#/components/schemas/UUID'}
+        toolCount: {type: integer, minimum: 0, maximum: 10000}
+    RelaySessionCanaryMissing:
+      type: object
+      additionalProperties: false
+      required: [behavior, profileId, profileRevisionId, toolCount]
+      properties:
+        behavior: {type: string, enum: [empty, default]}
+        profileId: {$ref: '#/components/schemas/UUID', nullable: true}
+        profileRevisionId: {$ref: '#/components/schemas/UUID', nullable: true}
+        toolCount: {type: integer, minimum: 0, maximum: 10000}
+    RelaySessionCanaryProcess:
+      type: object
+      additionalProperties: false
+      required: [serverId, processCount]
+      properties:
+        serverId: {$ref: '#/components/schemas/UUID'}
+        processCount: {type: integer, const: 1}
     RelayReloadRequest:
       type: object
       additionalProperties: false

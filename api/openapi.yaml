@@ -1386,8 +1386,8 @@ components:
         features:
           type: array
           uniqueItems: true
-          maxItems: 6
-          items: {type: string, enum: [profile-session-binding, tool-filtering, call-policy, one-shot-confirmation, payload-free-observations, routing-hot-reload]}
+          maxItems: 7
+          items: {type: string, enum: [profile-session-binding, tool-filtering, call-policy, one-shot-confirmation, payload-free-observations, routing-hot-reload, session-canary]}
         errorCode: {type: string, pattern: '^[a-z][a-z0-9_]{0,63}$'}
     RelayConfigurationInput:
       type: object

@@ -30,8 +30,8 @@ const (
 var observedToolNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 var forbiddenObservationKeys = map[string]struct{}{
-	"secretvalues": {}, "ciphertext": {}, "arguments": {}, "result": {},
-	"prompt": {}, "rawerror": {}, "sessionid": {}, "apikey": {},
+	"secretvalue": {}, "secretvalues": {}, "ciphertext": {}, "arguments": {}, "result": {}, "results": {},
+	"prompt": {}, "prompts": {}, "rawerror": {}, "sessionid": {}, "apikey": {},
 }
 
 type ObservedToolInput struct {
@@ -985,7 +985,7 @@ func rejectForbiddenObservationKeys(value any) error {
 	switch item := value.(type) {
 	case map[string]any:
 		for key, child := range item {
-			if _, forbidden := forbiddenObservationKeys[strings.ToLower(key)]; forbidden {
+			if _, forbidden := forbiddenObservationKeys[normalizedGovernanceMetadataKey(key)]; forbidden {
 				return fmt.Errorf("forbidden observation field %q", key)
 			}
 			if err := rejectForbiddenObservationKeys(child); err != nil {

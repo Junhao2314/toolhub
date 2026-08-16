@@ -205,7 +205,12 @@ func (a *API) preflightRelayConfiguration(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if input.Mode == "enforced" {
-		if apiErr := validateRelayEnforcementRuntime(r.Context(), a.bridge, prepared.Target.ManagedUsername); apiErr != nil {
+		if prepared.Manifest.RelayGovernance == nil {
+			writeError(w, r, http.StatusConflict, bridgeprotocol.ErrMCPMIncompatible, "mcpm runtime or native clients are incompatible with relay enforcement")
+			return
+		}
+		canary := bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: prepared.Manifest.RelayGovernance.RoutingHash, RoutingBundle: prepared.Manifest.RelayGovernance.RoutingBundle}
+		if apiErr := validateRelayEnforcementRuntime(r.Context(), a.bridge, prepared.Target.ManagedUsername, canary); apiErr != nil {
 			writeError(w, r, http.StatusConflict, apiErr.Code, apiErr.Message)
 			return
 		}
@@ -256,9 +261,10 @@ func validRelayApplyMode(mode string) bool {
 type relayEnforcementRuntimeBridge interface {
 	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
 	InspectNativeClient(context.Context, bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error)
+	RelaySessionCanary(context.Context, bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error)
 }
 
-func validateRelayEnforcementRuntime(ctx context.Context, bridge relayEnforcementRuntimeBridge, managedUsername string) *bridgeprotocol.APIError {
+func validateRelayEnforcementRuntime(ctx context.Context, bridge relayEnforcementRuntimeBridge, managedUsername string, canary bridgeprotocol.RelaySessionCanaryRequest) *bridgeprotocol.APIError {
 	if bridge == nil {
 		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
 	}
@@ -271,6 +277,14 @@ func validateRelayEnforcementRuntime(ctx context.Context, bridge relayEnforcemen
 		if err != nil || !bridgeprotocol.NativeClientInspectionCompatible(inspection, clientKind) {
 			return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
 		}
+	}
+	bundle, err := bridgeprotocol.ValidateRelaySessionCanaryRequest(canary)
+	if err != nil {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
+	}
+	result, err := bridge.RelaySessionCanary(ctx, canary)
+	if err != nil || bridgeprotocol.ValidateRelaySessionCanaryResponse(bundle, canary.RoutingBundleHash, result) != nil {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
 	}
 	return nil
 }

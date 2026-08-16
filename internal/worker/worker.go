@@ -39,6 +39,7 @@ type workerBridge interface {
 	ObserveRelayContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error)
 	DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error)
 	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
+	RelaySessionCanary(context.Context, bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error)
 	InspectNativeClient(context.Context, bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error)
 	GCBackups(context.Context, string, bridgeprotocol.BackupGCRequest) (bridgeprotocol.BackupGCResponse, error)
 	Operation(context.Context, string) (bridgeprotocol.Operation, error)
@@ -658,7 +659,8 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
 		if routing.Mode == "enforced" {
-			if apiErr := validateEnforcementRuntime(ctx, w.bridge, target.ManagedUsername); apiErr != nil {
+			canary := bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: metadata.Manifest.RelayGovernance.RoutingHash, RoutingBundle: metadata.Manifest.RelayGovernance.RoutingBundle}
+			if apiErr := validateEnforcementRuntime(ctx, w.bridge, target.ManagedUsername, canary); apiErr != nil {
 				_, _ = w.store.UpdateTargetHealth(ctx, target.ID, bridgeprotocol.HealthBlocked, apiErr.Code, apiErr.Message, map[string]any{}, false)
 				return bridgeprotocol.TargetResult{}, apiErr
 			}
@@ -748,9 +750,10 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 type enforcementRuntimeBridge interface {
 	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
 	InspectNativeClient(context.Context, bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error)
+	RelaySessionCanary(context.Context, bridgeprotocol.RelaySessionCanaryRequest) (bridgeprotocol.RelaySessionCanaryResponse, error)
 }
 
-func validateEnforcementRuntime(ctx context.Context, bridge enforcementRuntimeBridge, managedUsername string) *bridgeprotocol.APIError {
+func validateEnforcementRuntime(ctx context.Context, bridge enforcementRuntimeBridge, managedUsername string, canary bridgeprotocol.RelaySessionCanaryRequest) *bridgeprotocol.APIError {
 	capability, err := bridge.RelayCapability(ctx)
 	if err != nil || !bridgeprotocol.RelayEnforcementCapabilityCompatible(capability) {
 		return incompatibleEnforcementRuntimeError()
@@ -760,6 +763,14 @@ func validateEnforcementRuntime(ctx context.Context, bridge enforcementRuntimeBr
 		if err != nil || !bridgeprotocol.NativeClientInspectionCompatible(inspection, clientKind) {
 			return incompatibleEnforcementRuntimeError()
 		}
+	}
+	bundle, err := bridgeprotocol.ValidateRelaySessionCanaryRequest(canary)
+	if err != nil {
+		return incompatibleEnforcementRuntimeError()
+	}
+	result, err := bridge.RelaySessionCanary(ctx, canary)
+	if err != nil || bridgeprotocol.ValidateRelaySessionCanaryResponse(bundle, canary.RoutingBundleHash, result) != nil {
+		return incompatibleEnforcementRuntimeError()
 	}
 	return nil
 }

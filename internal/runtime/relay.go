@@ -46,6 +46,7 @@ var requiredMCPMFeatures = []string{
 	"one-shot-confirmation",
 	"payload-free-observations",
 	"routing-hot-reload",
+	"session-canary",
 }
 
 type RelayController interface {
@@ -1007,10 +1008,11 @@ func writeRelayRouting(paths TargetPaths, manifest bridgeprotocol.DesiredManifes
 	if manifest.SchemaVersion < bridgeprotocol.ManifestSchemaVersionV2 || manifest.RelayGovernance == nil {
 		return nil
 	}
-	if err := manifest.RelayGovernance.Validate(); err != nil {
+	body, err := canonicalRelayRouting(manifest)
+	if err != nil {
 		return err
 	}
-	if err := atomicWrite(paths.RoutingFile, manifest.RelayGovernance.RoutingBundle, 0600); err != nil {
+	if err := atomicWrite(paths.RoutingFile, body, 0600); err != nil {
 		return err
 	}
 	if err := os.Chown(paths.RoutingFile, user.UID, user.GID); err != nil && os.Geteuid() == 0 {
@@ -1131,6 +1133,10 @@ func relayRoutingMatches(paths TargetPaths, manifest bridgeprotocol.DesiredManif
 	if manifest.SchemaVersion < bridgeprotocol.ManifestSchemaVersionV2 || manifest.RelayGovernance == nil {
 		return true, nil
 	}
+	expected, err := canonicalRelayRouting(manifest)
+	if err != nil {
+		return false, err
+	}
 	body, err := readSafeConfig(paths.RoutingFile)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -1138,7 +1144,36 @@ func relayRoutingMatches(paths TargetPaths, manifest bridgeprotocol.DesiredManif
 	if err != nil {
 		return false, err
 	}
-	return bytes.Equal(body, manifest.RelayGovernance.RoutingBundle), nil
+	var current bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(body, &current); err != nil {
+		return false, nil
+	}
+	canonical, hash, err := current.Canonical()
+	if err != nil {
+		return false, nil
+	}
+	return hash == manifest.RelayGovernance.RoutingHash && bytes.Equal(canonical, expected), nil
+}
+
+func canonicalRelayRouting(manifest bridgeprotocol.DesiredManifest) ([]byte, error) {
+	if manifest.RelayGovernance == nil {
+		return nil, errors.New("relay routing governance is required")
+	}
+	if err := manifest.RelayGovernance.Validate(); err != nil {
+		return nil, err
+	}
+	var bundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &bundle); err != nil {
+		return nil, err
+	}
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		return nil, err
+	}
+	if hash != manifest.RelayGovernance.RoutingHash {
+		return nil, errors.New("relay routing bundle hash does not match")
+	}
+	return body, nil
 }
 
 func relayConfigurationMatches(paths TargetPaths, environmentFile string, manifest bridgeprotocol.DesiredManifest, secrets map[string]string, preserveUnmanaged bool) (bool, error) {
