@@ -15,13 +15,54 @@ type RelayConfigurationProjection struct {
 	Applied          domain.RelayConfigurationRevision `json:"applied"`
 	Mode             string                            `json:"mode"`
 	DefaultProfileID *string                           `json:"defaultProfileId"`
+	Migration        RelayMigrationProjection          `json:"migration"`
+}
+
+type RelayMigrationProjection struct {
+	State                  string `json:"state"`
+	PendingContractReviews int    `json:"pendingContractReviews"`
+	AmbiguousProfiles      int    `json:"ambiguousProfiles"`
+	LegacyProfileID        string `json:"legacyProfileId,omitempty"`
+	LegacyProfileState     string `json:"legacyProfileState"`
+	RestorableSnapshot     bool   `json:"restorableSnapshot"`
+}
+
+// InitializeRelayMigrationReadiness verifies that the migration projection is
+// readable. Migration 011 is the only owner of the exact legacy Profile marker.
+func (s *Store) InitializeRelayMigrationReadiness(ctx context.Context) error {
+	var legacyProfileID string
+	return s.pool.QueryRow(ctx, `SELECT coalesce(legacy_profile_id::text,'') FROM relay_configuration_state WHERE singleton`).Scan(&legacyProfileID)
 }
 
 func (s *Store) RelayConfigurationProjection(ctx context.Context) (RelayConfigurationProjection, error) {
 	var currentID, appliedID string
 	var result RelayConfigurationProjection
-	if err := s.pool.QueryRow(ctx, `SELECT current_revision_id::text,applied_revision_id::text,mode,default_profile_id::text FROM relay_configuration_state WHERE singleton`).Scan(&currentID, &appliedID, &result.Mode, &result.DefaultProfileID); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT current_revision_id::text,applied_revision_id::text,mode,default_profile_id::text,coalesce(legacy_profile_id::text,''),legacy_profile_state FROM relay_configuration_state WHERE singleton`).Scan(&currentID, &appliedID, &result.Mode, &result.DefaultProfileID, &result.Migration.LegacyProfileID, &result.Migration.LegacyProfileState); err != nil {
 		return RelayConfigurationProjection{}, err
+	}
+	if err := s.pool.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE state.accepted_revision_id IS NULL OR state.latest_revision_id IS DISTINCT FROM state.accepted_revision_id),
+			(SELECT count(*) FROM profiles WHERE archived_at IS NULL AND migration_state='needs_review')
+		FROM relay_configuration_revision_mcp_servers member
+		LEFT JOIN mcp_contract_state state ON state.server_id=member.server_id
+		WHERE member.relay_configuration_revision_id=$1`, appliedID).Scan(&result.Migration.PendingContractReviews, &result.Migration.AmbiguousProfiles); err != nil {
+		return RelayConfigurationProjection{}, err
+	}
+	restorable, err := s.hasRestorableEnforcementBackup(ctx)
+	if err != nil {
+		return RelayConfigurationProjection{}, err
+	}
+	result.Migration.RestorableSnapshot = restorable
+	switch {
+	case result.Mode == "enforced":
+		result.Migration.State = "enforced"
+	case result.Migration.PendingContractReviews > 0:
+		result.Migration.State = "waiting_contract_review"
+	case result.Migration.AmbiguousProfiles > 0:
+		result.Migration.State = "profile_metadata_review"
+	default:
+		result.Migration.State = "compatibility_ready"
 	}
 	current, err := s.RelayConfiguration(ctx, currentID)
 	if err != nil {

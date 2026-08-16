@@ -365,10 +365,130 @@ func (s *Store) AcceptContract(ctx context.Context, serverID, revisionID string)
 	if owner != serverID {
 		return ErrConflict
 	}
+	var mode, relayRevisionID, legacyProfileID, legacyProfileState string
+	if err := tx.QueryRow(ctx, `SELECT mode,applied_revision_id::text,coalesce(legacy_profile_id::text,''),legacy_profile_state FROM relay_configuration_state WHERE singleton FOR SHARE`).Scan(&mode, &relayRevisionID, &legacyProfileID, &legacyProfileState); err != nil {
+		return err
+	}
+	var previousAcceptedRevisionID string
+	if err := tx.QueryRow(ctx, `SELECT coalesce(accepted_revision_id::text,'') FROM mcp_contract_state WHERE server_id=$1 FOR UPDATE`, serverID).Scan(&previousAcceptedRevisionID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE mcp_contract_state SET accepted_revision_id=$2,review_state='accepted',updated_at=now() WHERE server_id=$1`, serverID, revisionID); err != nil {
 		return err
 	}
+	if previousAcceptedRevisionID == "" {
+		if err := s.bootstrapFirstContractProfilesTx(ctx, tx, serverID, mode, relayRevisionID, legacyProfileID, legacyProfileState); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+func (s *Store) bootstrapFirstContractProfilesTx(ctx context.Context, tx pgx.Tx, acceptedServerID, mode, relayRevisionID, legacyProfileID, legacyProfileState string) error {
+	if mode != "compatibility" || legacyProfileID == "" || legacyProfileState != "pending" {
+		return nil
+	}
+	type relayPin struct {
+		serverID, mcpRevisionID, acceptedContractRevisionID string
+	}
+	relayPins := []relayPin{}
+	containsAcceptedServer := false
+	rows, err := tx.Query(ctx, `
+		SELECT member.server_id::text,member.mcp_revision_id::text,coalesce(contract.accepted_revision_id::text,'')
+		FROM relay_configuration_revision_mcp_servers member
+		LEFT JOIN mcp_contract_state contract ON contract.server_id=member.server_id
+		WHERE member.relay_configuration_revision_id=$1
+		ORDER BY member.position`, relayRevisionID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var pin relayPin
+		if err := rows.Scan(&pin.serverID, &pin.mcpRevisionID, &pin.acceptedContractRevisionID); err != nil {
+			rows.Close()
+			return err
+		}
+		relayPins = append(relayPins, pin)
+		containsAcceptedServer = containsAcceptedServer || pin.serverID == acceptedServerID
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !containsAcceptedServer {
+		return nil
+	}
+
+	type profileCandidate struct{ profileID, revisionID string }
+	profiles := []profileCandidate{}
+	rows, err = tx.Query(ctx, `
+		SELECT id::text,current_revision_id::text
+		FROM profiles
+		WHERE archived_at IS NULL
+		  AND client_kind IN ('claude','codex')
+		  AND migration_state='ready'
+		ORDER BY id
+		FOR UPDATE`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var candidate profileCandidate
+		if err := rows.Scan(&candidate.profileID, &candidate.revisionID); err != nil {
+			rows.Close()
+			return err
+		}
+		profiles = append(profiles, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, candidate := range profiles {
+		input, err := profileInputFromRevisionTx(ctx, tx, candidate.profileID, candidate.revisionID)
+		if err != nil {
+			return err
+		}
+		if input.PendingBindings {
+			var applicableBindings int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM pending_secret_bindings binding JOIN relay_configuration_revision_mcp_servers member ON member.relay_configuration_revision_id=$2 AND member.mcp_revision_id=binding.mcp_revision_id WHERE binding.profile_revision_id=$1`, candidate.revisionID, relayRevisionID).Scan(&applicableBindings); err != nil {
+				return err
+			}
+			if applicableBindings == 0 {
+				continue
+			}
+		}
+		input.MCPServerIDs = make([]string, 0, len(relayPins))
+		input.MCPRevisionIDs = make(map[string]string, len(relayPins))
+		input.MCPGovernance = make([]ProfileMCPGovernanceInput, 0, len(relayPins))
+		for _, pin := range relayPins {
+			input.MCPServerIDs = append(input.MCPServerIDs, pin.serverID)
+			input.MCPRevisionIDs[pin.serverID] = pin.mcpRevisionID
+			input.MCPGovernance = append(input.MCPGovernance, ProfileMCPGovernanceInput{
+				ServerID: pin.serverID, MCPRevisionID: pin.mcpRevisionID,
+				AcceptedContractRevisionID: pin.acceptedContractRevisionID,
+				VisibilityMode:             "all_accepted",
+			})
+		}
+		_, newRevisionID, err := s.saveProfileTx(ctx, tx, candidate.profileID, input)
+		if err != nil {
+			return err
+		}
+		if input.PendingBindings {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO pending_secret_bindings(profile_revision_id,mcp_revision_id,namespace,key,slot_hash,secret_id,bound_at)
+				SELECT $1,binding.mcp_revision_id,binding.namespace,binding.key,binding.slot_hash,binding.secret_id,binding.bound_at
+				FROM pending_secret_bindings binding
+				JOIN profile_revision_mcp_servers member ON member.profile_revision_id=$1 AND member.mcp_revision_id=binding.mcp_revision_id
+				WHERE binding.profile_revision_id=$2`, newRevisionID, candidate.revisionID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ConfirmToolRename records an operator-confirmed identity relationship and

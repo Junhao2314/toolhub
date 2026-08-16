@@ -24,7 +24,7 @@ import (
 const (
 	configImportMarkerKey              = "legacy_config_import_v1"
 	configImportLock                   = int64(1848002)
-	configImportExpectedMigrationCount = 10
+	configImportExpectedMigrationCount = 11
 )
 
 var ErrConfigImportConflict = errors.New("legacy configuration import conflict")

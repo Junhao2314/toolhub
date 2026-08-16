@@ -352,9 +352,12 @@ func TestRecoverFinalizesRelayAndPolicyApplyExactlyOnceIntegration(t *testing.T)
 				}
 				revisionID = revision.ID
 				sourceRevisionID = revision.ID
+				candidate.Mode = "compatibility"
 				candidate.RelayConfigurationRevisionID = revision.ID
 				metadata = map[string]any{
-					"revisionId": revision.ID,
+					"revisionId":   revision.ID,
+					"mode":         "compatibility",
+					"expectedMode": "compatibility",
 					"expectedAppliedRelayConfigurationRevisionId": appliedRelayRevisionID,
 					"affectedProfileRevisions":                    map[string]string{},
 					"expectedPublishedProfileRevisions":           map[string]string{},

@@ -38,6 +38,8 @@ type workerBridge interface {
 	Relay(context.Context, string, string, bridgeprotocol.RelayActionRequest) (bridgeprotocol.RelayStatus, error)
 	ObserveRelayContracts(context.Context) (bridgeprotocol.ContractObservationResponse, error)
 	DrainRelayObservations(context.Context, bridgeprotocol.ObservationDrainRequest) (bridgeprotocol.ObservationDrainResponse, error)
+	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
+	InspectNativeClient(context.Context, bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error)
 	GCBackups(context.Context, string, bridgeprotocol.BackupGCRequest) (bridgeprotocol.BackupGCResponse, error)
 	Operation(context.Context, string) (bridgeprotocol.Operation, error)
 }
@@ -650,6 +652,18 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		_, _ = w.store.UpdateTargetHealth(ctx, target.ID, healthForError(apiErr), apiErr.Code, apiErr.Message, map[string]any{}, false)
 		return bridgeprotocol.TargetResult{}, apiErr
 	}
+	if target.Runtime == bridgeprotocol.RuntimeSharedRelay && metadata.Manifest.RelayGovernance != nil {
+		var routing bridgeprotocol.RoutingBundle
+		if err := bridgeprotocol.DecodeGovernanceBody(metadata.Manifest.RelayGovernance.RoutingBundle, &routing); err != nil {
+			return bridgeprotocol.TargetResult{}, publicError(err)
+		}
+		if routing.Mode == "enforced" {
+			if apiErr := validateEnforcementRuntime(ctx, w.bridge, target.ManagedUsername); apiErr != nil {
+				_, _ = w.store.UpdateTargetHealth(ctx, target.ID, bridgeprotocol.HealthBlocked, apiErr.Code, apiErr.Message, map[string]any{}, false)
+				return bridgeprotocol.TargetResult{}, apiErr
+			}
+		}
+	}
 	artifacts := []bridgeprotocol.Artifact{}
 	if item.Operation.Kind != "restore" {
 		artifacts, err = w.artifacts(ctx, metadata.Manifest)
@@ -729,6 +743,29 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		}
 	}
 	return result, nil
+}
+
+type enforcementRuntimeBridge interface {
+	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
+	InspectNativeClient(context.Context, bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error)
+}
+
+func validateEnforcementRuntime(ctx context.Context, bridge enforcementRuntimeBridge, managedUsername string) *bridgeprotocol.APIError {
+	capability, err := bridge.RelayCapability(ctx)
+	if err != nil || !bridgeprotocol.RelayEnforcementCapabilityCompatible(capability) {
+		return incompatibleEnforcementRuntimeError()
+	}
+	for _, clientKind := range []string{bridgeprotocol.RuntimeClaude, bridgeprotocol.RuntimeCodex} {
+		inspection, err := bridge.InspectNativeClient(ctx, bridgeprotocol.NativeClientInspectionRequest{ManagedUsername: managedUsername, ClientKind: clientKind})
+		if err != nil || !bridgeprotocol.NativeClientInspectionCompatible(inspection, clientKind) {
+			return incompatibleEnforcementRuntimeError()
+		}
+	}
+	return nil
+}
+
+func incompatibleEnforcementRuntimeError() *bridgeprotocol.APIError {
+	return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
 }
 
 const maxRelayObservationPull = 1000

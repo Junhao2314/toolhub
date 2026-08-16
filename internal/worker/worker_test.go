@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -10,6 +11,22 @@ import (
 	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/store"
 )
+
+type enforcementReadinessBridge struct {
+	calls       []string
+	capability  bridgeprotocol.RelayCapabilityResponse
+	inspections map[string]bridgeprotocol.NativeClientInspectionResponse
+}
+
+func (bridge *enforcementReadinessBridge) RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error) {
+	bridge.calls = append(bridge.calls, "capability")
+	return bridge.capability, nil
+}
+
+func (bridge *enforcementReadinessBridge) InspectNativeClient(_ context.Context, input bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error) {
+	bridge.calls = append(bridge.calls, input.ClientKind)
+	return bridge.inspections[input.ClientKind], nil
+}
 
 func TestProjectScanHealthDetectsPinnedDriftAndIgnoresUnmanagedExtras(t *testing.T) {
 	matchingHash := strings.Repeat("a", 64)
@@ -195,6 +212,48 @@ func TestGovernanceApplyDefersDesiredSnapshotToFinalizer(t *testing.T) {
 				t.Fatalf("desiredSnapshotOwnedByFinalizer(%s, %s, %s)=%v, want %v", test.kind, test.sourceKind, test.runtime, got, test.want)
 			}
 		})
+	}
+}
+
+func TestEnforcementPreflightChecksCapabilityThenClaudeThenCodex(t *testing.T) {
+	bridge := &enforcementReadinessBridge{
+		capability: bridgeprotocol.RelayCapabilityResponse{
+			AdminProtocolVersion: 1,
+			Features: []string{
+				"profile-session-binding", "tool-filtering", "call-policy",
+				"one-shot-confirmation", "payload-free-observations", "routing-hot-reload",
+			},
+			RoutingSchemaVersions: []int{1}, Runtime: "mcpm", RuntimeVersion: "2.15.0-toolhub.1",
+		},
+		inspections: map[string]bridgeprotocol.NativeClientInspectionResponse{
+			"claude": {ClientKind: "claude", Version: "2.1.232", Supported: true},
+			"codex":  {ClientKind: "codex", Version: "0.147.0", Supported: true},
+		},
+	}
+	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner"); apiErr != nil {
+		t.Fatalf("valid enforcement runtime rejected: %+v", apiErr)
+	}
+	if got := strings.Join(bridge.calls, ","); got != "capability,claude,codex" {
+		t.Fatalf("enforcement check order=%s", got)
+	}
+
+	bridge.calls = nil
+	bridge.capability.Features = bridge.capability.Features[:len(bridge.capability.Features)-1]
+	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner"); apiErr == nil || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
+		t.Fatalf("incomplete capability error=%+v", apiErr)
+	}
+	if got := strings.Join(bridge.calls, ","); got != "capability" {
+		t.Fatalf("client inspection ran after incompatible capability: %s", got)
+	}
+
+	bridge.capability.Features = append(bridge.capability.Features, "routing-hot-reload")
+	bridge.calls = nil
+	bridge.inspections["codex"] = bridgeprotocol.NativeClientInspectionResponse{ClientKind: "codex", ErrorCode: "native_client_not_found"}
+	if apiErr := validateEnforcementRuntime(context.Background(), bridge, "runner"); apiErr == nil || apiErr.Code != bridgeprotocol.ErrMCPMIncompatible {
+		t.Fatalf("unsupported Codex error=%+v", apiErr)
+	}
+	if got := strings.Join(bridge.calls, ","); got != "capability,claude,codex" {
+		t.Fatalf("unsupported client check order=%s", got)
 	}
 }
 

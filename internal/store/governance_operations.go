@@ -15,10 +15,12 @@ import (
 
 type GovernanceApplyPreparation struct {
 	RevisionID                        string
+	Mode                              string
 	Target                            domain.Target
 	Manifest                          bridgeprotocol.DesiredManifest
 	RoutingHash                       string
 	ExpectedAppliedRevisionID         string
+	ExpectedMode                      string
 	AffectedProfileRevisions          map[string]string
 	ExpectedPublishedProfileRevisions map[string]string
 }
@@ -30,6 +32,7 @@ type governanceApplyRequestIdentity struct {
 	TargetRevision string
 	RoutingHash    string
 	ProfileIDs     []string
+	Mode           string
 }
 
 type queryRower interface {
@@ -37,8 +40,19 @@ type queryRower interface {
 }
 
 func (s *Store) PrepareRelayConfigurationApply(ctx context.Context, revisionID string, profileIDs []string) (GovernanceApplyPreparation, error) {
+	var mode string
+	if err := s.pool.QueryRow(ctx, `SELECT mode FROM relay_configuration_state WHERE singleton`).Scan(&mode); err != nil {
+		return GovernanceApplyPreparation{}, err
+	}
+	return s.PrepareRelayConfigurationModeApply(ctx, revisionID, profileIDs, mode)
+}
+
+func (s *Store) PrepareRelayConfigurationModeApply(ctx context.Context, revisionID string, profileIDs []string, mode string) (GovernanceApplyPreparation, error) {
 	if uuid.Validate(revisionID) != nil || hasDuplicateIDs(profileIDs) {
 		return GovernanceApplyPreparation{}, ErrNotFound
+	}
+	if !validRelayMode(mode) {
+		return GovernanceApplyPreparation{}, ErrConflict
 	}
 	if _, err := s.RelayConfiguration(ctx, revisionID); err != nil {
 		return GovernanceApplyPreparation{}, err
@@ -51,29 +65,42 @@ func (s *Store) PrepareRelayConfigurationApply(ctx context.Context, revisionID s
 	if err != nil {
 		return GovernanceApplyPreparation{}, err
 	}
-	var appliedRevisionID string
-	if err := s.pool.QueryRow(ctx, `SELECT applied_revision_id::text FROM relay_configuration_state WHERE singleton`).Scan(&appliedRevisionID); err != nil {
+	var appliedRevisionID, expectedMode string
+	if err := s.pool.QueryRow(ctx, `SELECT applied_revision_id::text,mode FROM relay_configuration_state WHERE singleton`).Scan(&appliedRevisionID, &expectedMode); err != nil {
 		return GovernanceApplyPreparation{}, err
 	}
-	candidate := RoutingBundleCandidate{RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: profiles}
+	if mode == "enforced" {
+		if err := s.validateRelayEnforcementReadiness(ctx, target.ID, revisionID, appliedRevisionID); err != nil {
+			return GovernanceApplyPreparation{}, err
+		}
+	}
+	candidate := RoutingBundleCandidate{Mode: mode, RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: profiles}
 	manifest, err := s.resolveRelayManifestCandidate(ctx, target, "", 0, candidate)
 	if err != nil {
 		return GovernanceApplyPreparation{}, err
 	}
 	return GovernanceApplyPreparation{
-		RevisionID: revisionID, Target: target, Manifest: manifest, RoutingHash: manifest.RelayGovernance.RoutingHash,
-		ExpectedAppliedRevisionID: appliedRevisionID, AffectedProfileRevisions: profiles, ExpectedPublishedProfileRevisions: predecessors,
+		RevisionID: revisionID, Mode: mode, Target: target, Manifest: manifest, RoutingHash: manifest.RelayGovernance.RoutingHash,
+		ExpectedAppliedRevisionID: appliedRevisionID, ExpectedMode: expectedMode, AffectedProfileRevisions: profiles, ExpectedPublishedProfileRevisions: predecessors,
 	}, nil
 }
 
 func (s *Store) CreateRelayConfigurationApplyOperation(ctx context.Context, revisionID string, profileIDs []string, targetRevision, routingHash, idempotencyKey string) (domain.Operation, error) {
+	var mode string
+	if err := s.pool.QueryRow(ctx, `SELECT mode FROM relay_configuration_state WHERE singleton`).Scan(&mode); err != nil {
+		return domain.Operation{}, err
+	}
+	return s.CreateRelayConfigurationModeApplyOperation(ctx, revisionID, profileIDs, mode, targetRevision, routingHash, idempotencyKey)
+}
+
+func (s *Store) CreateRelayConfigurationModeApplyOperation(ctx context.Context, revisionID string, profileIDs []string, mode, targetRevision, routingHash, idempotencyKey string) (domain.Operation, error) {
 	if !bridgeprotocol.IsSHA256(targetRevision) || !bridgeprotocol.IsSHA256(routingHash) {
 		return domain.Operation{}, ErrConflict
 	}
-	if uuid.Validate(revisionID) != nil || hasDuplicateIDs(profileIDs) {
+	if uuid.Validate(revisionID) != nil || hasDuplicateIDs(profileIDs) || !validRelayMode(mode) {
 		return domain.Operation{}, ErrNotFound
 	}
-	identity := governanceApplyRequestIdentity{Kind: "relay_config_apply", IdempotencyKey: idempotencyKey, RevisionID: revisionID, TargetRevision: targetRevision, RoutingHash: routingHash, ProfileIDs: profileIDs}
+	identity := governanceApplyRequestIdentity{Kind: "relay_config_apply", IdempotencyKey: idempotencyKey, RevisionID: revisionID, TargetRevision: targetRevision, RoutingHash: routingHash, ProfileIDs: profileIDs, Mode: mode}
 	if operation, found, err := s.replayGovernanceApplyOperation(ctx, identity); err != nil {
 		return domain.Operation{}, err
 	} else if found {
@@ -92,7 +119,7 @@ func (s *Store) CreateRelayConfigurationApplyOperation(ctx context.Context, revi
 		_ = tx.Rollback(ctx)
 		return s.Operation(ctx, replayID)
 	}
-	prepared, err := s.prepareRelayConfigurationApplyTx(ctx, tx, target, revisionID, profileIDs, appliedRelayRevisionID)
+	prepared, err := s.prepareRelayConfigurationApplyTx(ctx, tx, target, revisionID, profileIDs, mode, appliedRelayRevisionID)
 	if err != nil {
 		return domain.Operation{}, err
 	}
@@ -100,7 +127,7 @@ func (s *Store) CreateRelayConfigurationApplyOperation(ctx context.Context, revi
 		return domain.Operation{}, ErrConflict
 	}
 	metadata := map[string]any{
-		"revisionId": revisionID, "routingHash": routingHash,
+		"revisionId": revisionID, "mode": mode, "expectedMode": prepared.ExpectedMode, "routingHash": routingHash,
 		"expectedAppliedRelayConfigurationRevisionId": prepared.ExpectedAppliedRevisionID,
 		"affectedProfileRevisions":                    prepared.AffectedProfileRevisions,
 		"expectedPublishedProfileRevisions":           prepared.ExpectedPublishedProfileRevisions,
@@ -224,7 +251,7 @@ func governanceApplyReplayID(ctx context.Context, query queryRower, identity gov
 	}
 	if identity.Kind == "relay_config_apply" {
 		affected, ok := stringMapMetadata(metadata, "affectedProfileRevisions")
-		if !ok || stringMetadata(metadata, "routingHash") != identity.RoutingHash || !sameProfileIDSet(identity.ProfileIDs, affected) {
+		if !ok || stringMetadata(metadata, "mode") != identity.Mode || stringMetadata(metadata, "routingHash") != identity.RoutingHash || !sameProfileIDSet(identity.ProfileIDs, affected) {
 			return "", false, ErrIdempotencyConflict
 		}
 	}
@@ -293,7 +320,7 @@ func governanceTargetOwnedTx(ctx context.Context, tx pgx.Tx, targetID string) (b
 	return active, err
 }
 
-func (s *Store) prepareRelayConfigurationApplyTx(ctx context.Context, tx pgx.Tx, target domain.Target, revisionID string, profileIDs []string, appliedRevisionID string) (GovernanceApplyPreparation, error) {
+func (s *Store) prepareRelayConfigurationApplyTx(ctx context.Context, tx pgx.Tx, target domain.Target, revisionID string, profileIDs []string, mode, appliedRevisionID string) (GovernanceApplyPreparation, error) {
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM relay_configuration_revisions WHERE id=$1)`, revisionID).Scan(&exists); err != nil {
 		return GovernanceApplyPreparation{}, err
@@ -301,22 +328,82 @@ func (s *Store) prepareRelayConfigurationApplyTx(ctx context.Context, tx pgx.Tx,
 	if !exists {
 		return GovernanceApplyPreparation{}, ErrNotFound
 	}
+	if err := lockRoutingContractStatesTx(ctx, tx, revisionID); err != nil {
+		return GovernanceApplyPreparation{}, err
+	}
 	profiles, predecessors, err := profileApplyRevisionsTx(ctx, tx, profileIDs)
 	if err != nil {
 		return GovernanceApplyPreparation{}, err
 	}
-	if err := lockRoutingContractStatesTx(ctx, tx, revisionID); err != nil {
+	var expectedMode string
+	if err := tx.QueryRow(ctx, `SELECT mode FROM relay_configuration_state WHERE singleton FOR SHARE`).Scan(&expectedMode); err != nil {
 		return GovernanceApplyPreparation{}, err
 	}
-	candidate := RoutingBundleCandidate{RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: profiles}
+	if mode == "enforced" {
+		if err := validateRelayEnforcementReadinessTx(ctx, tx, target.ID, revisionID, appliedRevisionID); err != nil {
+			return GovernanceApplyPreparation{}, err
+		}
+	}
+	candidate := RoutingBundleCandidate{Mode: mode, RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: profiles}
 	manifest, err := s.resolveRelayManifestCandidateTx(ctx, tx, target, "", 0, candidate)
 	if err != nil {
 		return GovernanceApplyPreparation{}, err
 	}
 	return GovernanceApplyPreparation{
-		RevisionID: revisionID, Target: target, Manifest: manifest, RoutingHash: manifest.RelayGovernance.RoutingHash,
-		ExpectedAppliedRevisionID: appliedRevisionID, AffectedProfileRevisions: profiles, ExpectedPublishedProfileRevisions: predecessors,
+		RevisionID: revisionID, Mode: mode, Target: target, Manifest: manifest, RoutingHash: manifest.RelayGovernance.RoutingHash,
+		ExpectedAppliedRevisionID: appliedRevisionID, ExpectedMode: expectedMode, AffectedProfileRevisions: profiles, ExpectedPublishedProfileRevisions: predecessors,
 	}, nil
+}
+
+func validRelayMode(mode string) bool { return mode == "compatibility" || mode == "enforced" }
+
+func (s *Store) validateRelayEnforcementReadiness(ctx context.Context, targetID, revisionID, appliedRevisionID string) error {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := validateRelayEnforcementReadinessTx(ctx, tx, targetID, revisionID, appliedRevisionID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func validateRelayEnforcementReadinessTx(ctx context.Context, tx pgx.Tx, targetID, revisionID, appliedRevisionID string) error {
+	if revisionID != appliedRevisionID {
+		return ErrConflict
+	}
+	var healthySnapshot bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM target_desired_snapshots active
+			JOIN desired_snapshots snapshot ON snapshot.id=active.snapshot_id
+			WHERE active.target_id=$1
+			  AND active.health='healthy'
+			  AND snapshot.source_kind='relay_config_apply'
+			  AND snapshot.manifest_schema_version=$2
+		)`, targetID, bridgeprotocol.ManifestSchemaVersionV2).Scan(&healthySnapshot); err != nil {
+		return err
+	}
+	if !healthySnapshot {
+		return ErrConflict
+	}
+	var serverCount, pendingContracts, ambiguousProfiles int
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			count(*),
+			count(*) FILTER (WHERE contract.accepted_revision_id IS NULL OR contract.latest_revision_id IS DISTINCT FROM contract.accepted_revision_id),
+			(SELECT count(*) FROM profiles WHERE archived_at IS NULL AND migration_state='needs_review')
+		FROM relay_configuration_revision_mcp_servers member
+		LEFT JOIN mcp_contract_state contract ON contract.server_id=member.server_id
+		WHERE member.relay_configuration_revision_id=$1`, revisionID).Scan(&serverCount, &pendingContracts, &ambiguousProfiles); err != nil {
+		return err
+	}
+	if serverCount == 0 || pendingContracts != 0 || ambiguousProfiles != 0 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (s *Store) prepareGlobalPolicyApplyTx(ctx context.Context, tx pgx.Tx, target domain.Target, revisionID, appliedRevisionID string) (GovernanceApplyPreparation, error) {

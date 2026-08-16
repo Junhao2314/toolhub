@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -182,6 +183,13 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 	if _, err := tx.Exec(ctx, `INSERT INTO profile_revisions(id,profile_id,revision,name,description,canonical_hash) VALUES($1,$2,1,'custom-profile','',$3)`, unknownRevisionID, unknownID, strings.Repeat("b", 64)); err != nil {
 		t.Fatal(err)
 	}
+	legacyID, legacyRevisionID := uuid.NewString(), uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO profiles(id,name,description,revision,current_revision_id) VALUES($1,'shared-mcp','',1,$2)`, legacyID, legacyRevisionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO profile_revisions(id,profile_id,revision,name,description,canonical_hash) VALUES($1,$2,1,'shared-mcp','',$3)`, legacyRevisionID, legacyID, strings.Repeat("c", 64)); err != nil {
+		t.Fatal(err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +210,13 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 	if state != "needs_review" {
 		t.Fatalf("unknown profile migration state=%q", state)
 	}
+	var capturedLegacyID string
+	if err := upgrade.pool.QueryRow(ctx, `SELECT legacy_profile_id::text FROM relay_configuration_state WHERE singleton`).Scan(&capturedLegacyID); err != nil {
+		t.Fatal(err)
+	}
+	if capturedLegacyID != legacyID {
+		t.Fatalf("migration captured legacy Profile %s want %s", capturedLegacyID, legacyID)
+	}
 	if err := upgrade.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -209,8 +224,532 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 	if err := upgrade.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 10 {
+	if versions != 11 {
 		t.Fatalf("migration reran or skipped: versions=%d", versions)
+	}
+}
+
+func TestCompatibilityStartupReadinessProjectionIsNonMutating(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "compatibility-readiness", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "compatibility-server", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayRevision, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1 WHERE singleton`, relayRevision.ID); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "shared-mcp", ClientKind: "shared", Category: "relay", MigrationState: "compatibility", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "claude-coding", ClientKind: "claude", Category: "coding", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "custom-profile"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var contractRevisions, publishedProfiles, operations int
+	if err := st.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM mcp_contract_revisions),(SELECT count(*) FROM published_profiles),(SELECT count(*) FROM operations)`).Scan(&contractRevisions, &publishedProfiles, &operations); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InitializeRelayMigrationReadiness(ctx); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := st.RelayConfigurationProjection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Migration.State != "waiting_contract_review" || projection.Migration.PendingContractReviews != 1 || projection.Migration.AmbiguousProfiles != 1 {
+		t.Fatalf("migration readiness=%+v", projection.Migration)
+	}
+	if projection.Migration.LegacyProfileID != "" || projection.Migration.LegacyProfileState != "pending" {
+		t.Fatalf("startup captured late-created legacy Profile %s: %+v", legacy.ID, projection.Migration)
+	}
+	var afterContracts, afterPublished, afterOperations int
+	if err := st.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM mcp_contract_revisions),(SELECT count(*) FROM published_profiles),(SELECT count(*) FROM operations)`).Scan(&afterContracts, &afterPublished, &afterOperations); err != nil {
+		t.Fatal(err)
+	}
+	if afterContracts != contractRevisions || afterPublished != publishedProfiles || afterOperations != operations {
+		t.Fatalf("startup mutated governance contracts=%d/%d published=%d/%d operations=%d/%d", contractRevisions, afterContracts, publishedProfiles, afterPublished, operations, afterOperations)
+	}
+}
+
+func TestBootstrapFirstContractCreatesCandidateProfilesWithoutPublishing(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "bootstrap-contract", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayRevision, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1 WHERE singleton`, relayRevision.ID); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "shared-mcp", ClientKind: "shared", Category: "relay", MigrationState: "compatibility", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET legacy_profile_id=$1,legacy_profile_state='pending' WHERE singleton`, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	claude, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "claude-coding", ClientKind: "claude", Category: "coding", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}, PendingBindings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `INSERT INTO pending_secret_bindings(profile_revision_id,mcp_revision_id,namespace,key,slot_hash) VALUES($1,$2,'env','API_TOKEN',$3)`, claude.CurrentRevisionID, server.CurrentRevisionID, strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
+	codex, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "codex-coding", ClientKind: "codex", Category: "coding", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ambiguous, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "custom-profile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "status", InputSchema: json.RawMessage(`{"type":"object"}`), ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, observation.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, original := range []domain.Profile{claude, codex} {
+		candidate, err := st.Profile(ctx, original.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if candidate.Revision != original.Revision+1 || candidate.CurrentRevisionID == original.CurrentRevisionID {
+			t.Fatalf("Profile %s candidate revision=%d id=%s", candidate.Name, candidate.Revision, candidate.CurrentRevisionID)
+		}
+		if len(candidate.MCPGovernance) != 1 || candidate.MCPGovernance[0].MCPRevisionID != server.CurrentRevisionID || candidate.MCPGovernance[0].AcceptedContractRevisionID != observation.Revision.ID || candidate.MCPGovernance[0].VisibilityMode != "all_accepted" {
+			t.Fatalf("Profile %s governance=%+v", candidate.Name, candidate.MCPGovernance)
+		}
+		if candidate.PublishedRevisionID != "" {
+			t.Fatalf("Profile %s was published during bootstrap", candidate.Name)
+		}
+	}
+	var copiedBindings int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM pending_secret_bindings WHERE profile_revision_id=(SELECT current_revision_id FROM profiles WHERE id=$1)`, claude.ID).Scan(&copiedBindings); err != nil {
+		t.Fatal(err)
+	}
+	if copiedBindings != 1 {
+		t.Fatalf("bootstrap copied pending bindings=%d want 1", copiedBindings)
+	}
+	unchanged, err := st.Profile(ctx, ambiguous.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.CurrentRevisionID != ambiguous.CurrentRevisionID || unchanged.Revision != ambiguous.Revision {
+		t.Fatalf("ambiguous Profile advanced to revision %d", unchanged.Revision)
+	}
+	var publishedProfiles, operations int
+	if err := st.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM published_profiles),(SELECT count(*) FROM operations)`).Scan(&publishedProfiles, &operations); err != nil {
+		t.Fatal(err)
+	}
+	if publishedProfiles != 0 || operations != 0 {
+		t.Fatalf("bootstrap published=%d operations=%d", publishedProfiles, operations)
+	}
+	if err := st.AcceptContract(ctx, server.ID, observation.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := st.Profile(ctx, claude.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Revision != claude.Revision+1 {
+		t.Fatalf("replayed accept created revision %d", replayed.Revision)
+	}
+}
+
+func TestFirstContractBootstrapRequiresPendingLegacyTransition(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		legacyState string
+	}{
+		{name: "fresh install"},
+		{name: "completed migration rollback", legacyState: "migrated_relay"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newIntegrationStore(t, true)
+			server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "bootstrap-gate-" + strings.ReplaceAll(test.name, " ", "-"), Transport: "http", URL: "https://example.invalid/mcp"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			relayRevision, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1 WHERE singleton`, relayRevision.ID); err != nil {
+				t.Fatal(err)
+			}
+			if test.legacyState != "" {
+				legacy, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "shared-mcp", ClientKind: "shared", Category: "relay", MigrationState: "compatibility"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET legacy_profile_id=$1,legacy_profile_state=$2 WHERE singleton`, legacy.ID, test.legacyState); err != nil {
+					t.Fatal(err)
+				}
+			}
+			profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "claude-bootstrap-gate", ClientKind: "claude", Category: "coding", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			observation, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "status", ReadOnlyHint: true}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := st.AcceptContract(ctx, server.ID, observation.Revision.ID); err != nil {
+				t.Fatal(err)
+			}
+			unchanged, err := st.Profile(ctx, profile.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if unchanged.Revision != profile.Revision || unchanged.CurrentRevisionID != profile.CurrentRevisionID {
+				t.Fatalf("first Contract bootstrap advanced Profile outside pending legacy transition: %d -> %d", profile.Revision, unchanged.Revision)
+			}
+		})
+	}
+}
+
+func TestRelayConfigurationFinalizationRequiresExplicitModeMetadata(t *testing.T) {
+	for _, missing := range []string{"mode", "expectedMode"} {
+		t.Run(missing, func(t *testing.T) {
+			ctx := context.Background()
+			st := newIntegrationStore(t, true)
+			_, _, _, relayRevisionID := setupPublishedRelayProfile(t, st, "missing-"+missing)
+			prepared, operation := prepareSucceededRelayModeApplyForTest(t, st, relayRevisionID, "compatibility", "missing-"+missing)
+			if _, err := st.pool.Exec(ctx, `UPDATE operations SET metadata=metadata-$2 WHERE id=$1`, operation.ID, missing); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.FinalizeRelayConfigurationApply(ctx, operation.ID, relayRevisionID, prepared.RoutingHash); !errors.Is(err, ErrConflict) {
+				t.Fatalf("finalization without %s returned %v, want conflict", missing, err)
+			}
+		})
+	}
+}
+
+func TestRelayConfigurationApplyLocksContractsBeforeProfiles(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "relay-lock-order", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "relay-lock-order", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "status", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, contract.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	relayRevision, err := st.SaveRelayConfiguration(ctx, RelayConfigurationInput{MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayOperationID := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"revisionId": relayRevision.ID})
+	if err := st.FinalizeRelayConfigurationApply(ctx, relayOperationID, relayRevision.ID, governanceRoutingHash(t, st, relayOperationID)); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "claude-lock-order", ClientKind: "claude", Category: "coding", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}, MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: contract.Revision.ID, VisibilityMode: "all_accepted"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileOperationID := succeededGovernanceOperation(t, st, "apply", profile.ID, map[string]any{"profileRevisionId": profile.CurrentRevisionID})
+	if err := st.FinalizeProfilePublish(ctx, profileOperationID, profile.ID, profile.CurrentRevisionID, governanceRoutingHash(t, st, profileOperationID)); err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := st.PrepareRelayConfigurationModeApply(ctx, relayRevision.ID, []string{profile.ID}, "compatibility")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	barrierPool, applyStore, observerStore, closePools := integrationLockOrderStores(t, st)
+	defer closePools()
+	barrier, err := barrierPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = barrier.Rollback(ctx) }()
+	if _, err := barrier.Exec(ctx, `SELECT server_id FROM mcp_contract_state WHERE server_id=$1 FOR UPDATE`, server.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	applyContext, cancelApply := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelApply()
+	applyResult := make(chan error, 1)
+	go func() {
+		_, err := applyStore.CreateRelayConfigurationModeApplyOperation(applyContext, relayRevision.ID, []string{profile.ID}, "compatibility", strings.Repeat("a", 64), prepared.RoutingHash, "relay-lock-order")
+		applyResult <- err
+	}()
+	waitForBackendLock(t, st, "toolhub-finish-lock-order")
+
+	observer, err := observerStore.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, profileLockErr := observer.Exec(ctx, `SELECT p.id FROM profiles p JOIN published_profiles published ON published.profile_id=p.id WHERE p.id=$1 FOR UPDATE OF p,published NOWAIT`, profile.ID)
+	_ = observer.Rollback(ctx)
+	if err := barrier.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-applyResult; err != nil {
+		t.Fatal(err)
+	}
+	if profileLockErr != nil {
+		t.Fatalf("Apply held a Profile lock while waiting for the Contract lock: %v", profileLockErr)
+	}
+}
+
+func TestContractAcceptLocksRelayStateBeforeContractState(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "contract-lock-order", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{{Name: "status", ReadOnlyHint: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	barrierPool, acceptStore, observerStore, closePools := integrationLockOrderStores(t, st)
+	defer closePools()
+	barrier, err := barrierPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = barrier.Rollback(ctx) }()
+	if _, err := barrier.Exec(ctx, `SELECT singleton FROM relay_configuration_state WHERE singleton FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+
+	acceptContext, cancelAccept := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelAccept()
+	acceptResult := make(chan error, 1)
+	go func() { acceptResult <- acceptStore.AcceptContract(acceptContext, server.ID, contract.Revision.ID) }()
+	waitForBackendLock(t, st, "toolhub-finish-lock-order")
+
+	observer, err := observerStore.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, contractLockErr := observer.Exec(ctx, `SELECT server_id FROM mcp_contract_state WHERE server_id=$1 FOR UPDATE NOWAIT`, server.ID)
+	_ = observer.Rollback(ctx)
+	if err := barrier.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-acceptResult; err != nil {
+		t.Fatal(err)
+	}
+	if contractLockErr != nil {
+		t.Fatalf("Contract Accept held the Contract lock while waiting for the Relay state lock: %v", contractLockErr)
+	}
+}
+
+func TestEnforcementPreflightRequiresReviewedHealthyAppliedRelay(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	_, _, _, relayRevisionID := setupPublishedRelayProfile(t, st, "enforcement")
+
+	prepared, err := st.PrepareRelayConfigurationModeApply(ctx, relayRevisionID, nil, "enforced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Manifest.RelayGovernance == nil {
+		t.Fatal("enforcement preflight omitted routing governance")
+	}
+	var bundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(prepared.Manifest.RelayGovernance.RoutingBundle, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Mode != "enforced" {
+		t.Fatalf("candidate mode=%q", bundle.Mode)
+	}
+
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	if _, err := st.pool.Exec(ctx, `UPDATE target_desired_snapshots SET health='drifted' WHERE target_id=$1`, relayTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PrepareRelayConfigurationModeApply(ctx, relayRevisionID, nil, "enforced"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("drifted relay enforcement returned %v, want conflict", err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE target_desired_snapshots SET health='healthy' WHERE target_id=$1`, relayTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+	serverID := prepared.Manifest.MCPServers[0].ServerID
+	if _, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: serverID, Tools: []ObservedToolInput{{Name: "changed_status", InputSchema: json.RawMessage(`{"type":"object"}`), ReadOnlyHint: true}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PrepareRelayConfigurationModeApply(ctx, relayRevisionID, nil, "enforced"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unreviewed Contract enforcement returned %v, want conflict", err)
+	}
+}
+
+func TestLegacySharedMCPTransitionAndCompatibilityRollbackPreserveHistory(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, contract, _, relayRevisionID := setupPublishedRelayProfile(t, st, "rollback")
+	legacy, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "shared-mcp", ClientKind: "shared", Category: "relay", MigrationState: "compatibility", MCPServerIDs: []string{server.ID}, MCPRevisionIDs: map[string]string{server.ID: server.CurrentRevisionID}, MCPGovernance: []ProfileMCPGovernanceInput{{ServerID: server.ID, MCPRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: contract.Revision.ID, VisibilityMode: "all_accepted"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InitializeRelayMigrationReadiness(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET legacy_profile_id=$1,legacy_profile_state='pending' WHERE singleton`, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	var contractHistoryBefore int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM mcp_contract_revisions`).Scan(&contractHistoryBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	enforced := completeRelayModeApplyForTest(t, st, relayRevisionID, "enforced", "enforcement-transition")
+	if enforced.Mode != "enforced" || enforced.Migration.LegacyProfileState != "migrated_relay" || enforced.Migration.LegacyProfileID != legacy.ID || !enforced.Migration.RestorableSnapshot {
+		t.Fatalf("enforced projection=%+v", enforced)
+	}
+	if _, err := st.Profile(ctx, legacy.ID); err != nil {
+		t.Fatalf("legacy Profile was deleted: %v", err)
+	}
+
+	compatibility := completeRelayModeApplyForTest(t, st, relayRevisionID, "compatibility", "compatibility-rollback")
+	if compatibility.Mode != "compatibility" || compatibility.Migration.LegacyProfileState != "migrated_relay" {
+		t.Fatalf("rollback projection=%+v", compatibility)
+	}
+	bundle, _, err := st.RenderRoutingBundle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle.Mode != "compatibility" || len(bundle.Servers) != 1 || bundle.Servers[0].ServerID != server.ID {
+		t.Fatalf("rollback bundle=%+v", bundle)
+	}
+	var contractHistoryAfter int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM mcp_contract_revisions`).Scan(&contractHistoryAfter); err != nil {
+		t.Fatal(err)
+	}
+	if contractHistoryAfter != contractHistoryBefore {
+		t.Fatalf("rollback changed Contract history %d -> %d", contractHistoryBefore, contractHistoryAfter)
+	}
+}
+
+func TestLegacyMarkerRequiresCurrentRestorableCompatibilityBackup(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		sourceMode string
+		expires    string
+		metadata   bool
+	}{
+		{name: "unrelated operation", sourceMode: "unrelated", expires: "30 days", metadata: true},
+		{name: "expired", sourceMode: "current", expires: "-1 minute", metadata: true},
+		{name: "missing desired manifest", sourceMode: "current", expires: "30 days"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newIntegrationStore(t, true)
+			_, _, _, relayRevisionID := setupPublishedRelayProfile(t, st, "backup-"+strings.ReplaceAll(test.name, " ", "-"))
+			legacy, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "shared-mcp", ClientKind: "shared", Category: "relay", MigrationState: "compatibility"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET legacy_profile_id=$1,legacy_profile_state='pending' WHERE singleton`, legacy.ID); err != nil {
+				t.Fatal(err)
+			}
+			prepared, operation := prepareSucceededRelayModeApplyForTest(t, st, relayRevisionID, "enforced", "invalid-backup-"+test.name)
+			recordCompatibilityBackupForTest(t, st, operation.ID, test.sourceMode, test.expires, test.metadata)
+			if err := st.FinalizeRelayConfigurationApply(ctx, operation.ID, relayRevisionID, prepared.RoutingHash); !errors.Is(err, ErrConflict) {
+				t.Fatalf("finalization with %s backup returned %v, want conflict", test.name, err)
+			}
+			projection, err := st.RelayConfigurationProjection(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if projection.Mode != "compatibility" || projection.Migration.LegacyProfileState != "pending" || projection.Migration.RestorableSnapshot {
+				t.Fatalf("invalid backup changed migration state: %+v", projection)
+			}
+		})
+	}
+}
+
+func completeRelayModeApplyForTest(t *testing.T, st *Store, relayRevisionID, mode, key string) RelayConfigurationProjection {
+	t.Helper()
+	ctx := context.Background()
+	prepared, operation := prepareSucceededRelayModeApplyForTest(t, st, relayRevisionID, mode, key)
+	recordCompatibilityBackupForTest(t, st, operation.ID, "current", "30 days", true)
+	if err := st.FinalizeRelayConfigurationApply(ctx, operation.ID, relayRevisionID, prepared.RoutingHash); err != nil {
+		t.Fatal(err)
+	}
+	projection, err := st.RelayConfigurationProjection(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return projection
+}
+
+func prepareSucceededRelayModeApplyForTest(t *testing.T, st *Store, relayRevisionID, mode, key string) (GovernanceApplyPreparation, domain.Operation) {
+	t.Helper()
+	ctx := context.Background()
+	prepared, err := st.PrepareRelayConfigurationModeApply(ctx, relayRevisionID, nil, mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := st.CreateRelayConfigurationModeApplyOperation(ctx, relayRevisionID, nil, mode, strings.Repeat("a", 64), prepared.RoutingHash, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := json.Marshal(map[string]any{"routingReloaded": true, "routingHash": prepared.RoutingHash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE operations SET status='running' WHERE id=$1; UPDATE operation_targets SET status='succeeded',result=$2,finished_at=now(),governance_finalization_pending=true WHERE operation_id=$1`, operation.ID, jsonText(result)); err != nil {
+		t.Fatal(err)
+	}
+	return prepared, operation
+}
+
+func recordCompatibilityBackupForTest(t *testing.T, st *Store, operationID, sourceMode, expires string, includeManifest bool) {
+	t.Helper()
+	ctx := context.Background()
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	var manifestBody []byte
+	var manifestHash string
+	if err := st.pool.QueryRow(ctx, `SELECT snapshot.manifest,snapshot.manifest_hash FROM target_desired_snapshots active JOIN desired_snapshots snapshot ON snapshot.id=active.snapshot_id WHERE active.target_id=$1`, relayTarget.ID).Scan(&manifestBody, &manifestHash); err != nil {
+		t.Fatal(err)
+	}
+	metadata := json.RawMessage(`{}`)
+	if includeManifest {
+		body, err := json.Marshal(map[string]any{"desiredManifest": json.RawMessage(manifestBody)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadata = body
+	}
+	var sourceOperationID any
+	if sourceMode == "current" {
+		sourceOperationID = operationID
+	}
+	_, err := st.pool.Exec(ctx, `INSERT INTO backups(id,bridge_backup_id,target_id,source_operation_id,target_revision,manifest_hash,created_at,expires_at,metadata) VALUES($1,$2,$3,$4,$5,$6,now(),now()+$7::interval,$8)`, uuid.NewString(), "backup-"+uuid.NewString(), relayTarget.ID, sourceOperationID, strings.Repeat("a", 64), manifestHash, expires, jsonText(metadata))
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -373,8 +912,8 @@ func assertGovernanceMigrationState(t *testing.T, st *Store) {
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM schema_migrations`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 10 {
-		t.Fatalf("migration versions=%d want 10", versions)
+	if versions != 11 {
+		t.Fatalf("migration versions=%d want 11", versions)
 	}
 	var generation string
 	if err := st.pool.QueryRow(ctx, `SELECT value FROM app_meta WHERE key='schema_generation'`).Scan(&generation); err != nil {

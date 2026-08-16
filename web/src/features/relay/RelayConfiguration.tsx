@@ -9,7 +9,7 @@ import {
   type RelayPreflightResponse,
   type Target,
 } from "../../api/client";
-import { Button, ErrorNotice, Status } from "../../components/ui";
+import { Button, ErrorNotice, Segments, Status } from "../../components/ui";
 import { useI18n } from "../../i18n";
 
 export default function RelayConfiguration({
@@ -33,6 +33,7 @@ export default function RelayConfiguration({
     null,
   );
   const [preflight, setPreflight] = useState<RelayPreflightResponse | null>(null);
+  const [requestedMode, setRequestedMode] = useState(configuration.mode);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -66,6 +67,12 @@ export default function RelayConfiguration({
   );
   const configurationChanged =
     configuration.current.canonicalHash !== configuration.applied.canonicalHash;
+  const migrationStateLabel = {
+    waiting_contract_review: "Waiting for tool definition review",
+    profile_metadata_review: "Profile metadata review required",
+    compatibility_ready: "Ready to enforce routing",
+    enforced: "Routing enforcement active",
+  }[configuration.migration.state];
 
   const toggleServer = (serverID: string) => {
     setSelected((current) => {
@@ -74,6 +81,11 @@ export default function RelayConfiguration({
       return next;
     });
     setAffectedProfileIDs(null);
+    setPreflight(null);
+  };
+
+  const changeMode = (label: string) => {
+    setRequestedMode(label === "Enforced" ? "enforced" : "compatibility");
     setPreflight(null);
   };
 
@@ -125,6 +137,7 @@ export default function RelayConfiguration({
         {
           revisionId: configuration.current.id,
           profileIds: affectedProfileIDs ?? [],
+          mode: requestedMode,
         },
       );
       setPreflight(result);
@@ -139,6 +152,7 @@ export default function RelayConfiguration({
         {
           revisionId: configuration.current.id,
           profileIds: affectedProfileIDs ?? [],
+          mode: requestedMode,
           targetRevision: preflight.result.targetRevision,
           routingHash: preflight.routingHash,
         },
@@ -197,6 +211,55 @@ export default function RelayConfiguration({
                 : "Profile-only routing update does not restart relay",
             )}
           </strong>
+        </div>
+      </div>
+
+      <div className="relay-readiness-strip">
+        <div>
+          <span>{t("Migration readiness")}</span>
+          <strong>{t(migrationStateLabel)}</strong>
+          <small>
+            {t("{count} pending tool definition reviews", {
+              count: configuration.migration.pendingContractReviews,
+            })}
+          </small>
+          {configuration.migration.ambiguousProfiles > 0 && (
+            <small>
+              {t("{count} Profiles need metadata review", {
+                count: configuration.migration.ambiguousProfiles,
+              })}
+            </small>
+          )}
+        </div>
+        <div>
+          <span>{t("mcpm capability")}</span>
+          <strong>
+            {configuration.runtimeCapability.compatible
+              ? `mcpm ${configuration.runtimeCapability.runtimeVersion}`
+              : t("mcpm incompatible or unavailable")}
+          </strong>
+          <small>
+            {configuration.runtimeCapability.compatible
+              ? t("{count} required features available", {
+                  count: configuration.runtimeCapability.features.length,
+                })
+              : configuration.runtimeCapability.errorCode}
+          </small>
+        </div>
+        <div>
+          <span>{t("Routing mode")}</span>
+          <Segments
+            options={["Compatibility", "Enforced"]}
+            value={requestedMode === "enforced" ? "Enforced" : "Compatibility"}
+            onChange={changeMode}
+          />
+          <small>
+            {t(
+              requestedMode === "enforced"
+                ? "Enforcement fails closed until every readiness check passes"
+                : "Compatibility preserves the complete native tool catalog",
+            )}
+          </small>
         </div>
       </div>
 

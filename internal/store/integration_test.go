@@ -280,7 +280,7 @@ func TestRelayProjectionMigrationUpgradesGenerationTwoDatabaseIntegration(t *tes
 	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='target_desired_snapshots' AND column_name LIKE 'relay_%'`).Scan(&relayColumns); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 10 || relayColumns != 5 {
+	if versions != 11 || relayColumns != 5 {
 		t.Fatalf("migration versions=%d relayColumns=%d", versions, relayColumns)
 	}
 	var partialAllowed bool

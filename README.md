@@ -24,6 +24,14 @@ Licensed under the [MIT License](LICENSE).
   contain one native user-scope `toolhub-relay` anchor. The local Hermes MCP
   map is collapsed to that anchor on Apply; remote Hermes remains read-only.
 
+Relay governance starts in explicit `compatibility` mode. Contract review and
+Profile candidate creation never publish or Apply automatically. Switching to
+`enforced` is revision-bound and fails closed unless the applied v2 Relay state,
+Restore backup, accepted Contracts, Profile metadata, compatible mcpm features,
+and both Claude/Codex adapters are ready. The legacy `shared-mcp` Profile is
+retained for history and rollback, then hidden from the ordinary Profile list
+only after that transition succeeds.
+
 There is no Agent, WebSocket enrollment, SSH fallback, RBAC, multi-user API,
 review/approval workflow, deployment table, or legacy job queue.
 

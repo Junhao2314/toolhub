@@ -29,6 +29,18 @@ function session() {
   return { authenticated: true, csrfToken: 'fixture-csrf', expiresAt: '2099-01-01T00:00:00Z', user: { username: 'admin', passwordChangeRecommended: false } }
 }
 
+function compatibilityRelayConfiguration() {
+  const revision = { id: 'c1111111-1111-4111-8111-111111111111', revision: 1, canonicalHash: '0'.repeat(64), mcpServers: [], createdAt: now }
+  return {
+    current: revision,
+    applied: revision,
+    mode: 'compatibility',
+    defaultProfileId: null,
+    migration: { state: 'compatibility_ready', pendingContractReviews: 0, ambiguousProfiles: 0, legacyProfileState: 'pending', restorableSnapshot: false },
+    runtimeCapability: { compatible: false, features: [], errorCode: 'target_unavailable' },
+  }
+}
+
 test('username login and generation-2 navigation render without overlap', async ({ page }, testInfo) => {
   const username = process.env.TOOLHUB_E2E_USERNAME
   const password = process.env.TOOLHUB_E2E_PASSWORD
@@ -287,6 +299,7 @@ test('Profile preflight pins confirmation tokens and partial operations remain a
     if (path === '/api/v1/skills') return route.fulfill({ json: { items: [] } })
     if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [] } })
     if (path === '/api/v1/relay/contracts') return route.fulfill({ json: { items: [], renames: [] } })
+    if (path === '/api/v1/relay/configuration') return route.fulfill({ json: compatibilityRelayConfiguration() })
     if (path === '/api/v1/mcp/policy') return route.fulfill({ json: { current: { id: '99999999-9999-4999-8999-999999999998', revision: 1, canonicalHash: 'b'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now }, applied: { id: '99999999-9999-4999-8999-999999999998', revision: 1, canonicalHash: 'b'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now } } })
     if (path === '/api/v1/targets') return route.fulfill({ json: { items: [target] } })
     if (path === `/api/v1/profiles/${profileID}/preflight`) {
@@ -395,6 +408,7 @@ test('Profile governance pins accepted tools, tightens policy, and gates native 
     if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [server] } })
     if (path === '/api/v1/relay/contracts') return route.fulfill({ json: contract })
     if (path === '/api/v1/mcp/policy') return route.fulfill({ json: { current: { id: '57555555-5555-4555-8555-555555555555', revision: 1, canonicalHash: 'e'.repeat(64), catalogVersion: 1, explicitOverrides: { [searchToolID]: 'allow', [writeToolID]: 'confirm' }, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now }, applied: { id: '57555555-5555-4555-8555-555555555555', revision: 1, canonicalHash: 'e'.repeat(64), catalogVersion: 1, explicitOverrides: { [searchToolID]: 'allow', [writeToolID]: 'confirm' }, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now } } })
+    if (path === '/api/v1/relay/configuration') return route.fulfill({ json: compatibilityRelayConfiguration() })
     if (path === '/api/v1/targets') return route.fulfill({ json: { items: targets } })
     if (path === '/api/v1/profiles' && request.method() === 'GET') return route.fulfill({ json: { items: profiles } })
     if (path === '/api/v1/profiles' && request.method() === 'POST') {
@@ -583,6 +597,7 @@ test('editing a Profile preserves historical pins until explicit contract adopti
     if (path === '/api/v1/targets') return route.fulfill({ json: { items: [] } })
     if (path === '/api/v1/relay/contracts') return route.fulfill({ json: contract })
     if (path === '/api/v1/mcp/policy') return route.fulfill({ json: { current: { id: '69555555-5555-4555-8555-555555555555', revision: 2, canonicalHash: '3'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now }, applied: { id: '69555555-5555-4555-8555-555555555555', revision: 2, canonicalHash: '3'.repeat(64), catalogVersion: 1, explicitOverrides: {}, unclassifiedMutating: 'confirm', reviewedReadOnly: 'allow', createdAt: now } } })
+    if (path === '/api/v1/relay/configuration') return route.fulfill({ json: compatibilityRelayConfiguration() })
     return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
   })
 
@@ -684,6 +699,7 @@ test('editing a pre-contract Profile requires adoption and honors confirmed rena
     if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [server] } })
     if (path === '/api/v1/targets') return route.fulfill({ json: { items: [] } })
     if (path === '/api/v1/relay/contracts') return route.fulfill({ json: contracts })
+    if (path === '/api/v1/relay/configuration') return route.fulfill({ json: compatibilityRelayConfiguration() })
     return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
   })
 
@@ -746,6 +762,8 @@ test('shared relay governance console reviews updates without exposing payloads'
     applied: { id: appliedConfigurationID, revision: 1, canonicalHash: '5'.repeat(64), mcpServers: [{ serverId: firstServerID, mcpRevisionId: firstMCPRevisionID, position: 0 }], metadata: {}, createdAt: now },
     mode: 'compatibility',
     defaultProfileId: null,
+    migration: { state: 'waiting_contract_review', pendingContractReviews: 1, ambiguousProfiles: 2, legacyProfileId: '', legacyProfileState: 'pending', restorableSnapshot: false },
+    runtimeCapability: { compatible: true, runtimeVersion: '2.15.0-toolhub.1', features: ['profile-session-binding', 'tool-filtering', 'call-policy', 'one-shot-confirmation', 'payload-free-observations', 'routing-hot-reload'] },
   }
   const contracts = {
     items: [{
@@ -844,6 +862,11 @@ test('shared relay governance console reviews updates without exposing payloads'
   await expect(page.getByText('Configuration r2', { exact: true })).toBeVisible()
   await expect(page.getByText('Applied r1', { exact: true })).toBeVisible()
   await expect(page.getByText('Will disconnect current sessions')).toBeVisible()
+  await expect(page.getByText('Waiting for tool definition review', { exact: true })).toBeVisible()
+  await expect(page.getByText('2 Profiles need metadata review', { exact: true })).toBeVisible()
+  await expect(page.getByText('mcpm 2.15.0-toolhub.1', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Compatibility', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Enforced', exact: true })).toBeVisible()
   const runningSet = page.getByRole('table', { name: 'Running MCP set' })
   await expect(runningSet.getByRole('row').filter({ hasText: 'acemcp' })).toContainText('ready')
   await expect(runningSet.getByRole('row').filter({ hasText: 'docs' })).toHaveCount(0)
@@ -866,8 +889,8 @@ test('shared relay governance console reviews updates without exposing payloads'
   await page.getByRole('button', { name: 'Apply relay update' }).click()
   await expect(page.getByText(/Relay update queued/)).toBeVisible()
   expect(prepareBody).toEqual({ revisionId: savedDraftConfigurationID })
-  expect(preflightBody).toEqual({ revisionId: savedDraftConfigurationID, profileIds: [profileID] })
-  expect(applyBody).toEqual({ revisionId: savedDraftConfigurationID, profileIds: [profileID], targetRevision, routingHash })
+  expect(preflightBody).toEqual({ revisionId: savedDraftConfigurationID, profileIds: [profileID], mode: 'compatibility' })
+  expect(applyBody).toEqual({ revisionId: savedDraftConfigurationID, profileIds: [profileID], mode: 'compatibility', targetRevision, routingHash })
 
   await expect(page.getByText('New tools', { exact: true })).toBeVisible()
   await expect(page.getByText('Changed tools', { exact: true })).toBeVisible()
@@ -905,6 +928,42 @@ test('shared relay governance console reviews updates without exposing payloads'
   await expectNoViewportOverflow(page)
   await page.screenshot({ path: `../test-results/${testInfo.project.name}-relay-governance.png`, fullPage: true })
   expect(consoleErrors).toEqual([])
+})
+
+test('migrated legacy shared-mcp is hidden from the ordinary Profile list', async ({ page }) => {
+  const legacyProfileID = 'b1111111-1111-4111-8111-111111111111'
+  const ordinaryProfile = {
+    id: 'b2222222-2222-4222-8222-222222222222', currentRevisionId: 'b3333333-3333-4333-8333-333333333333',
+    name: 'claude-coding', description: 'Coding profile', clientKind: 'claude', category: 'coding', variant: 'default', migrationState: 'ready',
+    revision: 2, canonicalHash: '1'.repeat(64), pendingBindings: false, skillIds: [], mcpServerIds: [], mcpGovernance: [], toolRules: [], effectiveVisibleCount: 0,
+    createdAt: now, updatedAt: now,
+  }
+  const legacyProfile = {
+    ...ordinaryProfile, id: legacyProfileID, currentRevisionId: 'b4444444-4444-4444-8444-444444444444', name: 'shared-mcp',
+    description: 'Legacy shared MCP profile', clientKind: 'shared', category: 'relay', migrationState: 'compatibility',
+  }
+
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/profiles') return route.fulfill({ json: { items: [legacyProfile, ordinaryProfile] } })
+    if (path === '/api/v1/skills') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/targets') return route.fulfill({ json: { items: [] } })
+    if (path === '/api/v1/relay/contracts') return route.fulfill({ json: { items: [], renames: [] } })
+    if (path === '/api/v1/relay/configuration') return route.fulfill({ json: {
+      current: { id: 'b5555555-5555-4555-8555-555555555555', revision: 2, canonicalHash: '2'.repeat(64), mcpServers: [], createdAt: now },
+      applied: { id: 'b6666666-6666-4666-8666-666666666666', revision: 1, canonicalHash: '3'.repeat(64), mcpServers: [], createdAt: now },
+      mode: 'compatibility', defaultProfileId: null,
+      migration: { state: 'compatibility_ready', pendingContractReviews: 0, ambiguousProfiles: 0, legacyProfileId: legacyProfileID, legacyProfileState: 'migrated_relay', restorableSnapshot: true },
+      runtimeCapability: { compatible: true, runtimeVersion: '2.15.0-toolhub.1', features: [] },
+    } })
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: path } } })
+  })
+
+  await page.goto('/profiles')
+  await expect(page.getByText(ordinaryProfile.name, { exact: true })).toBeVisible()
+  await expect(page.getByText(legacyProfile.name, { exact: true })).toHaveCount(0)
 })
 
 test('shared relay inventory, controls, and write-only MCP secrets use generation-2 contracts', async ({ page }, testInfo) => {

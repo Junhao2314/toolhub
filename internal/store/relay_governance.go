@@ -333,11 +333,16 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 	if stringMetadata(metadata, "revisionId") != revisionID || stringMetadata(metadata, "routingHash") != routingHash {
 		return ErrConflict
 	}
-	var appliedRevisionID string
-	if err := tx.QueryRow(ctx, `SELECT applied_revision_id::text FROM relay_configuration_state WHERE singleton FOR UPDATE`).Scan(&appliedRevisionID); err != nil {
+	var appliedRevisionID, currentMode string
+	if err := tx.QueryRow(ctx, `SELECT applied_revision_id::text,mode FROM relay_configuration_state WHERE singleton FOR UPDATE`).Scan(&appliedRevisionID, &currentMode); err != nil {
 		return err
 	}
 	if appliedRevisionID != stringMetadata(metadata, "expectedAppliedRelayConfigurationRevisionId") {
+		return ErrConflict
+	}
+	mode := stringMetadata(metadata, "mode")
+	expectedMode := stringMetadata(metadata, "expectedMode")
+	if !validRelayMode(mode) || !validRelayMode(expectedMode) || currentMode != expectedMode {
 		return ErrConflict
 	}
 	affectedProfileRevisions, ok := stringMapMetadata(metadata, "affectedProfileRevisions")
@@ -361,7 +366,7 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 			return err
 		}
 	}
-	candidate := RoutingBundleCandidate{RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: affectedProfileRevisions}
+	candidate := RoutingBundleCandidate{Mode: mode, RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: affectedProfileRevisions}
 	if err := s.validateCandidateRoutingHashTx(ctx, tx, candidate, routingHash); err != nil {
 		return err
 	}
@@ -379,7 +384,20 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 	if manifest.RelayGovernance == nil || manifest.RelayGovernance.RelayConfigurationRevisionID != revisionID || manifest.RelayGovernance.RoutingHash != routingHash {
 		return ErrConflict
 	}
-	if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1,updated_at=now() WHERE singleton`, revisionID); err != nil {
+	var operationBundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &operationBundle); err != nil || operationBundle.Mode != mode {
+		return ErrConflict
+	}
+	if mode == "enforced" {
+		restorable, err := hasRestorableCompatibilityBackup(ctx, tx, operationID, targetID, appliedRevisionID)
+		if err != nil {
+			return err
+		}
+		if !restorable {
+			return ErrConflict
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE relay_configuration_state SET applied_revision_id=$1,mode=$2,updated_at=now() WHERE singleton`, revisionID, mode); err != nil {
 		return err
 	}
 	for _, profileID := range profileIDs {
@@ -389,6 +407,16 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 	}
 	if err := pinRelayDesiredSnapshotTx(ctx, tx, targetID, revisionID, operationTargetID, manifest); err != nil {
 		return err
+	}
+	if mode == "enforced" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE relay_configuration_state state
+			SET legacy_profile_state='migrated_relay',updated_at=now()
+			WHERE state.singleton
+			  AND state.legacy_profile_id IS NOT NULL
+			  AND state.legacy_profile_state='pending'`); err != nil {
+			return err
+		}
 	}
 	if err := markGovernanceFinalizedTx(ctx, tx, operationID, "relay_configuration_apply"); err != nil {
 		return err
@@ -562,7 +590,8 @@ func profileInputForRelayUpdateTx(ctx context.Context, tx pgx.Tx, profileID, pub
 	var input ProfileInput
 	var currentRevisionID, lockedPublishedRevisionID string
 	var archived bool
-	if err := tx.QueryRow(ctx, `SELECT p.revision,p.current_revision_id::text,pp.profile_revision_id::text,p.archived_at IS NOT NULL FROM profiles p JOIN published_profiles pp ON pp.profile_id=p.id WHERE p.id=$1 FOR UPDATE OF p,pp`, profileID).Scan(&input.Revision, &currentRevisionID, &lockedPublishedRevisionID, &archived); err != nil {
+	var revision int64
+	if err := tx.QueryRow(ctx, `SELECT p.revision,p.current_revision_id::text,pp.profile_revision_id::text,p.archived_at IS NOT NULL FROM profiles p JOIN published_profiles pp ON pp.profile_id=p.id WHERE p.id=$1 FOR UPDATE OF p,pp`, profileID).Scan(&revision, &currentRevisionID, &lockedPublishedRevisionID, &archived); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ProfileInput{}, "", ErrNotFound
 		}
@@ -571,89 +600,98 @@ func profileInputForRelayUpdateTx(ctx context.Context, tx pgx.Tx, profileID, pub
 	if archived || lockedPublishedRevisionID != publishedRevisionID {
 		return ProfileInput{}, "", ErrConflict
 	}
-	var pendingBindings bool
-	if err := tx.QueryRow(ctx, `SELECT name,description,client_kind,category,variant,migration_state,pending_bindings FROM profile_revisions WHERE id=$1 AND profile_id=$2`, publishedRevisionID, profileID).Scan(&input.Name, &input.Description, &input.ClientKind, &input.Category, &input.Variant, &input.MigrationState, &pendingBindings); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ProfileInput{}, "", ErrNotFound
-		}
+	input, err := profileInputFromRevisionTx(ctx, tx, profileID, publishedRevisionID)
+	if err != nil {
 		return ProfileInput{}, "", err
 	}
-	if pendingBindings {
+	input.Revision = revision
+	if input.PendingBindings {
 		return ProfileInput{}, "", ErrConflict
+	}
+	return input, currentRevisionID, nil
+}
+
+func profileInputFromRevisionTx(ctx context.Context, tx pgx.Tx, profileID, revisionID string) (ProfileInput, error) {
+	var input ProfileInput
+	if err := tx.QueryRow(ctx, `SELECT p.revision,pr.name,pr.description,pr.client_kind,pr.category,pr.variant,pr.migration_state,pr.pending_bindings,pr.archived_restore FROM profiles p JOIN profile_revisions pr ON pr.id=$2 AND pr.profile_id=p.id WHERE p.id=$1`, profileID, revisionID).Scan(&input.Revision, &input.Name, &input.Description, &input.ClientKind, &input.Category, &input.Variant, &input.MigrationState, &input.PendingBindings, &input.ArchivedRestore); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ProfileInput{}, ErrNotFound
+		}
+		return ProfileInput{}, err
 	}
 	input.SkillVersionIDs = map[string]string{}
 	input.MCPRevisionIDs = map[string]string{}
-	rows, err := tx.Query(ctx, `SELECT skill_id::text,skill_version_id::text FROM profile_revision_skills WHERE profile_revision_id=$1 ORDER BY position`, publishedRevisionID)
+	rows, err := tx.Query(ctx, `SELECT skill_id::text,skill_version_id::text FROM profile_revision_skills WHERE profile_revision_id=$1 ORDER BY position`, revisionID)
 	if err != nil {
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	for rows.Next() {
 		var skillID, versionID string
 		if err := rows.Scan(&skillID, &versionID); err != nil {
 			rows.Close()
-			return ProfileInput{}, "", err
+			return ProfileInput{}, err
 		}
 		input.SkillIDs = append(input.SkillIDs, skillID)
 		input.SkillVersionIDs[skillID] = versionID
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	rows.Close()
-	rows, err = tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text FROM profile_revision_mcp_servers WHERE profile_revision_id=$1 ORDER BY position`, publishedRevisionID)
+	rows, err = tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text FROM profile_revision_mcp_servers WHERE profile_revision_id=$1 ORDER BY position`, revisionID)
 	if err != nil {
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	for rows.Next() {
 		var serverID, revisionID string
 		if err := rows.Scan(&serverID, &revisionID); err != nil {
 			rows.Close()
-			return ProfileInput{}, "", err
+			return ProfileInput{}, err
 		}
 		input.MCPServerIDs = append(input.MCPServerIDs, serverID)
 		input.MCPRevisionIDs[serverID] = revisionID
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	rows.Close()
-	rows, err = tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text,coalesce(accepted_contract_revision_id::text,''),visibility_mode FROM profile_revision_mcp_governance WHERE profile_revision_id=$1 ORDER BY server_id`, publishedRevisionID)
+	rows, err = tx.Query(ctx, `SELECT server_id::text,mcp_revision_id::text,coalesce(accepted_contract_revision_id::text,''),visibility_mode FROM profile_revision_mcp_governance WHERE profile_revision_id=$1 ORDER BY server_id`, revisionID)
 	if err != nil {
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	for rows.Next() {
 		var item ProfileMCPGovernanceInput
 		if err := rows.Scan(&item.ServerID, &item.MCPRevisionID, &item.AcceptedContractRevisionID, &item.VisibilityMode); err != nil {
 			rows.Close()
-			return ProfileInput{}, "", err
+			return ProfileInput{}, err
 		}
 		input.MCPGovernance = append(input.MCPGovernance, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	rows.Close()
-	rows, err = tx.Query(ctx, `SELECT tool_id::text,visible,decision,reason_codes FROM profile_revision_tool_rules WHERE profile_revision_id=$1 ORDER BY tool_id`, publishedRevisionID)
+	rows, err = tx.Query(ctx, `SELECT tool_id::text,visible,decision,reason_codes FROM profile_revision_tool_rules WHERE profile_revision_id=$1 ORDER BY tool_id`, revisionID)
 	if err != nil {
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	for rows.Next() {
 		var item ProfileToolRuleInput
 		if err := rows.Scan(&item.ToolID, &item.Visible, &item.Decision, &item.ReasonCodes); err != nil {
 			rows.Close()
-			return ProfileInput{}, "", err
+			return ProfileInput{}, err
 		}
 		input.ToolRules = append(input.ToolRules, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return ProfileInput{}, "", err
+		return ProfileInput{}, err
 	}
 	rows.Close()
-	return input, currentRevisionID, nil
+	return input, nil
 }
 
 func (s *Store) PublishProfile(ctx context.Context, profileID, revisionID string) error {
@@ -974,6 +1012,98 @@ func stringMapMetadata(metadata json.RawMessage, key string) (map[string]string,
 		return nil, false
 	}
 	return result, true
+}
+
+func (s *Store) hasRestorableEnforcementBackup(ctx context.Context) (bool, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT operation.id::text,target.id::text,coalesce(operation.metadata->>'expectedAppliedRelayConfigurationRevisionId','')
+		FROM desired_snapshots snapshot
+		JOIN operation_targets operation_target ON operation_target.id=snapshot.source_operation_target_id
+		JOIN operations operation ON operation.id=operation_target.operation_id
+		JOIN targets target ON target.id=snapshot.target_id
+		WHERE target.target_key='local/shared-relay'
+		  AND snapshot.source_kind='relay_config_apply'
+		  AND operation.kind='relay_config_apply'
+		  AND operation.metadata->>'mode'='enforced'
+		ORDER BY snapshot.created_at DESC`)
+	if err != nil {
+		return false, err
+	}
+	type candidate struct{ operationID, targetID, relayRevisionID string }
+	candidates := []candidate{}
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.operationID, &item.targetID, &item.relayRevisionID); err != nil {
+			rows.Close()
+			return false, err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, err
+	}
+	rows.Close()
+	for _, item := range candidates {
+		restorable, err := hasRestorableCompatibilityBackup(ctx, s.pool, item.operationID, item.targetID, item.relayRevisionID)
+		if err != nil {
+			return false, err
+		}
+		if restorable {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func hasRestorableCompatibilityBackup(ctx context.Context, query interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}, operationID, targetID, relayRevisionID string) (bool, error) {
+	if uuid.Validate(operationID) != nil || uuid.Validate(targetID) != nil || uuid.Validate(relayRevisionID) != nil {
+		return false, nil
+	}
+	rows, err := query.Query(ctx, `
+		SELECT target_revision,manifest_hash,metadata
+		FROM backups
+		WHERE source_operation_id=$1
+		  AND target_id=$2
+		  AND expires_at>now()
+		  AND manifest_hash IS NOT NULL
+		ORDER BY created_at DESC`, operationID, targetID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var targetRevision, manifestHash string
+		var metadataJSON []byte
+		if err := rows.Scan(&targetRevision, &manifestHash, &metadataJSON); err != nil {
+			return false, err
+		}
+		if !bridgeprotocol.IsSHA256(targetRevision) || !bridgeprotocol.IsSHA256(manifestHash) {
+			continue
+		}
+		var metadata struct {
+			DesiredManifest json.RawMessage `json:"desiredManifest"`
+		}
+		if json.Unmarshal(metadataJSON, &metadata) != nil || len(metadata.DesiredManifest) == 0 {
+			continue
+		}
+		manifest, err := bridgeprotocol.DecodeManifest(metadata.DesiredManifest, true)
+		if err != nil || manifest.SchemaVersion != bridgeprotocol.ManifestSchemaVersionV2 || manifest.Target.ID != targetID || manifest.Target.Runtime != domain.RuntimeSharedRelay || manifest.RelayGovernance == nil || manifest.RelayGovernance.RelayConfigurationRevisionID != relayRevisionID {
+			continue
+		}
+		_, canonicalHash, err := manifest.Canonical()
+		if err != nil || canonicalHash != manifestHash {
+			continue
+		}
+		var bundle bridgeprotocol.RoutingBundle
+		if bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &bundle) != nil || bundle.Mode != "compatibility" || bundle.RelayConfigurationRevisionID != relayRevisionID {
+			continue
+		}
+		return true, nil
+	}
+	return false, rows.Err()
 }
 
 func relayOperationManifestTx(ctx context.Context, tx pgx.Tx, operationID, relayRevisionID string) (string, string, bridgeprotocol.DesiredManifest, error) {

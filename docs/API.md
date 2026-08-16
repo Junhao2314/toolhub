@@ -192,6 +192,13 @@ checking and do not Apply it. Relay Configuration revisions pin an ordered set o
 exact MCP revisions. Global Policy revisions pin the policy catalog version and
 explicit tool decisions.
 
+The Relay Configuration projection also reports the compatibility migration
+state, pending Contract/Profile review counts, the exact legacy `shared-mcp`
+identity and transition marker, Restore readiness, and a bounded mcpm capability
+view. The capability view exposes only compatibility, the validated runtime
+version, six fixed feature names, and a stable error code; raw Bridge/runtime
+errors are not returned.
+
 Relay Configuration Apply is revision-bound. `POST
 /relay/configuration/prepare-profile-updates` returns the Profiles affected by a
 candidate revision. It creates a candidate only while the current Profile still
@@ -199,10 +206,13 @@ matches its Published predecessor, treats an exact repeated preparation as a
 no-op, and returns `409` instead of replacing an unrelated current draft. `POST
 /relay/configuration/preflight` renders that candidate
 with the exact selected current Profile revisions and returns the target revision
-and routing hash. `POST /relay/configuration/apply` accepts those values and
+and routing hash. Both Preflight and Apply require an explicit `mode` of
+`compatibility` or `enforced`. Enforced Preflight additionally fails closed on
+governance readiness, mcpm capability, or either Claude/Codex native-client
+inspection. `POST /relay/configuration/apply` accepts those values and
 queues a durable `relay_config_apply`; finalization advances the applied Relay
-revision and the selected Published Profile revisions only if every predecessor
-and hash still matches. `POST /mcp/policy/apply` uses the same target-revision
+revision, explicit mode, and selected Published Profile revisions only if every
+predecessor, prior mode, and hash still matches. `POST /mcp/policy/apply` uses the same target-revision
 binding for a durable `policy_apply` operation.
 
 Contract governance is exposed through `GET /relay/contracts`, the durable

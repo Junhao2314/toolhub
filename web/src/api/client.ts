@@ -245,6 +245,24 @@ export interface RelayConfigurationProjection {
   applied: RelayConfigurationRevision;
   mode: "compatibility" | "enforced";
   defaultProfileId: string | null;
+  migration: {
+    state:
+      | "waiting_contract_review"
+      | "profile_metadata_review"
+      | "compatibility_ready"
+      | "enforced";
+    pendingContractReviews: number;
+    ambiguousProfiles: number;
+    legacyProfileId?: string;
+    legacyProfileState: "pending" | "migrated_relay";
+    restorableSnapshot: boolean;
+  };
+  runtimeCapability: {
+    compatible: boolean;
+    runtimeVersion?: string;
+    features: string[];
+    errorCode?: string;
+  };
 }
 
 export interface RelayPreflightDiffItem {

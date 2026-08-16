@@ -314,6 +314,51 @@ type RelayCapabilityResponse struct {
 	RuntimeVersion        string   `json:"runtimeVersion"`
 }
 
+var relayEnforcementFeatures = []string{
+	"profile-session-binding",
+	"tool-filtering",
+	"call-policy",
+	"one-shot-confirmation",
+	"payload-free-observations",
+	"routing-hot-reload",
+}
+
+func RelayEnforcementFeatures() []string {
+	return append([]string(nil), relayEnforcementFeatures...)
+}
+
+func RelayEnforcementCapabilityCompatible(capability RelayCapabilityResponse) bool {
+	version := strings.TrimSpace(capability.RuntimeVersion)
+	if capability.AdminProtocolVersion != 1 || capability.Runtime != "mcpm" || version == "" || len(version) > 64 || strings.IndexFunc(version, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return false
+	}
+	hasRoutingSchema := false
+	for _, version := range capability.RoutingSchemaVersions {
+		if version == 1 {
+			hasRoutingSchema = true
+			break
+		}
+	}
+	if !hasRoutingSchema {
+		return false
+	}
+	features := make(map[string]struct{}, len(capability.Features))
+	for _, feature := range capability.Features {
+		features[feature] = struct{}{}
+	}
+	for _, required := range relayEnforcementFeatures {
+		if _, ok := features[required]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func NativeClientInspectionCompatible(inspection NativeClientInspectionResponse, clientKind string) bool {
+	version := strings.TrimSpace(inspection.Version)
+	return inspection.ClientKind == clientKind && inspection.Supported && inspection.ErrorCode == "" && version != "" && len(version) <= 64 && strings.IndexFunc(version, func(r rune) bool { return r < 0x20 || r == 0x7f }) < 0
+}
+
 type RelayReloadRequest struct {
 	RelayConfigurationRevisionID string          `json:"relayConfigurationRevisionId"`
 	RoutingBundleHash            string          `json:"routingBundleHash"`

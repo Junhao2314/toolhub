@@ -64,6 +64,9 @@ func run(logger *slog.Logger) error {
 	if err := st.BootstrapEnvironment(ctx, cfg.LocalNodeName, cfg.ManagedUsername, cfg.Timezone.String(), cfg.RelayPort); err != nil {
 		return err
 	}
+	if err := st.InitializeRelayMigrationReadiness(ctx); err != nil {
+		return err
+	}
 	bridge, err := bridgeclient.New(cfg.BridgeSocket, cfg.BridgeKey)
 	if err != nil {
 		return err

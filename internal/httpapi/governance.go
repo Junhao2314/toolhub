@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"math"
@@ -28,7 +29,46 @@ func (a *API) relayConfiguration(w http.ResponseWriter, r *http.Request) {
 		a.handleStoreError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, struct {
+		store.RelayConfigurationProjection
+		RuntimeCapability relayRuntimeCapabilityProjection `json:"runtimeCapability"`
+	}{RelayConfigurationProjection: result, RuntimeCapability: a.relayRuntimeCapability(r.Context())})
+}
+
+type relayRuntimeCapabilityProjection struct {
+	Compatible     bool     `json:"compatible"`
+	RuntimeVersion string   `json:"runtimeVersion,omitempty"`
+	Features       []string `json:"features"`
+	ErrorCode      string   `json:"errorCode,omitempty"`
+}
+
+func (a *API) relayRuntimeCapability(ctx context.Context) relayRuntimeCapabilityProjection {
+	result := relayRuntimeCapabilityProjection{Features: []string{}}
+	if a.bridge == nil {
+		result.ErrorCode = bridgeprotocol.ErrTargetUnavailable
+		return result
+	}
+	capability, err := a.bridge.RelayCapability(ctx)
+	if err != nil {
+		result.ErrorCode = bridgeprotocol.BoundedAPIError(err, bridgeprotocol.ErrTargetUnavailable).Code
+		return result
+	}
+	available := make(map[string]struct{}, len(capability.Features))
+	for _, feature := range capability.Features {
+		available[feature] = struct{}{}
+	}
+	for _, feature := range bridgeprotocol.RelayEnforcementFeatures() {
+		if _, ok := available[feature]; ok {
+			result.Features = append(result.Features, feature)
+		}
+	}
+	if bridgeprotocol.RelayEnforcementCapabilityCompatible(capability) {
+		result.Compatible = true
+		result.RuntimeVersion = strings.TrimSpace(capability.RuntimeVersion)
+		return result
+	}
+	result.ErrorCode = bridgeprotocol.ErrMCPMIncompatible
+	return result
 }
 
 func (a *API) saveRelayConfiguration(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +171,7 @@ func invalidOverrideKey(overrides map[string]string) bool {
 type relayApplyInput struct {
 	RevisionID     string   `json:"revisionId"`
 	ProfileIDs     []string `json:"profileIds"`
+	Mode           string   `json:"mode"`
 	TargetRevision string   `json:"targetRevision,omitempty"`
 	RoutingHash    string   `json:"routingHash,omitempty"`
 }
@@ -154,14 +195,20 @@ func (a *API) prepareRelayProfileUpdates(w http.ResponseWriter, r *http.Request)
 
 func (a *API) preflightRelayConfiguration(w http.ResponseWriter, r *http.Request) {
 	var input relayApplyInput
-	if err := decodeJSON(w, r, &input, 16<<10); err != nil || uuid.Validate(input.RevisionID) != nil || !validUUIDList(input.ProfileIDs, 100) {
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil || uuid.Validate(input.RevisionID) != nil || !validUUIDList(input.ProfileIDs, 100) || !validRelayApplyMode(input.Mode) {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", "Relay Configuration preflight request is invalid")
 		return
 	}
-	prepared, err := a.store.PrepareRelayConfigurationApply(r.Context(), input.RevisionID, input.ProfileIDs)
+	prepared, err := a.store.PrepareRelayConfigurationModeApply(r.Context(), input.RevisionID, input.ProfileIDs, input.Mode)
 	if err != nil {
 		a.handleStoreError(w, r, err)
 		return
+	}
+	if input.Mode == "enforced" {
+		if apiErr := validateRelayEnforcementRuntime(r.Context(), a.bridge, prepared.Target.ManagedUsername); apiErr != nil {
+			writeError(w, r, http.StatusConflict, apiErr.Code, apiErr.Message)
+			return
+		}
 	}
 	key, err := requestIdempotencyKey(r)
 	if err != nil {
@@ -184,7 +231,7 @@ func (a *API) preflightRelayConfiguration(w http.ResponseWriter, r *http.Request
 
 func (a *API) applyRelayConfiguration(w http.ResponseWriter, r *http.Request) {
 	var input relayApplyInput
-	if err := decodeJSON(w, r, &input, 16<<10); err != nil || uuid.Validate(input.RevisionID) != nil || !validUUIDList(input.ProfileIDs, 100) || !bridgeprotocol.IsSHA256(input.TargetRevision) || !bridgeprotocol.IsSHA256(input.RoutingHash) {
+	if err := decodeJSON(w, r, &input, 16<<10); err != nil || uuid.Validate(input.RevisionID) != nil || !validUUIDList(input.ProfileIDs, 100) || !validRelayApplyMode(input.Mode) || !bridgeprotocol.IsSHA256(input.TargetRevision) || !bridgeprotocol.IsSHA256(input.RoutingHash) {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", "Relay Configuration Apply request is invalid")
 		return
 	}
@@ -193,13 +240,39 @@ func (a *API) applyRelayConfiguration(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	operation, err := a.store.CreateRelayConfigurationApplyOperation(r.Context(), input.RevisionID, input.ProfileIDs, input.TargetRevision, input.RoutingHash, key)
+	operation, err := a.store.CreateRelayConfigurationModeApplyOperation(r.Context(), input.RevisionID, input.ProfileIDs, input.Mode, input.TargetRevision, input.RoutingHash, key)
 	if err != nil {
 		a.handleStoreError(w, r, err)
 		return
 	}
-	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "relay_configuration_apply", ResourceType: "relay_configuration", ResourceID: input.RevisionID, Outcome: "queued", IPAddress: clientIP(r), Metadata: map[string]any{"operationId": operation.ID, "routingHash": input.RoutingHash, "affectedProfileIds": input.ProfileIDs}})
+	_ = a.store.Audit(r.Context(), domain.AuditEvent{Action: "relay_configuration_apply", ResourceType: "relay_configuration", ResourceID: input.RevisionID, Outcome: "queued", IPAddress: clientIP(r), Metadata: map[string]any{"operationId": operation.ID, "mode": input.Mode, "routingHash": input.RoutingHash, "affectedProfileIds": input.ProfileIDs}})
 	writeJSON(w, http.StatusAccepted, operation)
+}
+
+func validRelayApplyMode(mode string) bool {
+	return mode == "compatibility" || mode == "enforced"
+}
+
+type relayEnforcementRuntimeBridge interface {
+	RelayCapability(context.Context) (bridgeprotocol.RelayCapabilityResponse, error)
+	InspectNativeClient(context.Context, bridgeprotocol.NativeClientInspectionRequest) (bridgeprotocol.NativeClientInspectionResponse, error)
+}
+
+func validateRelayEnforcementRuntime(ctx context.Context, bridge relayEnforcementRuntimeBridge, managedUsername string) *bridgeprotocol.APIError {
+	if bridge == nil {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
+	}
+	capability, err := bridge.RelayCapability(ctx)
+	if err != nil || !bridgeprotocol.RelayEnforcementCapabilityCompatible(capability) {
+		return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
+	}
+	for _, clientKind := range []string{bridgeprotocol.RuntimeClaude, bridgeprotocol.RuntimeCodex} {
+		inspection, err := bridge.InspectNativeClient(ctx, bridgeprotocol.NativeClientInspectionRequest{ManagedUsername: managedUsername, ClientKind: clientKind})
+		if err != nil || !bridgeprotocol.NativeClientInspectionCompatible(inspection, clientKind) {
+			return &bridgeprotocol.APIError{Code: bridgeprotocol.ErrMCPMIncompatible, Message: "mcpm runtime or native clients are incompatible with relay enforcement"}
+		}
+	}
+	return nil
 }
 
 func (a *API) applyGlobalPolicy(w http.ResponseWriter, r *http.Request) {

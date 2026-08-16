@@ -2041,6 +2041,27 @@ td small {
 .relay-revision-strip code { overflow-wrap: anywhere; }
 .relay-revision-strip .restart strong { color: var(--amber); }
 .relay-revision-strip .hot-reload strong { color: var(--green); }
+.relay-readiness-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.relay-readiness-strip > div {
+  min-width: 0;
+  min-height: 94px;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+  padding: 12px 14px;
+  border-left: 1px solid var(--border);
+}
+.relay-readiness-strip > div:last-child { border-right: 1px solid var(--border); }
+.relay-readiness-strip span,
+.relay-readiness-strip small { color: var(--text-muted); font-size: 12px; }
+.relay-readiness-strip strong,
+.relay-readiness-strip small { overflow-wrap: anywhere; }
+.relay-readiness-strip .segments { width: fit-content; }
 .relay-editor {
   padding: 11px 0;
   border-top: 1px solid var(--border-subtle);
@@ -2342,6 +2363,7 @@ td small {
   }
   .profile-rule-list > div > .field { grid-column: 1 / -1; grid-row: 2; }
   .relay-revision-strip,
+  .relay-readiness-strip,
   .contract-change-grid,
   .confirmation-list dl { grid-template-columns: 1fr; }
   .relay-server-options { grid-template-columns: 1fr; }

@@ -22,6 +22,7 @@ import {
   type PendingSecretBinding,
   type Profile,
   type ProfileRevision,
+  type RelayConfigurationProjection,
   type Skill,
   type Target,
 } from "../api/client";
@@ -66,12 +67,13 @@ interface PreflightItem {
 export default function Profiles() {
   const { t } = useI18n();
   const state = useData(async () => {
-    const [profiles, skills, servers, targets, contracts] = await Promise.all([
+    const [profiles, skills, servers, targets, contracts, relayConfiguration] = await Promise.all([
       api.list<Profile>("/profiles?includeArchived=true"),
       api.list<Skill>("/skills"),
       api.list<MCPServer>("/mcp/servers"),
       api.list<Target>("/targets"),
       api.request<ContractGovernanceProjection>("/relay/contracts"),
+      api.get<RelayConfigurationProjection>("/relay/configuration"),
     ]);
     return {
       profiles: profiles.items,
@@ -79,6 +81,7 @@ export default function Profiles() {
       servers: servers.items,
       targets: targets.items,
       contracts,
+      relayConfiguration,
     };
   }, []);
   const [selected, setSelected] = useState<Profile | null>(null);
@@ -96,8 +99,15 @@ export default function Profiles() {
   if (state.loading) return <Loading />;
   if (state.error || !state.data)
     return <ErrorNotice message={state.error} retry={state.reload} />;
-  const selectedProfile = selected
-    ? (state.data.profiles.find((profile) => profile.id === selected.id) ??
+  const hiddenLegacyProfileID =
+    state.data.relayConfiguration.migration.legacyProfileState === "migrated_relay"
+      ? state.data.relayConfiguration.migration.legacyProfileId
+      : undefined;
+  const visibleProfiles = state.data.profiles.filter(
+    (profile) => profile.id !== hiddenLegacyProfileID,
+  );
+  const selectedProfile = selected && selected.id !== hiddenLegacyProfileID
+    ? (visibleProfiles.find((profile) => profile.id === selected.id) ??
       selected)
     : null;
   const reloadSelected = () => state.reload();
@@ -186,7 +196,7 @@ export default function Profiles() {
         }
       />
       {notice && <div className="inline-notice">{notice}</div>}
-      {state.data.profiles.length === 0 ? (
+      {visibleProfiles.length === 0 ? (
         <Empty title={t("No Profiles")} />
       ) : (
         <div className="table-scroll">
@@ -202,7 +212,7 @@ export default function Profiles() {
               </tr>
             </thead>
             <tbody>
-              {state.data.profiles.map((profile) => {
+              {visibleProfiles.map((profile) => {
                 const archived = Boolean(profile.archivedAt);
                 return (
                 <tr

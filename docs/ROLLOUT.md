@@ -71,6 +71,30 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
    status, Desktop Commander config, Grok config info, and Trellis UI info tools.
 8. Wait through one 30-minute full member-health cadence and repeat the check.
 
+### Relay Governance Transition
+
+1. Start in `compatibility`; startup may identify the exact legacy
+   `shared-mcp` Profile but must not observe, accept, publish, Apply, or create an
+   operation.
+2. Observe and accept every current Contract, then resolve every Profile whose
+   client/category metadata is ambiguous. First Contract acceptance may create
+   candidate Profile revisions but must not publish them.
+3. Preflight `enforced` and verify capability checks run before delivery in the
+   fixed order mcpm, Claude, Codex. Missing features, unsupported clients, an
+   unhealthy/non-v2 active Relay snapshot, missing backup, or unreviewed state
+   must fail closed.
+4. Run session routing canaries in order: Claude explicit Profile, Codex
+   explicit Profile, missing Profile empty/default behavior, invalid Profile hard
+   failure, and two concurrent sessions sharing exactly one upstream process.
+5. Apply `enforced`. Only after a healthy Applied snapshot has a Restore backup
+   may the exact legacy Profile be marked `migrated_relay` and hidden from the
+   ordinary Profile list. Keep its history, Bundle references, and Secret
+   bindings.
+6. Roll back through normal Preflight/Apply to the previous `compatibility`
+   routing bundle. Confirm upstreams are not duplicated, expired grants do not
+   revive, Contract history remains, and old native clients regain the complete
+   catalog.
+
 ### Salt Minion
 
 1. Verify the selected accepted non-critical minion is online and reports

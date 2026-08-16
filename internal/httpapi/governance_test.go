@@ -89,6 +89,8 @@ func TestGovernanceConfigurationAndPolicyValidation(t *testing.T) {
 		{name: "relay unknown field", method: http.MethodPut, path: "/api/v1/relay/configuration", body: `{"revision":1,"mcpServerIds":[],"mcpRevisionIds":{},"metadata":{},"secretValue":"leak"}`},
 		{name: "relay negative revision", method: http.MethodPut, path: "/api/v1/relay/configuration", body: `{"revision":-1,"mcpServerIds":[],"mcpRevisionIds":{},"metadata":{}}`},
 		{name: "relay invalid uuid", method: http.MethodPut, path: "/api/v1/relay/configuration", body: `{"revision":1,"mcpServerIds":["not-a-uuid"],"mcpRevisionIds":{"not-a-uuid":"also-invalid"},"metadata":{}}`},
+		{name: "relay preflight missing mode", method: http.MethodPost, path: "/api/v1/relay/configuration/preflight", body: `{"revisionId":"11111111-1111-4111-8111-111111111111","profileIds":[]}`},
+		{name: "relay preflight invalid mode", method: http.MethodPost, path: "/api/v1/relay/configuration/preflight", body: `{"revisionId":"11111111-1111-4111-8111-111111111111","profileIds":[],"mode":"automatic"}`},
 		{name: "policy unknown field", method: http.MethodPut, path: "/api/v1/mcp/policy", body: `{"revision":1,"catalogVersion":1,"explicitOverrides":{},"unclassifiedMutating":"confirm","reviewedReadOnly":"allow","arguments":{}}`},
 		{name: "policy negative revision", method: http.MethodPut, path: "/api/v1/mcp/policy", body: `{"revision":-1,"catalogVersion":1,"explicitOverrides":{},"unclassifiedMutating":"confirm","reviewedReadOnly":"allow"}`},
 		{name: "policy invalid decision", method: http.MethodPut, path: "/api/v1/mcp/policy", body: `{"revision":1,"catalogVersion":1,"explicitOverrides":{},"unclassifiedMutating":"execute","reviewedReadOnly":"allow"}`},
@@ -114,6 +116,50 @@ func TestGovernanceConfigurationAndPolicyValidation(t *testing.T) {
 		t.Fatalf("create policy revision status=%d body=%s", createdPolicy.Code, createdPolicy.Body.String())
 	}
 	assertGovernanceError(t, harness.request(t, http.MethodPut, "/api/v1/mcp/policy", `{"revision":1,"catalogVersion":1,"explicitOverrides":{},"unclassifiedMutating":"confirm","reviewedReadOnly":"deny"}`), http.StatusConflict, "state_conflict")
+}
+
+func TestRelayConfigurationProjectionIncludesBoundedRuntimeCapability(t *testing.T) {
+	harness := newGovernanceHarness(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/relay/governance/capability" {
+			http.NotFound(w, r)
+			return
+		}
+		writeJSON(w, http.StatusOK, bridgeprotocol.RelayCapabilityResponse{
+			AdminProtocolVersion: 1,
+			Features: []string{
+				"profile-session-binding", "tool-filtering", "call-policy",
+				"one-shot-confirmation", "payload-free-observations", "routing-hot-reload",
+				"untrusted-extra-feature",
+			},
+			RoutingSchemaVersions: []int{1},
+			Runtime:               "mcpm",
+			RuntimeVersion:        "2.15.0-toolhub.1",
+		})
+	}))
+
+	response := harness.request(t, http.MethodGet, "/api/v1/relay/configuration", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("relay projection status=%d body=%s", response.Code, response.Body.String())
+	}
+	var projection struct {
+		RuntimeCapability struct {
+			Compatible     bool     `json:"compatible"`
+			RuntimeVersion string   `json:"runtimeVersion"`
+			Features       []string `json:"features"`
+			ErrorCode      string   `json:"errorCode"`
+		} `json:"runtimeCapability"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &projection); err != nil {
+		t.Fatal(err)
+	}
+	capability := projection.RuntimeCapability
+	if !capability.Compatible || capability.RuntimeVersion != "2.15.0-toolhub.1" || capability.ErrorCode != "" {
+		t.Fatalf("runtime capability=%+v", capability)
+	}
+	wantFeatures := "profile-session-binding,tool-filtering,call-policy,one-shot-confirmation,payload-free-observations,routing-hot-reload"
+	if got := strings.Join(capability.Features, ","); got != wantFeatures {
+		t.Fatalf("runtime features=%q want=%q", got, wantFeatures)
+	}
 }
 
 func TestRelayContractProjectionIncludesAppliedPolicyClassification(t *testing.T) {
@@ -184,7 +230,7 @@ func TestGovernanceApplyRoutesCreateBoundDurableOperations(t *testing.T) {
 	if prepared.Code != http.StatusOK || !strings.Contains(prepared.Body.String(), `"items":[]`) {
 		t.Fatalf("prepare status=%d body=%s", prepared.Code, prepared.Body.String())
 	}
-	preflight := harness.request(t, http.MethodPost, "/api/v1/relay/configuration/preflight", `{"revisionId":"`+relayDraft.ID+`","profileIds":[]}`)
+	preflight := harness.request(t, http.MethodPost, "/api/v1/relay/configuration/preflight", `{"revisionId":"`+relayDraft.ID+`","profileIds":[],"mode":"compatibility"}`)
 	if preflight.Code != http.StatusOK {
 		t.Fatalf("preflight status=%d body=%s", preflight.Code, preflight.Body.String())
 	}
@@ -197,9 +243,24 @@ func TestGovernanceApplyRoutesCreateBoundDurableOperations(t *testing.T) {
 	if preflightResponse.RoutingHash == "" || preflightManifest.RelayGovernance == nil || preflightManifest.RelayGovernance.RoutingHash != preflightResponse.RoutingHash {
 		t.Fatalf("preflight routing hash was not bound: response=%+v manifest=%+v", preflightResponse, preflightManifest.RelayGovernance)
 	}
+	var routingBundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(preflightManifest.RelayGovernance.RoutingBundle, &routingBundle); err != nil || routingBundle.Mode != "compatibility" {
+		t.Fatalf("preflight routing mode=%q err=%v", routingBundle.Mode, err)
+	}
 
-	relayApply := harness.request(t, http.MethodPost, "/api/v1/relay/configuration/apply", `{"revisionId":"`+relayDraft.ID+`","profileIds":[],"targetRevision":"`+targetRevision+`","routingHash":"`+preflightResponse.RoutingHash+`"}`)
+	relayApply := harness.request(t, http.MethodPost, "/api/v1/relay/configuration/apply", `{"revisionId":"`+relayDraft.ID+`","profileIds":[],"mode":"compatibility","targetRevision":"`+targetRevision+`","routingHash":"`+preflightResponse.RoutingHash+`"}`)
 	relayOperationID := assertQueuedGovernanceOperation(t, relayApply, "relay_config_apply")
+	relayOperation, err := harness.store.Operation(ctx, relayOperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var relayMetadata map[string]any
+	if err := json.Unmarshal(relayOperation.Metadata, &relayMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if relayMetadata["mode"] != "compatibility" {
+		t.Fatalf("relay operation mode=%v", relayMetadata["mode"])
+	}
 	if err := harness.store.CancelOperation(ctx, relayOperationID); err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +304,7 @@ func TestGovernancePreflightPreservesBrowserIdempotencyKey(t *testing.T) {
 	}
 
 	wantKey := strings.Repeat("k", 200)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/relay/configuration/preflight", strings.NewReader(`{"revisionId":"`+relayDraft.ID+`","profileIds":[]}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/relay/configuration/preflight", strings.NewReader(`{"revisionId":"`+relayDraft.ID+`","profileIds":[],"mode":"compatibility"}`))
 	request.AddCookie(&http.Cookie{Name: "toolhub_session", Value: harness.sessionToken})
 	request.Header.Set("X-CSRF-Token", harness.csrfToken)
 	request.Header.Set("Idempotency-Key", wantKey)
@@ -376,7 +437,7 @@ func TestGovernanceRelayPreflightRejectsInvalidBridgeResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	response := harness.request(t, http.MethodPost, "/api/v1/relay/configuration/preflight", `{"revisionId":"`+relayDraft.ID+`","profileIds":[]}`)
+	response := harness.request(t, http.MethodPost, "/api/v1/relay/configuration/preflight", `{"revisionId":"`+relayDraft.ID+`","profileIds":[],"mode":"compatibility"}`)
 	assertGovernanceError(t, response, http.StatusBadGateway, "relay_response_invalid")
 }
 

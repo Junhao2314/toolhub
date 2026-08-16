@@ -28,8 +28,8 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 	}
 	switch kind {
 	case "relay_config_apply":
-		var appliedRevisionID, defaultProfileID string
-		if err := st.pool.QueryRow(ctx, `SELECT applied_revision_id::text,coalesce(default_profile_id::text,'') FROM relay_configuration_state WHERE singleton`).Scan(&appliedRevisionID, &defaultProfileID); err != nil {
+		var appliedRevisionID, defaultProfileID, mode string
+		if err := st.pool.QueryRow(ctx, `SELECT applied_revision_id::text,coalesce(default_profile_id::text,''),mode FROM relay_configuration_state WHERE singleton`).Scan(&appliedRevisionID, &defaultProfileID, &mode); err != nil {
 			t.Fatal(err)
 		}
 		if metadata["expectedAppliedRelayConfigurationRevisionId"] == nil {
@@ -43,6 +43,12 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 		}
 		if metadata["expectedPublishedProfileRevisions"] == nil {
 			metadata["expectedPublishedProfileRevisions"] = map[string]string{}
+		}
+		if metadata["mode"] == nil {
+			metadata["mode"] = mode
+		}
+		if metadata["expectedMode"] == nil {
+			metadata["expectedMode"] = mode
 		}
 	case "policy_apply":
 		var appliedRevisionID string
@@ -72,6 +78,7 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 	switch kind {
 	case "relay_config_apply":
 		if revisionID, _ := metadata["revisionId"].(string); revisionID != "" {
+			candidate.Mode, _ = metadata["mode"].(string)
 			candidate.RelayConfigurationRevisionID = revisionID
 			candidate.PublishedProfileRevisions = testStringMap(metadata["affectedProfileRevisions"])
 		} else if defaultProfileID, found := metadata["defaultProfileId"].(string); found {
