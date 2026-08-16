@@ -61,8 +61,8 @@ The script enforces these checks:
 - A live `/healthz` check, `scripts/smoke-api.sh`, and the complete serial
   Playwright suite (desktop and mobile, ten tests). E2E credentials and a
   reachable backend are required; missing values are failures.
-- `git diff --check`, suspicious secret material in added lines, generated or
-  runtime artifacts, and any leftover file under the ignored `plans/` folder.
+- `git diff --check`, suspicious secret material in added lines, and generated or
+  runtime artifacts.
 
 The script uses `TOOLHUB_GATES_RACE=auto` by default. High-risk paths trigger
 the race gate automatically; set it to `always` to run the race suite for a

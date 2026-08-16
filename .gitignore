@@ -23,15 +23,8 @@ mcpm/.mcp/
 mcpm/local/
 toolhub-repository-migration/
 coverage/
-plans/
-!docs/superpowers/plans/
-!docs/superpowers/plans/*.md
 playwright-report/
 test-results/
 *.log
 *.tmp
 .DS_Store
-# superpowers brainstorm runtime state (never commit tokens/pids)
-.superpowers/brainstorm/.last-port
-.superpowers/brainstorm/.last-token
-.superpowers/brainstorm/*/state/

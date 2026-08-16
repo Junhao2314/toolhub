@@ -90,18 +90,6 @@ check_diff_hygiene() {
     esac
   done
 
-  local plan_count=0
-  if [[ -d plans ]]; then
-    plan_count="$(find plans -type f -print | wc -l | tr -d ' ')"
-  fi
-  if [[ "$plan_count" -gt 0 ]]; then
-    printf '%s\n' 'plans/ contains completed/ignored plan files; remove them before committing.' >&2
-    while IFS= read -r path; do
-      printf '  %s\n' "$path" >&2
-    done < <(find plans -type f -print | sort)
-    return 1
-  fi
-
   if ((${#bad_paths[@]} != 0)); then
     printf '%s\n' 'generated, runtime, or environment files are in the diff:' >&2
     printf '  %s\n' "${bad_paths[@]}" >&2
