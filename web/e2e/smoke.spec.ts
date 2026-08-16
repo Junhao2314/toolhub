@@ -41,6 +41,22 @@ function compatibilityRelayConfiguration() {
   }
 }
 
+test('browser UI loads without external resource dependencies', async ({ page }) => {
+  const resourceURLs: string[] = []
+  page.on('request', (request) => {
+    if (/^https?:\/\//.test(request.url())) resourceURLs.push(request.url())
+  })
+
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible()
+
+  const appOrigin = new URL(page.url()).origin
+  const externalOrigins = [...new Set(resourceURLs
+    .map((value) => new URL(value).origin)
+    .filter((origin) => origin !== appOrigin))]
+  expect(externalOrigins).toEqual([])
+})
+
 test('username login and generation-2 navigation render without overlap', async ({ page }, testInfo) => {
   const username = process.env.TOOLHUB_E2E_USERNAME
   const password = process.env.TOOLHUB_E2E_PASSWORD
