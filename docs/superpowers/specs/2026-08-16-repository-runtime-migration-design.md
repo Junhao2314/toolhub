@@ -75,8 +75,10 @@ installer 必须验证：
 
 1. 路径是绝对、canonical、非 symlink directory。
 2. Bridge binary 是 root-owned regular executable。
-3. mcpm executable 是 root-owned regular executable，其 shebang/interpreter
-   均位于 mcpm repository `.venv`。
+3. mcpm launcher 是 mcpm repository `.venv` 内的 root-owned regular
+   executable，shebang 固定指向同一 `.venv` 内的 Python launcher；解析
+   symlink 后的 interpreter 必须是 approved uv-managed Python prefix
+   `/root/.local/share/uv/python` 下的 root-owned regular executable。
 4. 以 managed user 在 5 秒 timeout 内运行 capability contract，并验证
    admin protocol 1、routing schema 1 和全部 required features。
 5. unit 只包含由 installer 解析出的 canonical fixed paths；Browser、Bridge
@@ -148,7 +150,9 @@ Bridge key、journal 或 backups；PostgreSQL logical dump覆盖数据库恢复�
 
 只有 Bridge、relay、ToolHub 和 smoke 全部通过后才清理：
 
-- `pipx uninstall mcpm`，保留 pipx 管理的其他 package（例如 `uv`）。
+- `pipx uninstall mcpm`，保留 pipx 管理的其他 package（例如 `uv`），并保留
+  `/root/.local/share/uv`，因为 repository `.venv` 的 Python interpreter
+  解析到该 uv-managed runtime。
 - 删除 `/usr/bin/mcpm` 手工 launcher和遗留 `/root/.local/bin/mcpm`。
 - 删除 `/usr/local/sbin/toolhub-bridge` 与
   `/usr/local/sbin/toolhub-relay-port-check`。
@@ -181,8 +185,9 @@ installation重启，并保持原 Compose stack与volume。
 
 1. `toolhub-bridge.service` 与 `toolhub-mcpm-relay.service` active，MainPID
    executable均解析到 `/root/docker` 下目标。
-2. 只有一套 mcpm Python environment；pipx inventory不含 mcpm，
-   `/usr/bin/mcpm` 与 `/root/.local/bin/mcpm` 不存在。
+2. 只有一套 mcpm environment；pipx inventory不含 mcpm，`uv` 及其
+   `/root/.local/share/uv` managed Python 保留，`/usr/bin/mcpm` 与
+   `/root/.local/bin/mcpm` 不存在。
 3. `/usr/local/sbin/toolhub-bridge`、legacy Agent unit/binary/config/state不再
    存在。
 4. `18481` 不监听；两个遗留测试 containers和匿名 volumes不存在。
