@@ -8,4 +8,12 @@ test-results
 web/node_modules
 web/dist
 cmd/toolhub/dist
+mcpm/.venv
+mcpm/tests
+mcpm/tmp
+mcpm/logs
+mcpm/.pytest_cache
+mcpm/.ruff_cache
+mcpm/**/__pycache__
+mcpm/test-results
 *.log

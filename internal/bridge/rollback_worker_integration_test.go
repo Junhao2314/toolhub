@@ -440,7 +440,14 @@ func rollbackManifest(t *testing.T, target bridgeprotocol.Target, port int, serv
 			AcceptedContractRevisionID: &contractID, AcceptedContractHash: &contractHash,
 			Tools: []bridgeprotocol.RoutingToolDTO{{ToolID: toolID, Name: "read_all", InputSchema: map[string]any{"type": "object"}, OutputSchema: map[string]any{}, Annotations: map[string]any{}, GlobalDecision: "allow", ReasonCodes: []string{}}},
 		}},
-		Profiles: []bridgeprotocol.PublishedProfileDTO{},
+		DefaultProfileID: func() *string { value := "00000000-0000-0000-0000-000000000300"; return &value }(),
+		Profiles: []bridgeprotocol.PublishedProfileDTO{{
+			ProfileID: "00000000-0000-0000-0000-000000000300", ProfileRevisionID: "00000000-0000-0000-0000-000000000301", ProfileRevisionHash: strings.Repeat("d", 64), ProfileName: "coding", ClientKind: bridgeprotocol.RuntimeClaude,
+			Servers: []bridgeprotocol.ProfileServerRoutingDTO{{
+				ServerID: server.ID, MCPConfigRevisionID: server.CurrentRevisionID, AcceptedContractRevisionID: &contractID,
+				VisibilityMode: "all_accepted", ToolOverrides: []bridgeprotocol.ToolVisibilityOverrideDTO{}, ToolRules: []bridgeprotocol.ToolPolicyRuleDTO{},
+			}},
+		}},
 	}
 	routingBody, routingHash, err := bundle.Canonical()
 	if err != nil {

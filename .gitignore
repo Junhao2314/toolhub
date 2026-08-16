@@ -1,5 +1,6 @@
 .env
 .env.docker
+.migration.env
 web/node_modules/
 web/dist/
 web/*.tsbuildinfo
@@ -8,6 +9,19 @@ web/vite.config.d.ts
 cmd/toolhub/dist/*
 !cmd/toolhub/dist/placeholder.txt
 bin/
+mcpm/.venv/
+mcpm/tests/
+mcpm/tmp/
+mcpm/logs/
+mcpm/.pytest_cache/
+mcpm/.ruff_cache/
+mcpm/**/__pycache__/
+mcpm/*.egg-info/
+mcpm/test-results/
+mcpm/.env*
+mcpm/.mcp/
+mcpm/local/
+toolhub-repository-migration/
 coverage/
 plans/
 !docs/superpowers/plans/

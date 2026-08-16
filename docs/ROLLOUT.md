@@ -56,7 +56,7 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
 
 ### Local Shared Relay
 
-1. Verify `/usr/bin/mcpm --version` and that port `6276` (or the configured
+1. Verify `/root/docker/toolhub/mcpm/.venv/bin/mcpm toolhub contract --json` and that port `6276` (or the configured
    fixed port) is free.
 2. Apply a Profile to `local/shared-relay`.
 3. Connect at least one Claude, Codex, and local Hermes client to the same endpoint.
@@ -86,7 +86,7 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
    must fail closed before delivery.
 4. Verify that final canary against the candidate routing bundle: Claude
    explicit Profile catalog, Codex explicit Profile catalog, missing Profile
-   empty/default behavior, unknown Profile `profile_unknown` failure, and two
+   default all-tools behavior, unknown Profile `profile_unknown` failure, and two
    concurrent sessions with every upstream process count still exactly one.
 5. Apply `enforced`. Only after a healthy Applied snapshot has a Restore backup
    may the exact legacy Profile be marked `migrated_relay` and hidden from the

@@ -20,6 +20,7 @@ const (
 	GovernanceMaxDepth        = 5
 	GovernanceMaxRoutingDepth = 64
 	GovernanceMaxItems        = 10000
+	GovernanceMaxStringBytes  = 8 << 10
 )
 
 type RoutingBundle struct {
@@ -451,21 +452,8 @@ func ValidateRelaySessionCanaryResponse(bundle RoutingBundle, routingHash string
 		}
 	}
 
-	if bundle.DefaultProfileID == nil {
-		if response.MissingProfile.Behavior != "empty" || response.MissingProfile.ProfileID != nil || response.MissingProfile.ProfileRevisionID != nil || response.MissingProfile.ToolCount != 0 {
-			return errors.New("session canary missing Profile behavior is invalid")
-		}
-	} else {
-		var defaultProfile *PublishedProfileDTO
-		for index := range bundle.Profiles {
-			if bundle.Profiles[index].ProfileID == *bundle.DefaultProfileID {
-				defaultProfile = &bundle.Profiles[index]
-				break
-			}
-		}
-		if defaultProfile == nil || response.MissingProfile.Behavior != "default" || response.MissingProfile.ProfileID == nil || *response.MissingProfile.ProfileID != defaultProfile.ProfileID || response.MissingProfile.ProfileRevisionID == nil || *response.MissingProfile.ProfileRevisionID != defaultProfile.ProfileRevisionID || response.MissingProfile.ToolCount != relayCanaryToolCount(bundle, defaultProfile) {
-			return errors.New("session canary default Profile behavior is invalid")
-		}
+	if response.MissingProfile.Behavior != "default" || response.MissingProfile.ProfileID != nil || response.MissingProfile.ProfileRevisionID != nil || response.MissingProfile.ToolCount != relayCanaryDefaultToolCount(bundle) {
+		return errors.New("session canary default Profile behavior is invalid")
 	}
 
 	if len(response.UpstreamProcesses) != len(bundle.Servers) {
@@ -516,18 +504,38 @@ func relayCanaryToolCount(bundle RoutingBundle, profile *PublishedProfileDTO) in
 	return count
 }
 
+func relayCanaryDefaultToolCount(bundle RoutingBundle) int {
+	count := 0
+	for _, server := range bundle.Servers {
+		for _, tool := range server.Tools {
+			if !tool.Paused && tool.GlobalDecision != "deny" {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 type RelayAdminProfileRevision struct {
 	ProfileID           string `json:"profileId"`
 	ProfileRevisionID   string `json:"profileRevisionId"`
 	ProfileRevisionHash string `json:"profileRevisionHash"`
 }
 
+type RelayAdminConfirmationCounts struct {
+	Pending int `json:"pending"`
+	Grants  int `json:"grants"`
+}
+
 type RelayAdminStatus struct {
-	Mode                         string                      `json:"mode"`
-	RelayConfigurationRevisionID string                      `json:"relayConfigurationRevisionId"`
-	GlobalPolicyRevisionID       string                      `json:"globalPolicyRevisionId"`
-	RoutingBundleHash            string                      `json:"routingBundleHash"`
-	PublishedProfileRevisions    []RelayAdminProfileRevision `json:"publishedProfileRevisions"`
+	Mode                         string                       `json:"mode"`
+	RelayConfigurationRevisionID string                       `json:"relayConfigurationRevisionId"`
+	GlobalPolicyRevisionID       string                       `json:"globalPolicyRevisionId"`
+	RoutingBundleHash            string                       `json:"routingBundleHash"`
+	PublishedProfileRevisions    []RelayAdminProfileRevision  `json:"publishedProfileRevisions"`
+	Confirmations                RelayAdminConfirmationCounts `json:"confirmations"`
+	ObservationBootID            string                       `json:"observationBootId"`
+	ObservationCount             int                          `json:"observationCount"`
 }
 
 type ContractToolDTO struct {
@@ -712,7 +720,7 @@ func validateGovernanceValue(value any, depth int, items *int, maxDepth int, sch
 			}
 		}
 	case string:
-		if len(typed) > 4096 {
+		if len(typed) > GovernanceMaxStringBytes {
 			return errors.New("governance string is too long")
 		}
 	}

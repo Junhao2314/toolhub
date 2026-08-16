@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
 )
@@ -107,7 +108,7 @@ func (f *fakeMCPMAdmin) SessionCanary(_ context.Context, input bridgeprotocol.Re
 	for _, server := range bundle.Servers {
 		processes = append(processes, bridgeprotocol.RelaySessionCanaryProcess{ServerID: server.ServerID, ProcessCount: 1})
 	}
-	return bridgeprotocol.RelaySessionCanaryResponse{RoutingBundleHash: input.RoutingBundleHash, Profiles: profiles, MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty"}, InvalidProfileErrorCode: "profile_unknown", ConcurrentSessionCount: 2, UpstreamProcesses: processes}, nil
+	return bridgeprotocol.RelaySessionCanaryResponse{RoutingBundleHash: input.RoutingBundleHash, Profiles: profiles, MissingProfile: bridgeprotocol.RelaySessionCanaryMissing{Behavior: "default"}, InvalidProfileErrorCode: "profile_unknown", ConcurrentSessionCount: 2, UpstreamProcesses: processes}, nil
 }
 func (f *fakeMCPMAdmin) ReloadRouting(context.Context) (bridgeprotocol.RelayAdminStatus, error) {
 	index := f.reloadCalls
@@ -171,7 +172,7 @@ func (f *fakeMCPMAdmin) configureManifest(t *testing.T, manifest bridgeprotocol.
 
 func TestRelayReconcileNoOpCreatesNoBackup(t *testing.T) {
 	manager, controller, user, target, port := relayFixture(t, true)
-	manifest := relayManifest(target, port, "https://example.invalid/one")
+	manifest := relayManifestV2(t, target, port, "https://example.invalid/one")
 	first := applyRelay(t, manager, user, manifest, "apply", false)
 	if first.BackupID == "" {
 		t.Fatal("explicit Apply did not create a backup")
@@ -192,7 +193,7 @@ func TestRelayReconcileNoOpCreatesNoBackup(t *testing.T) {
 
 func TestRelayPausedReconcileRepairsConfigWithoutRestart(t *testing.T) {
 	manager, controller, user, target, port := relayFixture(t, true)
-	manifest := relayManifest(target, port, "https://example.invalid/one")
+	manifest := relayManifestV2(t, target, port, "https://example.invalid/one")
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
 	writeTestFile(t, paths.MCPMRegistry, []byte(`{"server":{"profile_tags":["toolhub"],"url":"https://drift.invalid","transport":"http"}}`))
 	writeTestFile(t, paths.ClaudeConfig, []byte(`{"mcpServers":{"toolhub-relay":{"type":"http","url":"http://127.0.0.1:1/mcp"}}}`))
@@ -291,9 +292,7 @@ func TestRelayProfileOnlyApplyHotReloadsWithoutRestart(t *testing.T) {
 
 func TestRelayFirstGovernanceDeliveryRestartsInsteadOfHotReload(t *testing.T) {
 	manager, controller, user, target, port := relayFixture(t, true)
-	legacy := relayManifest(target, port, "https://example.invalid/one")
-	applyRelay(t, manager, user, legacy, "apply", false)
-	governed := withRelayGovernance(t, legacy, "00000000-0000-0000-0000-000000000010", strings.Repeat("c", 64), "00000000-0000-0000-0000-000000000020", strings.Repeat("d", 64))
+	governed := relayManifestV2(t, target, port, "https://example.invalid/one")
 	admin := manager.Admin.(*fakeMCPMAdmin)
 	controller.actions = nil
 	admin.reloadCalls = 0
@@ -393,7 +392,7 @@ func TestRelayBackupRecordsRoutingFileMetadata(t *testing.T) {
 
 func TestRelayApplyWriteFailureRollsBackConfiguration(t *testing.T) {
 	manager, _, user, target, port := relayFixture(t, true)
-	firstManifest := relayManifest(target, port, "https://example.invalid/one")
+	firstManifest := relayManifestV2(t, target, port, "https://example.invalid/one")
 	applyRelay(t, manager, user, firstManifest, "apply", false)
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
 	before, err := backupRelayFiles(paths, manager.EnvironmentFile)
@@ -402,7 +401,7 @@ func TestRelayApplyWriteFailureRollsBackConfiguration(t *testing.T) {
 	}
 	manager.EnvironmentFile = filepath.Join("/proc", "toolhub-relay-env-"+uuid.NewString())
 	current, _ := (&Manager{}).scanRelay(paths)
-	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: relayManifest(target, port, "https://example.invalid/two")}
+	request := bridgeprotocol.CommitRequest{OperationID: uuid.NewString(), OperationKind: "apply", Target: target, ExpectedRevision: current.Revision, Manifest: relayManifestV2(t, target, port, "https://example.invalid/two")}
 	if _, err := manager.Apply(context.Background(), user, request); err == nil {
 		t.Fatal("Apply unexpectedly succeeded with an unwritable environment path")
 	}
@@ -429,7 +428,7 @@ func TestRelayApplyWaitsForHealthReadiness(t *testing.T) {
 		return healthyRelayResponse(request)
 	})}
 
-	result := applyRelay(t, manager, user, relayManifest(target, port, "https://example.invalid/one"), "apply", false)
+	result := applyRelay(t, manager, user, relayManifestV2(t, target, port, "https://example.invalid/one"), "apply", false)
 	if result.Health != bridgeprotocol.HealthHealthy || readinessAttempts != 3 {
 		t.Fatalf("Apply result=%+v health attempts=%d", result, readinessAttempts)
 	}
@@ -437,9 +436,9 @@ func TestRelayApplyWaitsForHealthReadiness(t *testing.T) {
 
 func TestRelayRestorePinsSelectedBackupContent(t *testing.T) {
 	manager, _, user, target, port := relayFixture(t, true)
-	firstManifest := relayManifest(target, port, "https://example.invalid/one")
+	firstManifest := relayManifestV2(t, target, port, "https://example.invalid/one")
 	applyRelay(t, manager, user, firstManifest, "apply", false)
-	second := applyRelay(t, manager, user, relayManifest(target, port, "https://example.invalid/two"), "apply", false)
+	second := applyRelay(t, manager, user, relayManifestV2(t, target, port, "https://example.invalid/two"), "apply", false)
 	paths, _ := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
 	current, _ := (&Manager{}).scanRelay(paths)
 	manager.readinessInterval = time.Millisecond
@@ -506,10 +505,10 @@ func TestRelayRestoreRuntimeFailureRollsBackFilesAndOldProcess(t *testing.T) {
 
 func TestRelayRestorePostWriteScanFailureRestoresOldProcessAndPort(t *testing.T) {
 	manager, controller, user, target, requestedPort := relayFixture(t, true)
-	first := relayManifest(target, requestedPort, "https://example.invalid/one")
+	first := relayManifestV2(t, target, requestedPort, "https://example.invalid/one")
 	applyRelay(t, manager, user, first, "apply", false)
 	oldPort := requestedPort + 1
-	second := relayManifest(target, oldPort, "https://example.invalid/two")
+	second := relayManifestV2(t, target, oldPort, "https://example.invalid/two")
 	selected := applyRelay(t, manager, user, second, "apply", false)
 	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
 	if err != nil {
@@ -582,7 +581,7 @@ func TestRelayApplyReplacesHermesMCPWithSharedAnchor(t *testing.T) {
 	}
 	writeTestFile(t, paths.HermesConfig, []byte("theme: dark\nmcp_servers:\n  old-server:\n    url: https://old.invalid/mcp\n  another-server:\n    command: old\n"))
 
-	manifest := relayManifest(target, port, "https://example.invalid/one")
+	manifest := relayManifestV2(t, target, port, "https://example.invalid/one")
 	result := applyRelay(t, manager, user, manifest, "apply", false)
 	if result.BackupID == "" {
 		t.Fatalf("Apply did not create a relay backup: %+v", result)
@@ -602,7 +601,7 @@ func TestRelayApplyReplacesHermesMCPWithSharedAnchor(t *testing.T) {
 		t.Fatalf("Hermes MCP entries were not mirrored: %+v", servers)
 	}
 	anchor, ok := servers[RelayAnchor].(map[string]any)
-	wantURL := "http://127.0.0.1:" + strconv.Itoa(port) + "/mcp"
+	wantURL := relayClientURL(port, "coding")
 	if !ok || anchor["url"] != wantURL || anchor["enabled"] != true {
 		t.Fatalf("unexpected Hermes relay anchor: %+v", servers[RelayAnchor])
 	}
@@ -626,6 +625,66 @@ func TestRelayApplyReplacesHermesMCPWithSharedAnchor(t *testing.T) {
 	}
 }
 
+func TestRelayApplyWritesClientBoundNativeAnchors(t *testing.T) {
+	manager, _, user, target, port := relayFixture(t, false)
+	result := applyRelay(t, manager, user, relayManifestV2(t, target, port, "https://example.invalid/one"), "apply", false)
+	if result.BackupID == "" {
+		t.Fatalf("Apply did not create a relay backup: %+v", result)
+	}
+	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude, err := readJSONMap(paths.ClaudeConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claudeServers, _ := claude["mcpServers"].(map[string]any)
+	claudeAnchor, _ := claudeServers[RelayAnchor].(map[string]any)
+	if got, want := claudeAnchor["url"], relayClientURL(port, "coding"); got != want {
+		t.Fatalf("Claude relay anchor URL=%v, want %s", got, want)
+	}
+	codexBody, err := readSafeConfig(paths.CodexConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex := map[string]any{}
+	if err := toml.Unmarshal(codexBody, &codex); err != nil {
+		t.Fatal(err)
+	}
+	codexServers, _ := codex["mcp_servers"].(map[string]any)
+	codexAnchor, _ := codexServers[RelayAnchor].(map[string]any)
+	if got, want := codexAnchor["url"], relayClientURL(port, "coding"); got != want {
+		t.Fatalf("Codex relay anchor URL=%v, want %s", got, want)
+	}
+}
+
+func TestRelayProfileRouteUsesManifestPublishedProfileName(t *testing.T) {
+	_, _, _, target, port := relayFixture(t, false)
+	manifest := relayManifestV2(t, target, port, "https://example.invalid/one")
+	var bundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &bundle); err != nil {
+		t.Fatal(err)
+	}
+	selected := bundle.Profiles[0]
+	selected.ProfileID = "00000000-0000-0000-0000-000000000400"
+	selected.ProfileRevisionID = "00000000-0000-0000-0000-000000000401"
+	selected.ProfileRevisionHash = strings.Repeat("d", 64)
+	selected.ProfileName = "analysis"
+	bundle.Profiles = append(bundle.Profiles, selected)
+	manifest.ProfileID = selected.ProfileID
+	body, hash, err := bundle.Canonical()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.RelayGovernance.RoutingBundle = body
+	manifest.RelayGovernance.RoutingHash = hash
+
+	if got, err := relayProfileName(manifest); err != nil || got != "analysis" {
+		t.Fatalf("relay Profile route=%q err=%v", got, err)
+	}
+}
+
 func TestRelayReconcileRepairsHermesAnchorAndPreservesUnmanaged(t *testing.T) {
 	manager, _, user, target, port := relayFixture(t, false)
 	paths, err := PathsFor(user, bridgeprotocol.RuntimeSharedRelay)
@@ -633,7 +692,7 @@ func TestRelayReconcileRepairsHermesAnchorAndPreservesUnmanaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeTestFile(t, paths.HermesConfig, []byte("mcp_servers:\n  local-only:\n    command: keep\n  toolhub-relay:\n    url: http://127.0.0.1:1/mcp\n    enabled: false\n"))
-	result := applyRelay(t, manager, user, relayManifest(target, port, "https://example.invalid/one"), "reconcile", false)
+	result := applyRelay(t, manager, user, relayManifestV2(t, target, port, "https://example.invalid/one"), "reconcile", false)
 	if !result.Repaired || result.BackupID == "" {
 		t.Fatalf("Hermes reconcile result=%+v", result)
 	}
@@ -649,7 +708,7 @@ func TestRelayReconcileRepairsHermesAnchorAndPreservesUnmanaged(t *testing.T) {
 		t.Fatalf("reconcile removed unmanaged Hermes MCP entry: %+v", servers)
 	}
 	anchor, _ := servers[RelayAnchor].(map[string]any)
-	wantURL := "http://127.0.0.1:" + strconv.Itoa(port) + "/mcp"
+	wantURL := relayClientURL(port, "coding")
 	if anchor["url"] != wantURL || anchor["enabled"] != true {
 		t.Fatalf("reconcile did not repair Hermes anchor: %+v", anchor)
 	}
@@ -877,7 +936,18 @@ func withRelayGovernance(t *testing.T, manifest bridgeprotocol.DesiredManifest, 
 		SchemaVersion: 1, Mode: "compatibility",
 		RelayConfigurationRevisionID: relayRevisionID, RelayConfigurationHash: relayHash,
 		GlobalPolicyRevisionID: policyRevisionID, GlobalPolicyHash: policyHash,
-		Servers: servers, Profiles: []bridgeprotocol.PublishedProfileDTO{},
+		Servers:          servers,
+		DefaultProfileID: func() *string { value := "00000000-0000-0000-0000-000000000300"; return &value }(),
+		Profiles: []bridgeprotocol.PublishedProfileDTO{{
+			ProfileID: "00000000-0000-0000-0000-000000000300", ProfileRevisionID: "00000000-0000-0000-0000-000000000301", ProfileRevisionHash: strings.Repeat("c", 64), ProfileName: "coding", ClientKind: bridgeprotocol.RuntimeClaude,
+			Servers: func() []bridgeprotocol.ProfileServerRoutingDTO {
+				result := make([]bridgeprotocol.ProfileServerRoutingDTO, 0, len(servers))
+				for _, server := range servers {
+					result = append(result, bridgeprotocol.ProfileServerRoutingDTO{ServerID: server.ServerID, MCPConfigRevisionID: server.MCPConfigRevisionID, AcceptedContractRevisionID: server.AcceptedContractRevisionID, VisibilityMode: "all_accepted", ToolOverrides: []bridgeprotocol.ToolVisibilityOverrideDTO{}, ToolRules: []bridgeprotocol.ToolPolicyRuleDTO{}})
+				}
+				return result
+			}(),
+		}},
 	}
 	body, hash, err := bundle.Canonical()
 	if err != nil {

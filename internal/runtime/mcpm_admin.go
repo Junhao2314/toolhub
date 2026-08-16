@@ -20,7 +20,7 @@ import (
 const (
 	MCPMAdminSocket          = "/run/toolhub-mcpm/relay.sock"
 	MCPMAdminMaxMessageBytes = 1 << 20
-	mcpmAdminTimeout         = 5 * time.Second
+	mcpmAdminTimeout         = 15 * time.Second
 )
 
 var mcpmAdminErrorCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)

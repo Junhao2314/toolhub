@@ -19,10 +19,13 @@ Licensed under the [MIT License](LICENSE).
   providers, and actorless audit.
 - Salt 3008.x: accepted-key discovery and remote Claude/Codex/Hermes inventory.
   Hermes is read-only. Claude/Codex are writable targets.
-- `mcpm`: one local `toolhub` profile served through one shared HTTP relay at
-  `http://127.0.0.1:6276/mcp` by default. Codex, Claude, and local Hermes each
-  contain one native user-scope `toolhub-relay` anchor. The local Hermes MCP
-  map is collapsed to that anchor on Apply; remote Hermes remains read-only.
+- `mcpm`: one shared upstream pool served through one HTTP relay at
+  `http://127.0.0.1:6276/mcp?profile=<published-profile-name>`. Claude, Codex,
+  Hermes, Kimi, and Grok use the same Profile query; the Profile alone controls
+  the visible MCP tools and call policy. A profile member defaults to
+  `all_accepted` (all tools from its pinned accepted MCP contract); `selected`
+  and `hidden` remain explicit opt-in modes. The local Hermes MCP map is
+  collapsed to that anchor on Apply; remote Hermes remains read-only.
 
 ToolHub is the MCP control plane: it versions Library inputs, Contracts,
 Profiles, policy, desired snapshots, and routing bundles, then delivers them
@@ -31,7 +34,9 @@ data plane: it owns the shared upstream process set, binds each native client
 session to an exact Published Profile revision, filters catalogs, enforces call
 policy, and emits payload-free observations.
 
-Relay governance starts in explicit `compatibility` mode. Contract review and
+Relay governance may start in explicit `compatibility` mode while Contracts are
+being reviewed. An explicit published Profile selects a restricted catalog;
+omitting `profile` uses the default all-tools catalog. Contract review and
 Profile candidate creation never publish or Apply automatically. Switching to
 `enforced` is revision-bound and fails closed unless the applied v2 Relay state,
 Restore backup, accepted Contracts, Profile metadata, compatible mcpm features,
@@ -61,20 +66,29 @@ distinct fresh database. Keep the old volume for whole-stack rollback.
 - PostgreSQL 16 (provided by Compose).
 - Salt Master/minions 3008.x for remote targets. ToolHub reuses the existing
   `base` root at `/srv/salt/states` and does not edit `/etc/salt/master`.
-- `mcpm` installed at `/usr/bin/mcpm` for local MCP. ToolHub does not install or
-  upgrade it automatically.
+- The embedded `mcpm/` project with a root-owned `.venv/bin/mcpm` launcher and
+  uv-managed interpreter under `/root/.local/share/uv/python`. ToolHub does not
+  install or upgrade the embedded runtime automatically.
 
 Build and install the host services:
 
 ```bash
+make mcpm-sync
 make build
-sudo install -m 0755 bin/toolhub-bridge /usr/local/sbin/toolhub-bridge
-sudo packaging/systemd/install-toolhub-services.sh "$USER" "$(id -gn)" toolhub
+sudo packaging/systemd/install-toolhub-services.sh \
+  "$USER" /root/docker/toolhub "$(id -gn)" toolhub
 ```
 
-The installer creates `/etc/toolhub-bridge/hmac.key`, the shared socket group,
-and the Bridge/relay units. Record the printed Bridge GID and HMAC key in the
-ToolHub environment. The HMAC key is independent from `TOOLHUB_MASTER_KEY`.
+The installer validates the canonical, root-owned ToolHub repository, the
+embedded mcpm launcher/shebang, and its resolved uv interpreter before it
+creates `/etc/toolhub-bridge/hmac.key`, the shared socket group, and the
+Bridge/relay units. Record the printed Bridge GID and HMAC key in the ToolHub
+environment. The HMAC key is independent from `TOOLHUB_MASTER_KEY`.
+
+The services execute directly from `/root/docker/toolhub/bin/toolhub-bridge`
+and `/root/docker/toolhub/mcpm/.venv/bin/mcpm`; no second mcpm checkout, global
+`/usr/bin/mcpm`, or copied `/usr/local/sbin` runtime is required. After updating
+this repository, rebuild, rerun the installer, and restart the affected unit.
 
 ## Clean Start
 
@@ -127,8 +141,11 @@ days.
 ## Development
 
 ```bash
+make mcpm-sync
 GOCACHE=/tmp/toolhub-gocache go test ./...
 GOCACHE=/tmp/toolhub-gocache go vet ./...
+make mcpm-lint
+make mcpm-contract
 cd web && npm ci --ignore-scripts && npm run typecheck && npm run build
 cd .. && make docker-config
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s packaging/salt/tests -p '*_test.py'

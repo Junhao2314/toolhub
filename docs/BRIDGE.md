@@ -16,19 +16,23 @@ Build the Linux binary and install the packaged units:
 ```bash
 cd /root/docker/toolhub
 make build
-sudo install -o root -g root -m 0755 bin/toolhub-bridge /usr/local/sbin/toolhub-bridge
-sudo packaging/systemd/install-toolhub-services.sh MANAGED_USER MANAGED_GROUP BRIDGE_GROUP
+sudo packaging/systemd/install-toolhub-services.sh \
+  MANAGED_USER /root/docker/toolhub MANAGED_GROUP BRIDGE_GROUP
 ```
 
 `MANAGED_GROUP` defaults to `MANAGED_USER`; `BRIDGE_GROUP` defaults to
 `toolhub`. The installer:
 
 - validates the managed OS user and canonical home;
+- validates the canonical, root-owned ToolHub repository, embedded mcpm project,
+  executable ownership, modes, shebang, uv interpreter prefix, and capability
+  contract;
 - creates the shared Bridge group when necessary;
 - creates `/etc/toolhub-bridge/hmac.key` as a root-only file;
 - creates `/var/lib/toolhub-bridge/mcpm-relay.env` with port `6276`;
-- renders both units with only the selected canonical managed home exposed in
-  their private home namespaces;
+- renders both units with repository executables and read-only repository binds;
+  only the selected canonical managed home is writable in their private home
+  namespaces;
 - enables and starts `toolhub-bridge.service`;
 - prints the GID required by Compose.
 
@@ -149,6 +153,13 @@ use the fixed restart path. A reload, restart, or full-health failure restores
 the complete old file set and old process state, then returns a failed target;
 desired and Published pointers must not advance.
 
+All native `toolhub-relay` anchors use the same explicit Profile route:
+`http://127.0.0.1:6276/mcp?profile=<published-profile-name>`. The Profile name
+is resolved from the applied Published Profile revision. A direct `/mcp`
+request without `profile` uses the default all-tools catalog; duplicated or
+unknown explicit `profile` queries still fail closed. The old `toolhub_profile`
+and `toolhub_client` query forms are rejected.
+
 ## Service Checks
 
 ```bash
@@ -174,7 +185,7 @@ action or body proxy.
 The session canary is the final enforcement preflight check. It accepts only an
 `enforced` candidate routing bundle whose canonical hash matches the request,
 then uses the live shared upstream pool to verify: the explicit Claude Profile
-catalog, the explicit Codex Profile catalog, missing-Profile empty/default
+catalog, the explicit Codex Profile catalog, missing-Profile default all-tools
 behavior, unknown-Profile `profile_unknown` rejection, and two concurrent
 sessions while every configured upstream process count remains exactly one. It
 lists catalogs but never calls a business tool. The HMAC-authenticated result is
@@ -198,8 +209,9 @@ ToolHub.
 The relay admin protocol is a separate bounded one-line JSON protocol at the
 fixed `/run/toolhub-mcpm/relay.sock`. The systemd unit passes the fixed routing
 file `~/.config/mcpm/toolhub-routing.json`; neither path is caller-selectable.
-The installer requires a compatible preinstalled `/usr/bin/mcpm` contract and
-does not download, install, or update mcpm.
+The installer requires a compatible repository `.venv/bin/mcpm` contract and
+does not download, install, or update mcpm. The resolved interpreter must remain
+under `/root/.local/share/uv/python`.
 
 Routing bundles contain only immutable revision IDs and hashes, accepted
 contract/tool identities, visibility/risk rules, and the applied policy

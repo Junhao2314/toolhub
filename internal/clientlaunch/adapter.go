@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-
-	"github.com/google/uuid"
+	"net/url"
+	"regexp"
 )
 
 type Command struct {
@@ -15,14 +15,14 @@ type Command struct {
 	Display    string   `json:"display"`
 }
 
-func BuildCommand(clientKind, profileID string, port int) (Command, error) {
-	if uuid.Validate(profileID) != nil {
-		return Command{}, errors.New("launch Profile ID must be a UUID")
+func BuildCommand(clientKind, profileName string, port int) (Command, error) {
+	if !relayProfileNamePattern.MatchString(profileName) {
+		return Command{}, errors.New("launch Profile name is invalid")
 	}
 	if port < 1 || port > 65535 {
 		return Command{}, errors.New("launch relay port is invalid")
 	}
-	endpoint := fmt.Sprintf("http://127.0.0.1:%d/mcp?toolhub_profile=%s&toolhub_client=%s", port, profileID, clientKind)
+	endpoint := fmt.Sprintf("http://127.0.0.1:%d/mcp?profile=%s", port, url.QueryEscape(profileName))
 	switch clientKind {
 	case "claude":
 		payload := struct {
@@ -52,3 +52,5 @@ func BuildCommand(clientKind, profileID string, port int) (Command, error) {
 		return Command{}, errors.New("unsupported native client kind")
 	}
 }
+
+var relayProfileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)

@@ -136,7 +136,7 @@ read-only for Skills and inventory.
 
 ## MCP Scope
 
-Local MCP requires a compatible preinstalled `/usr/bin/mcpm` whose machine-
+Local MCP requires a compatible repository `.venv/bin/mcpm` whose machine-
 readable ToolHub contract advertises admin protocol 1, routing schema 1, and all
 required governance features. The installer and runtime fail closed; neither
 auto-finds, installs, upgrades, nor falls back to native per-server local
@@ -148,7 +148,9 @@ Hermes' existing `mcp_servers` map is collapsed on Apply; reconcile preserves
 later unmanaged entries.
 
 The relay unit hides all homes with a private tmpfs and binds back only the
-selected canonical managed home as writable. Its private runtime directory,
+selected canonical managed home as writable. It binds the ToolHub repository
+(including the embedded mcpm project) plus the resolved uv interpreter
+read-only. Its private runtime directory,
 admin socket, and files are created under a `UMask=0077`; the socket protocol is
 one-line, size/deadline bounded, and exposes fixed typed operations only.
 `ProtectSystem=strict`, an empty capability bounding set, private devices,

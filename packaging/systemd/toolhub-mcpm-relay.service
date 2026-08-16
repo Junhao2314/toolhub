@@ -11,14 +11,17 @@ EnvironmentFile=/var/lib/toolhub-bridge/mcpm-relay.env
 Environment=HOME=@TOOLHUB_MANAGED_HOME@
 User=@TOOLHUB_MANAGED_USER@
 Group=@TOOLHUB_MANAGED_GROUP@
-WorkingDirectory=@TOOLHUB_MANAGED_HOME@
+# mcpm's CLI dependencies create a transient `logs/` directory relative to the
+# current working directory. Keep that output inside the unit's private tmpfs,
+# never inside the read-only repository checkout.
+WorkingDirectory=/tmp
 RuntimeDirectory=toolhub-mcpm
 RuntimeDirectoryMode=0750
 # MCPM otherwise auto-selects the next free port when the requested port is
-# busy. The shared relay has a fixed-port contract, so fail the unit instead of
-# silently moving clients to a different endpoint.
-ExecStartPre=/usr/local/sbin/toolhub-relay-port-check
-ExecStart=/usr/bin/mcpm profile run --http --host 127.0.0.1 --port ${TOOLHUB_RELAY_PORT} --toolhub-routing @TOOLHUB_MANAGED_HOME@/.config/mcpm/toolhub-routing.json --toolhub-admin-socket /run/toolhub-mcpm/relay.sock --toolhub-observation-limit 100000 toolhub
+# busy. The shared relay has a fixed-port contract, so fail the unit instead
+# of silently moving clients to a different endpoint.
+ExecStartPre=@TOOLHUB_REPOSITORY@/packaging/systemd/toolhub-relay-port-check.sh
+ExecStart=@TOOLHUB_REPOSITORY@/mcpm/.venv/bin/mcpm profile run --http --host 127.0.0.1 --port ${TOOLHUB_RELAY_PORT} --toolhub-routing @TOOLHUB_MANAGED_HOME@/.config/mcpm/toolhub-routing.json --toolhub-admin-socket /run/toolhub-mcpm/relay.sock --toolhub-observation-limit 100000 toolhub
 ExecStartPost=/usr/bin/bash -c 'for i in $(/usr/bin/seq 1 600); do if (printf "GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >/dev/tcp/127.0.0.1/${TOOLHUB_RELAY_PORT}) 2>/dev/null; then exit 0; fi; /usr/bin/sleep 0.1; done; exit 1'
 KillMode=control-group
 KillSignal=SIGTERM
@@ -32,6 +35,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=tmpfs
 BindPaths=@TOOLHUB_MANAGED_HOME@
+BindReadOnlyPaths=@TOOLHUB_REPOSITORY@ @MCPM_INTERPRETER@
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 PrivateDevices=yes

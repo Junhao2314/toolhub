@@ -60,7 +60,7 @@ func TestRelaySessionCanaryResponseIsBoundToCandidateProfilesAndProcesses(t *tes
 		GlobalPolicyHash:             strings.Repeat("b", 64),
 		Servers: []ServerContractDTO{{
 			ServerID: serverID, ServerName: "search", MCPConfigRevisionID: "00000000-0000-0000-0000-000000000031",
-			AcceptedContractRevisionID: stringPointer("00000000-0000-0000-0000-000000000032"), AcceptedContractHash: stringPointer(strings.Repeat("c", 64)), Tools: []RoutingToolDTO{},
+			AcceptedContractRevisionID: stringPointer("00000000-0000-0000-0000-000000000032"), AcceptedContractHash: stringPointer(strings.Repeat("c", 64)), Tools: []RoutingToolDTO{{ToolID: "00000000-0000-0000-0000-000000000033", Name: "search", InputSchema: map[string]any{}, OutputSchema: map[string]any{}, Annotations: map[string]any{}, GlobalDecision: "allow"}},
 		}},
 		Profiles: []PublishedProfileDTO{
 			{ProfileID: claudeID, ProfileRevisionID: claudeRevisionID, ProfileRevisionHash: strings.Repeat("d", 64), ProfileName: "claude", ClientKind: RuntimeClaude, Servers: []ProfileServerRoutingDTO{}},
@@ -77,7 +77,7 @@ func TestRelaySessionCanaryResponseIsBoundToCandidateProfilesAndProcesses(t *tes
 			{ClientKind: RuntimeClaude, ProfileID: claudeID, ProfileRevisionID: claudeRevisionID, ToolCount: 0},
 			{ClientKind: RuntimeCodex, ProfileID: codexID, ProfileRevisionID: codexRevisionID, ToolCount: 0},
 		},
-		MissingProfile:          RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0},
+		MissingProfile:          RelaySessionCanaryMissing{Behavior: "default", ToolCount: 1},
 		InvalidProfileErrorCode: "profile_unknown",
 		ConcurrentSessionCount:  2,
 		UpstreamProcesses:       []RelaySessionCanaryProcess{{ServerID: serverID, ProcessCount: 1}},
@@ -171,6 +171,23 @@ func TestGovernanceCapabilityDTOHasNoPayloadFields(t *testing.T) {
 	}
 	if err := ValidateGovernanceBody(body); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestGovernanceBodyAllowsBoundedLongToolDescriptions(t *testing.T) {
+	accepted, err := json.Marshal(map[string]string{"description": strings.Repeat("x", 6393)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateGovernanceBody(accepted); err != nil {
+		t.Fatalf("bounded tool description rejected: %v", err)
+	}
+	rejected, err := json.Marshal(map[string]string{"description": strings.Repeat("x", GovernanceMaxStringBytes+1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateGovernanceBody(rejected); err == nil {
+		t.Fatal("oversized governance string accepted")
 	}
 }
 

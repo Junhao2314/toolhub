@@ -51,10 +51,10 @@ func (s *Store) ProfileReadiness(ctx context.Context, profileID string, inspecti
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	var currentRevisionID, publishedRevisionID, clientKind string
+	var currentRevisionID, publishedRevisionID, profileName, clientKind string
 	var profileRevision int64
 	var archived bool
-	err = tx.QueryRow(ctx, `SELECT p.current_revision_id::text,p.revision,p.client_kind,p.archived_at IS NOT NULL,coalesce(pp.profile_revision_id::text,'') FROM profiles p LEFT JOIN published_profiles pp ON pp.profile_id=p.id WHERE p.id=$1`, profileID).Scan(&currentRevisionID, &profileRevision, &clientKind, &archived, &publishedRevisionID)
+	err = tx.QueryRow(ctx, `SELECT p.current_revision_id::text,p.revision,p.name,p.client_kind,p.archived_at IS NOT NULL,coalesce(pp.profile_revision_id::text,'') FROM profiles p LEFT JOIN published_profiles pp ON pp.profile_id=p.id WHERE p.id=$1`, profileID).Scan(&currentRevisionID, &profileRevision, &profileName, &clientKind, &archived, &publishedRevisionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ProfileLaunchReadiness{}, ErrNotFound
 	}
@@ -159,7 +159,7 @@ func (s *Store) ProfileReadiness(ctx context.Context, profileID string, inspecti
 	if inspection.Version == "" {
 		return notReady("native_client_inspection_invalid")
 	}
-	command, err := clientlaunch.BuildCommand(clientKind, profileID, relayPort)
+	command, err := clientlaunch.BuildCommand(clientKind, profileName, relayPort)
 	if err != nil {
 		return ProfileLaunchReadiness{}, err
 	}

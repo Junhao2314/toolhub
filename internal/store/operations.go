@@ -838,7 +838,16 @@ func (s *Store) RetryFailedTargets(ctx context.Context, operationID, idempotency
 		requests[targetID] = request
 	}
 	requestRows.Close()
-	return s.CreateOperation(ctx, CreateOperationInput{Kind: original.Kind, SourceID: operationID, IdempotencyKey: idempotencyKey, Request: map[string]any{"retryOf": operationID, "targetIds": ids}, Metadata: map[string]any{"retryOf": operationID, "originalKind": original.Kind}, TargetIDs: ids, TargetRequests: requests})
+	metadata := map[string]any{}
+	if len(original.Metadata) > 0 {
+		if err := json.Unmarshal(original.Metadata, &metadata); err != nil || metadata == nil {
+			return domain.Operation{}, ErrConflict
+		}
+	}
+	delete(metadata, "governanceFinalizedAction")
+	metadata["retryOf"] = operationID
+	metadata["originalKind"] = original.Kind
+	return s.CreateOperation(ctx, CreateOperationInput{Kind: original.Kind, SourceID: operationID, IdempotencyKey: idempotencyKey, Request: map[string]any{"retryOf": operationID, "targetIds": ids}, Metadata: metadata, TargetIDs: ids, TargetRequests: requests})
 }
 
 type profileApplyRetryTarget struct {

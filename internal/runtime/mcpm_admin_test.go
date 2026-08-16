@@ -138,7 +138,7 @@ func TestMCPMAdminSessionCanaryUsesFixedHashBoundOperation(t *testing.T) {
 				{ClientKind: bridgeprotocol.RuntimeClaude, ProfileID: bundle.Profiles[0].ProfileID, ProfileRevisionID: bundle.Profiles[0].ProfileRevisionID, ToolCount: 0},
 				{ClientKind: bridgeprotocol.RuntimeCodex, ProfileID: bundle.Profiles[1].ProfileID, ProfileRevisionID: bundle.Profiles[1].ProfileRevisionID, ToolCount: 0},
 			},
-			MissingProfile:          bridgeprotocol.RelaySessionCanaryMissing{Behavior: "empty", ToolCount: 0},
+			MissingProfile:          bridgeprotocol.RelaySessionCanaryMissing{Behavior: "default", ToolCount: 0},
 			InvalidProfileErrorCode: "profile_unknown",
 			ConcurrentSessionCount:  2,
 			UpstreamProcesses:       []bridgeprotocol.RelaySessionCanaryProcess{},
@@ -207,7 +207,7 @@ func TestMCPMAdminClientUsesTypedFixedOperations(t *testing.T) {
 		{
 			name:     "reload routing",
 			request:  `{"operation":"reload_routing"}`,
-			response: `{"ok":true,"data":{"mode":"enforced","relayConfigurationRevisionId":"` + relayRevisionID + `","globalPolicyRevisionId":"` + configRevisionID + `","routingBundleHash":"` + hash + `","publishedProfileRevisions":[]}}` + "\n",
+			response: `{"ok":true,"data":{"mode":"enforced","relayConfigurationRevisionId":"` + relayRevisionID + `","globalPolicyRevisionId":"` + configRevisionID + `","routingBundleHash":"` + hash + `","publishedProfileRevisions":[],"confirmations":{"pending":0,"grants":0},"observationBootId":"boot-1","observationCount":0}}` + "\n",
 			call: func(ctx context.Context, client *MCPMAdminClient) error {
 				status, err := client.ReloadRouting(ctx)
 				if err == nil && (status.RoutingBundleHash != hash || status.RelayConfigurationRevisionID != relayRevisionID) {

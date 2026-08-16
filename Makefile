@@ -1,4 +1,6 @@
-.PHONY: build test lint web docker-config dev
+.PHONY: build test lint web docker-config dev mcpm-sync mcpm-contract mcpm-lint
+
+MCPM_DIR := mcpm
 
 build: web
 	go build -o bin/toolhub ./cmd/toolhub
@@ -25,3 +27,12 @@ docker-config:
 
 dev:
 	go run ./cmd/toolhub
+
+mcpm-sync:
+	cd $(MCPM_DIR) && uv sync --frozen
+
+mcpm-contract:
+	$(MCPM_DIR)/.venv/bin/mcpm toolhub contract --json
+
+mcpm-lint:
+	cd $(MCPM_DIR) && uv run ruff check src

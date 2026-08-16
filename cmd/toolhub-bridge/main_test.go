@@ -75,8 +75,8 @@ func TestPackagedRelaySupportsDynamicManagedHomeMCPs(t *testing.T) {
 		"ProtectHome=tmpfs",
 		"BindPaths=@TOOLHUB_MANAGED_HOME@",
 		"Environment=HOME=@TOOLHUB_MANAGED_HOME@",
-		"WorkingDirectory=@TOOLHUB_MANAGED_HOME@",
-		"ExecStartPre=/usr/local/sbin/toolhub-relay-port-check",
+		"WorkingDirectory=/tmp",
+		"ExecStartPre=@TOOLHUB_REPOSITORY@/packaging/systemd/toolhub-relay-port-check.sh",
 		"ExecStartPost=/usr/bin/bash -c",
 		"/dev/tcp/127.0.0.1/${TOOLHUB_RELAY_PORT}",
 		"GET /mcp HTTP/1.1",
@@ -102,6 +102,56 @@ func TestPackagedRelaySupportsDynamicManagedHomeMCPs(t *testing.T) {
 	}
 	if strings.Contains(unit, "ProtectHome=read-only") {
 		t.Fatal("relay unit must expose the selected managed home through an explicit bind")
+	}
+}
+
+func TestPackagedInstallerUsesRepositoryRuntimeArguments(t *testing.T) {
+	installer := readPackagingFile(t, "install-toolhub-services.sh")
+	if !strings.Contains(installer, "MANAGED_USER TOOLHUB_REPOSITORY [MANAGED_GROUP] [BRIDGE_GROUP]") {
+		t.Fatal("installer must require the ToolHub repository root")
+	}
+	for _, required := range []string{
+		"toolhub_repository=\"${2:?$usage}\"",
+		"mcpm_repository=\"$toolhub_repository/mcpm\"",
+		"canonical_repository()",
+		"readlink -f -- \"$repository\"",
+		"[ \"$(stat -c %u -- \"$repository\")\" -eq 0 ]",
+		"bridge_binary=\"$toolhub_repository/bin/toolhub-bridge\"",
+		"mcpm_launcher=\"$mcpm_repository/.venv/bin/mcpm\"",
+		"shebang=\"$(sed -n '1p' -- \"$mcpm_launcher\")\"",
+		"resolved_interpreter=\"$(readlink -f -- \"$mcpm_python\")\"",
+		"/root/.local/share/uv/python/*",
+		"/usr/bin/timeout 5s /usr/sbin/runuser -u \"$managed_user\" -- \"$mcpm_launcher\" toolhub contract --json",
+		"s|@TOOLHUB_REPOSITORY@|$toolhub_repository|g",
+		"s|@MCPM_INTERPRETER@|$resolved_interpreter|g",
+	} {
+		if !strings.Contains(installer, required) {
+			t.Fatalf("installer is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"/usr/local/sbin/toolhub-bridge", "/usr/local/sbin/toolhub-relay-port-check", "/usr/bin/mcpm"} {
+		if strings.Contains(installer, forbidden) {
+			t.Fatalf("installer still contains legacy path %q", forbidden)
+		}
+	}
+
+	bridge := readPackagingFile(t, "toolhub-bridge.service")
+	if !strings.Contains(bridge, "ExecStart=@TOOLHUB_REPOSITORY@/bin/toolhub-bridge") ||
+		!strings.Contains(bridge, "BindReadOnlyPaths=@TOOLHUB_REPOSITORY@ @MCPM_INTERPRETER@") {
+		t.Fatal("Bridge unit must use repository executables and read-only repository/interpreter binds")
+	}
+	relay := readPackagingFile(t, "toolhub-mcpm-relay.service")
+	for _, required := range []string{
+		"WorkingDirectory=/tmp",
+		"ExecStart=@TOOLHUB_REPOSITORY@/mcpm/.venv/bin/mcpm",
+		"BindReadOnlyPaths=@TOOLHUB_REPOSITORY@ @MCPM_INTERPRETER@",
+		"--toolhub-routing",
+		"--toolhub-admin-socket",
+		"--toolhub-observation-limit 100000",
+	} {
+		if !strings.Contains(relay, required) {
+			t.Fatalf("relay unit is missing %q", required)
+		}
 	}
 }
 

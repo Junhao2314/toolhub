@@ -26,7 +26,7 @@ func TestProfileReadinessGeneratesCommandOnlyForAppliedPublishedState(t *testing
 	if !result.Ready || result.ReasonCode != "" || result.ProfileRevisionID != profile.CurrentRevisionID || result.Command == nil {
 		t.Fatalf("readiness=%+v", result)
 	}
-	want := "toolhub_profile=" + profile.ID + "&toolhub_client=claude"
+	want := "profile=" + profile.Name
 	if !strings.Contains(result.Command.Display, want) {
 		t.Fatalf("display=%q does not contain %q", result.Command.Display, want)
 	}

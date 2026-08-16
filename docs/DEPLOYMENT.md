@@ -12,8 +12,11 @@ database. Keep the old volume as a whole-stack rollback artifact.
 - Linux with systemd.
 - Docker Engine and Compose v2.
 - One existing local managed user with a real, non-symlink home.
-- `toolhub-bridge` installed as root.
-- `mcpm` at `/usr/bin/mcpm` when local MCP is required.
+- `/root/docker/toolhub` as the canonical, root-owned repository root, including
+  its embedded `mcpm/` project.
+- A root-owned `/root/docker/toolhub/bin/toolhub-bridge` and
+  `/root/docker/toolhub/mcpm/.venv/bin/mcpm`; its shebang must use the repository
+  `.venv/bin/python3`, resolving into `/root/.local/share/uv/python`.
 - Salt Master/minions `3008.x` when remote targets are required.
 - Existing Salt `base` file root at `/srv/salt/states`.
 
@@ -40,13 +43,17 @@ rollback.
 ```bash
 cd /root/docker/toolhub
 make build
-sudo install -o root -g root -m 0755 bin/toolhub-bridge /usr/local/sbin/toolhub-bridge
-sudo packaging/systemd/install-toolhub-services.sh MANAGED_USER MANAGED_GROUP toolhub
+sudo packaging/systemd/install-toolhub-services.sh \
+  MANAGED_USER /root/docker/toolhub MANAGED_GROUP toolhub
 sudo systemctl status toolhub-bridge.service
 ```
 
-The installer prints the shared Bridge GID. Read the root-only HMAC key locally
-and place its exact value in `.env`; do not commit or log it.
+The installer validates repository ownership, the embedded mcpm project,
+executable ownership/modes, the mcpm shebang and uv interpreter, and the
+ToolHub capability contract before writing units. It prints the shared Bridge GID. Read the
+root-only HMAC key locally and place its exact value in `.env`; do not commit or
+log it. The units bind the repositories read-only inside their `ProtectHome`
+namespaces, while managed-home writes remain separately guarded.
 
 ## 3. Configure ToolHub
 
@@ -130,7 +137,8 @@ credentials have no effect after the account exists.
 1. Refresh nodes and verify only accepted Salt keys are shown.
 2. Restore Salt connectivity until remote nodes report `3008.x`.
 3. Scan `local/claude`, `local/codex`, `local/hermes`, and `local/shared-relay`.
-4. For local MCP, verify `/usr/bin/mcpm`, configure a free fixed port, and Apply
+4. For local MCP, verify `/root/docker/toolhub/mcpm/.venv/bin/mcpm` and its capability
+   contract, configure the fixed port, and Apply
    a Profile to `local/shared-relay`.
 5. Canary one non-critical Salt minion before a fleet Apply.
 
@@ -146,11 +154,13 @@ Upgrade the Bridge binary and ToolHub image as one release:
 
 ```bash
 make build
-sudo install -o root -g root -m 0755 bin/toolhub-bridge /usr/local/sbin/toolhub-bridge
-sudo packaging/systemd/install-toolhub-services.sh MANAGED_USER MANAGED_GROUP toolhub
+sudo packaging/systemd/install-toolhub-services.sh \
+  MANAGED_USER /root/docker/toolhub MANAGED_GROUP toolhub
 sudo systemctl restart toolhub-bridge.service
 docker compose up -d --build --wait
 ```
 
 Do not deploy generation-2 code against a generation-1 database or mix old
-Agent delivery paths with Bridge/Salt delivery.
+Agent delivery paths with Bridge/Salt delivery. Keep the repository roots
+root-owned; after a Git update, rebuild, test, reinstall the units, and restart
+services as one change.

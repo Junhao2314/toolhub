@@ -11,9 +11,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,12 +29,15 @@ import (
 )
 
 const (
-	RelayUnitName          = "toolhub-mcpm-relay.service"
-	RelayProfile           = "toolhub"
-	RelayAnchor            = "toolhub-relay"
-	MCPMExecutable         = "/usr/bin/mcpm"
+	RelayUnitName = "toolhub-mcpm-relay.service"
+	RelayProfile  = "toolhub"
+	RelayAnchor   = "toolhub-relay"
+	// The shared relay is a repository-owned runtime. Keep this path fixed in
+	// the privileged Bridge; callers and environment variables must not select
+	// an alternate executable.
+	MCPMExecutable         = "/root/docker/toolhub/mcpm/.venv/bin/mcpm"
 	relayReadinessInterval = 250 * time.Millisecond
-	relayReadinessTimeout  = 15 * time.Second
+	relayReadinessTimeout  = 90 * time.Second
 	relayContentHashField  = "toolhub_content_hash"
 	relayIntegrityField    = "toolhub_runtime_integrity"
 	mcpmContractMaxBytes   = 64 << 10
@@ -119,6 +124,11 @@ func (r *RelayManager) ValidateMCPM(ctx context.Context) (string, error) {
 	contractCtx, cancel := context.WithTimeout(ctx, mcpmContractTimeout)
 	defer cancel()
 	command := exec.CommandContext(contractCtx, path, "toolhub", "contract", "--json")
+	// mcpm's CLI dependencies may create a transient local `logs` directory
+	// during import. Run the capability probe inside Bridge's private tmpfs so
+	// that the repository, managed home, and persistent state remain read-only
+	// to this probe.
+	command.Dir = "/tmp"
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return "", incompatibleMCPMError()
@@ -408,11 +418,20 @@ func (r *RelayManager) waitUntilHealthy(ctx context.Context, port int, manifest 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	governed := manifest.SchemaVersion >= bridgeprotocol.ManifestSchemaVersionV2 && manifest.RelayGovernance != nil
 	for {
 		status, _ := r.Status(waitCtx, port, false)
 		if status.Healthy {
-			cancel()
-			return r.Status(ctx, port, false, manifest)
+			if governed {
+				status, _ = r.Status(waitCtx, port, false, manifest)
+				if status.Healthy {
+					cancel()
+					return status, nil
+				}
+			} else {
+				cancel()
+				return status, nil
+			}
 		}
 		select {
 		case <-waitCtx.Done():
@@ -987,13 +1006,17 @@ func writeRelayConfiguration(paths TargetPaths, manifest bridgeprotocol.DesiredM
 	if err := atomicWrite(paths.MCPMRegistry, append(registryBody, '\n'), 0600); err != nil {
 		return err
 	}
-	if err := writeClaudeRelayAnchor(paths.ClaudeConfig, manifest.RelayPort); err != nil {
+	profileName, err := relayProfileName(manifest)
+	if err != nil {
 		return err
 	}
-	if err := writeCodexRelayAnchor(paths.CodexConfig, manifest.RelayPort); err != nil {
+	if err := writeClaudeRelayAnchor(paths.ClaudeConfig, manifest.RelayPort, profileName); err != nil {
 		return err
 	}
-	if err := writeHermesRelayAnchor(paths.HermesConfig, manifest.RelayPort, preserveUnmanaged); err != nil {
+	if err := writeCodexRelayAnchor(paths.CodexConfig, manifest.RelayPort, profileName); err != nil {
+		return err
+	}
+	if err := writeHermesRelayAnchor(paths.HermesConfig, manifest.RelayPort, profileName, preserveUnmanaged); err != nil {
 		return err
 	}
 	for _, path := range []string{paths.MCPMRegistry, paths.ClaudeConfig, paths.CodexConfig, paths.HermesConfig} {
@@ -1074,7 +1097,11 @@ func relayRuntimeConfigurationMatches(paths TargetPaths, environmentFile string,
 	if err != nil {
 		return false, err
 	}
-	wantURL := fmt.Sprintf("http://127.0.0.1:%d/mcp", manifest.RelayPort)
+	profileName, err := relayProfileName(manifest)
+	if err != nil {
+		return false, err
+	}
+	wantURL := relayClientURL(manifest.RelayPort, profileName)
 	if len(anchors) != 3 {
 		return false, nil
 	}
@@ -1197,6 +1224,38 @@ func writeRelayEnvironment(path string, port int) error {
 	return atomicWrite(path, []byte("TOOLHUB_RELAY_PORT="+strconv.Itoa(port)+"\n"), 0600)
 }
 
+func relayProfileName(manifest bridgeprotocol.DesiredManifest) (string, error) {
+	if manifest.RelayGovernance == nil {
+		return "", errors.New("relay Profile routing is required")
+	}
+	var bundle bridgeprotocol.RoutingBundle
+	if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &bundle); err != nil {
+		return "", fmt.Errorf("decode relay Profile routing: %w", err)
+	}
+	selectedID := manifest.ProfileID
+	if selectedID == "" && bundle.DefaultProfileID != nil {
+		selectedID = *bundle.DefaultProfileID
+	}
+	if selectedID == "" {
+		return "", errors.New("a published relay Profile is required")
+	}
+	for _, profile := range bundle.Profiles {
+		if profile.ProfileID == selectedID {
+			if !relayProfileNamePattern.MatchString(profile.ProfileName) {
+				return "", errors.New("published relay Profile name is not a URL-safe English slug")
+			}
+			return profile.ProfileName, nil
+		}
+	}
+	return "", errors.New("relay Profile is not published")
+}
+
+var relayProfileNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+
+func relayClientURL(port int, profileName string) string {
+	return fmt.Sprintf("http://127.0.0.1:%d/mcp?profile=%s", port, url.QueryEscape(profileName))
+}
+
 func resolveSecretMap(refs, values map[string]string) map[string]string {
 	result := map[string]string{}
 	for key, id := range refs {
@@ -1205,7 +1264,7 @@ func resolveSecretMap(refs, values map[string]string) map[string]string {
 	return result
 }
 
-func writeClaudeRelayAnchor(path string, port int) error {
+func writeClaudeRelayAnchor(path string, port int, profileName string) error {
 	root, err := readJSONMap(path)
 	if err != nil {
 		return err
@@ -1217,13 +1276,13 @@ func writeClaudeRelayAnchor(path string, port int) error {
 	if !ok {
 		servers = map[string]any{}
 	}
-	servers[RelayAnchor] = map[string]any{"type": "http", "url": fmt.Sprintf("http://127.0.0.1:%d/mcp", port)}
+	servers[RelayAnchor] = map[string]any{"type": "http", "url": relayClientURL(port, profileName)}
 	root["mcpServers"] = servers
 	body, _ := json.MarshalIndent(root, "", "  ")
 	return atomicWrite(path, append(body, '\n'), 0600)
 }
 
-func writeCodexRelayAnchor(path string, port int) error {
+func writeCodexRelayAnchor(path string, port int, profileName string) error {
 	root := map[string]any{}
 	if body, err := readSafeConfig(path); err == nil {
 		if len(body) > 4<<20 || toml.Unmarshal(body, &root) != nil {
@@ -1239,7 +1298,7 @@ func writeCodexRelayAnchor(path string, port int) error {
 	if !ok {
 		servers = map[string]any{}
 	}
-	servers[RelayAnchor] = map[string]any{"url": fmt.Sprintf("http://127.0.0.1:%d/mcp", port)}
+	servers[RelayAnchor] = map[string]any{"url": relayClientURL(port, profileName)}
 	root["mcp_servers"] = servers
 	body, err := toml.Marshal(root)
 	if err != nil {
@@ -1248,7 +1307,7 @@ func writeCodexRelayAnchor(path string, port int) error {
 	return atomicWrite(path, body, 0600)
 }
 
-func writeHermesRelayAnchor(path string, port int, preserveUnmanaged bool) error {
+func writeHermesRelayAnchor(path string, port int, profileName string, preserveUnmanaged bool) error {
 	root, err := readYAMLMap(path)
 	if err != nil {
 		return err
@@ -1270,7 +1329,7 @@ func writeHermesRelayAnchor(path string, port int, preserveUnmanaged bool) error
 			}
 		}
 	}
-	servers[RelayAnchor] = map[string]any{"url": fmt.Sprintf("http://127.0.0.1:%d/mcp", port), "enabled": true}
+	servers[RelayAnchor] = map[string]any{"url": relayClientURL(port, profileName), "enabled": true}
 	root["mcp_servers"] = servers
 	body, err := yaml.Marshal(root)
 	if err != nil {

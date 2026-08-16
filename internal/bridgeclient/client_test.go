@@ -31,7 +31,7 @@ func TestGovernanceClientUsesFixedTypedRoutes(t *testing.T) {
 		call        func(context.Context, *Client) error
 	}{
 		{name: "capability", path: "/v1/relay/governance/capability", body: `{}`, response: `{"adminProtocolVersion":1,"features":[],"routingSchemaVersions":[1],"runtime":"mcpm","runtimeVersion":"2.15.0-toolhub.1"}`, call: func(ctx context.Context, client *Client) error { _, err := client.RelayCapability(ctx); return err }},
-		{name: "session canary", path: "/v1/relay/governance/session-canary", body: `{"routingBundleHash":"` + canaryHash + `","routingBundle":` + canaryBundle + `}`, response: `{"routingBundleHash":"` + canaryHash + `","profiles":[],"missingProfile":{"behavior":"empty","profileId":null,"profileRevisionId":null,"toolCount":0},"invalidProfileErrorCode":"profile_unknown","concurrentSessionCount":2,"upstreamProcesses":[]}`, call: func(ctx context.Context, client *Client) error {
+		{name: "session canary", path: "/v1/relay/governance/session-canary", body: `{"routingBundleHash":"` + canaryHash + `","routingBundle":` + canaryBundle + `}`, response: `{"routingBundleHash":"` + canaryHash + `","profiles":[],"missingProfile":{"behavior":"default","profileId":null,"profileRevisionId":null,"toolCount":0},"invalidProfileErrorCode":"profile_unknown","concurrentSessionCount":2,"upstreamProcesses":[]}`, call: func(ctx context.Context, client *Client) error {
 			_, err := client.RelaySessionCanary(ctx, bridgeprotocol.RelaySessionCanaryRequest{RoutingBundleHash: canaryHash, RoutingBundle: json.RawMessage(canaryBundle)})
 			return err
 		}},
