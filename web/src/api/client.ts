@@ -225,6 +225,130 @@ export interface GlobalPolicyProjection {
   applied: GlobalPolicyRevision;
 }
 
+export interface RelayConfigurationPin {
+  serverId: string;
+  mcpRevisionId: string;
+  position: number;
+}
+
+export interface RelayConfigurationRevision {
+  id: string;
+  revision: number;
+  canonicalHash: string;
+  mcpServers: RelayConfigurationPin[];
+  metadata?: Dict;
+  createdAt: string;
+}
+
+export interface RelayConfigurationProjection {
+  current: RelayConfigurationRevision;
+  applied: RelayConfigurationRevision;
+  mode: "compatibility" | "enforced";
+  defaultProfileId: string | null;
+}
+
+export interface RelayPreflightDiffItem {
+  kind: string;
+  name: string;
+  beforeHash?: string;
+  afterHash?: string;
+  reason?: string;
+}
+
+export interface RelayPreflightResponse {
+  revisionId: string;
+  routingHash: string;
+  result: {
+    targetRevision: string;
+    manifestHash: string;
+    diff: {
+      add: RelayPreflightDiffItem[];
+      replace: RelayPreflightDiffItem[];
+      delete: RelayPreflightDiffItem[];
+      excluded: RelayPreflightDiffItem[];
+    };
+  };
+}
+
+export interface ArgumentSummary {
+  pointer: string;
+  valueType: "object" | "array" | "string" | "number" | "boolean" | "null";
+  arrayLength: number | null;
+  stringLength: number | null;
+  sensitive: boolean;
+}
+
+export interface ConfirmationSummary {
+  challengeId: string;
+  bindingHash: string;
+  argumentHash: string;
+  createdAt: number;
+  expiresAt: number;
+  profileId: string;
+  profileRevisionId: string;
+  profileName: string;
+  clientKind: "claude" | "codex";
+  serverId: string;
+  serverName: string;
+  toolId: string;
+  toolName: string;
+  runtimeName: string;
+  mcpConfigRevisionId: string;
+  contractRevisionId: string;
+  globalPolicyRevisionId: string;
+  decision: "confirm";
+  reasonCodes: string[];
+  argumentSummary: ArgumentSummary[];
+}
+
+export type RelayObservationOutcome =
+  | "confirmation_required"
+  | "confirmed"
+  | "rejected"
+  | "expired"
+  | "denied"
+  | "not_executed"
+  | "executed"
+  | "failed"
+  | "unknown";
+
+export interface RelayObservation {
+  bootId: string;
+  sequence: number;
+  observedAt: number;
+  minuteBucket: string;
+  profileId: string;
+  profileRevisionId: string;
+  serverId: string;
+  toolId: string;
+  decision: ToolDecision;
+  reasonCodes: string[];
+  outcome: RelayObservationOutcome;
+  errorClass: string;
+  durationBucket: string;
+}
+
+export interface RelayObservationDrain {
+  bootId: string;
+  items: RelayObservation[];
+  nextSequence: number;
+}
+
+export interface DailyToolAggregate {
+  day: string;
+  profileId?: string;
+  profileRevisionId?: string;
+  serverId?: string;
+  toolId?: string;
+  clientKind: "claude" | "codex";
+  decision: ToolDecision;
+  outcome: RelayObservationOutcome;
+  errorClass?: string;
+  callCount: number;
+  errorCount: number;
+  durationBucket?: string;
+}
+
 export interface ProfileLaunchReadiness {
   ready: boolean;
   reasonCode?: string;

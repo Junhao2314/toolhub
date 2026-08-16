@@ -1,28 +1,97 @@
 import { Pencil, Plus, Search, Trash2 } from 'lucide-react'
 import { useState } from 'react'
-import { api, type MCPServer } from '../api/client'
-import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Status } from '../components/ui'
+import {
+  api,
+  type ConfirmationSummary,
+  type ContractGovernanceProjection,
+  type DailyToolAggregate,
+  type MCPServer,
+  type Profile,
+  type RelayConfigurationProjection,
+  type RelayObservationDrain,
+  type Target,
+} from '../api/client'
+import { Button, Empty, ErrorNotice, Field, IconButton, Loading, Modal, PageHeader, Segments, Status } from '../components/ui'
+import ConfirmationQueue from '../features/relay/ConfirmationQueue'
+import ContractReview from '../features/relay/ContractReview'
+import RelayConfiguration from '../features/relay/RelayConfiguration'
+import RelayObservability from '../features/relay/RelayObservability'
 import { useData } from '../hooks/useData'
 import { useI18n } from '../i18n'
 
 export default function MCP() {
   const { t } = useI18n()
   const state = useData(() => api.list<MCPServer>('/mcp/servers'), [])
+  const [view, setViewState] = useState<'services' | 'relay'>(() => new URLSearchParams(location.search).get('view') === 'relay' ? 'relay' : 'services')
   const [query, setQuery] = useState('')
   const [editing, setEditing] = useState<MCPServer | 'new' | null>(null)
   const [notice, setNotice] = useState('')
   const items = (state.data?.items ?? []).filter((server) => `${server.name} ${server.transport} ${server.description}`.toLowerCase().includes(query.toLowerCase()))
+  const setView = (next: string) => {
+    const relay = next === 'relay'
+    const url = new URL(location.href)
+    relay ? url.searchParams.set('view', 'relay') : url.searchParams.delete('view')
+    history.replaceState({}, '', `${url.pathname}${url.search}`)
+    setViewState(relay ? 'relay' : 'services')
+  }
   const remove = (server: MCPServer) => {
     if (!confirm(`${t('Delete')} ${server.name}?`)) return
     api.delete(`/mcp/servers/${server.id}`).then(state.reload).catch((reason: Error) => setNotice(reason.message))
   }
   return <>
-    <PageHeader title="MCP" detail={t('Server library and write-only secrets')} actions={<Button onClick={() => setEditing('new')}><Plus size={16} />{t('Add server')}</Button>} />
+    <PageHeader
+      title={view === 'relay' ? t('Shared relay') : 'MCP'}
+      detail={t(view === 'relay' ? 'Shared runtime routing, review, and observations' : 'Server library and write-only secrets')}
+      actions={view === 'services' ? <Button onClick={() => setEditing('new')}><Plus size={16} />{t('Add server')}</Button> : undefined}
+    />
+    <Segments options={['MCP services', 'Shared relay']} value={view === 'relay' ? 'Shared relay' : 'MCP services'} onChange={(value) => setView(value === 'Shared relay' ? 'relay' : 'services')} />
     {notice && <div className="inline-notice">{notice}</div>}
-    <div className="toolbar"><label className="search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search MCP servers')} /></label></div>
-    {state.loading ? <Loading /> : state.error ? <ErrorNotice message={state.error} retry={state.reload} /> : items.length === 0 ? <Empty title={t('No MCP servers')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Server')}</th><th>{t('Transport')}</th><th>{t('Endpoint')}</th><th>{t('Secrets')}</th><th>{t('Revision')}</th><th aria-label={t('Actions')} /></tr></thead><tbody>{items.map((server) => <tr key={server.id}><td><strong>{server.name}</strong><small>{server.description || '—'}</small></td><td><Status value={server.transport} /></td><td><code>{server.transport === 'stdio' ? server.command : server.url}</code></td><td>{[...server.envKeys, ...server.headerKeys].length ? [...server.envKeys, ...server.headerKeys].join(', ') : '—'}</td><td>{server.revision}</td><td className="row-actions"><IconButton label={t('Edit')} onClick={() => setEditing(server)}><Pencil size={16} /></IconButton><IconButton label={t('Delete')} onClick={() => remove(server)}><Trash2 size={16} /></IconButton></td></tr>)}</tbody></table></div>}
+    {view === 'services' ? <>
+      <div className="toolbar"><label className="search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('Search MCP servers')} /></label></div>
+      {state.loading ? <Loading /> : state.error ? <ErrorNotice message={state.error} retry={state.reload} /> : items.length === 0 ? <Empty title={t('No MCP servers')} /> : <div className="table-scroll"><table><thead><tr><th>{t('Server')}</th><th>{t('Transport')}</th><th>{t('Endpoint')}</th><th>{t('Secrets')}</th><th>{t('Revision')}</th><th aria-label={t('Actions')} /></tr></thead><tbody>{items.map((server) => <tr key={server.id}><td><strong>{server.name}</strong><small>{server.description || '—'}</small></td><td><Status value={server.transport} /></td><td><code>{server.transport === 'stdio' ? server.command : server.url}</code></td><td>{[...server.envKeys, ...server.headerKeys].length ? [...server.envKeys, ...server.headerKeys].join(', ') : '—'}</td><td>{server.revision}</td><td className="row-actions"><IconButton label={t('Edit')} onClick={() => setEditing(server)}><Pencil size={16} /></IconButton><IconButton label={t('Delete')} onClick={() => remove(server)}><Trash2 size={16} /></IconButton></td></tr>)}</tbody></table></div>}
+    </> : state.loading ? <Loading /> : state.error || !state.data ? <ErrorNotice message={state.error} retry={state.reload} /> : <RelayConsole servers={state.data.items} />}
     {editing && <ServerEditor server={editing === 'new' ? undefined : editing} close={() => setEditing(null)} saved={() => { setEditing(null); state.reload() }} />}
   </>
+}
+
+async function optionalRequest<T>(request: Promise<T>, fallback: T): Promise<{ data: T; error?: string }> {
+  try {
+    return { data: await request }
+  } catch (reason) {
+    return { data: fallback, error: reason instanceof Error ? reason.message : String(reason) }
+  }
+}
+
+function RelayConsole({ servers }: { servers: MCPServer[] }) {
+  const state = useData(async () => {
+    const [configuration, contracts, profiles, targets, confirmations, live, daily] = await Promise.all([
+      api.get<RelayConfigurationProjection>('/relay/configuration'),
+      api.get<ContractGovernanceProjection>('/relay/contracts'),
+      api.list<Profile>('/profiles?includeArchived=true'),
+      api.list<Target>('/targets'),
+      optionalRequest(api.get<{ items: ConfirmationSummary[] }>('/relay/confirmations'), { items: [] }),
+      optionalRequest(api.get<RelayObservationDrain>('/relay/observations/live?afterSequence=0&limit=100'), { bootId: '', items: [], nextSequence: 0 }),
+      api.get<{ items: DailyToolAggregate[]; days: number }>('/relay/observations/daily?days=30'),
+    ])
+    return {
+      configuration,
+      contracts,
+      profiles: profiles.items,
+      targets: targets.items,
+      confirmations,
+      live,
+      daily,
+    }
+  }, [])
+  if (state.loading) return <Loading />
+  if (state.error || !state.data) return <ErrorNotice message={state.error} retry={state.reload} />
+  const relayTarget = state.data.targets.find((target) => target.runtime === 'shared-relay')
+  return <div className="relay-governance">
+    <RelayConfiguration key={state.data.configuration.current.id} configuration={state.data.configuration} servers={servers} profiles={state.data.profiles} relayTarget={relayTarget} reload={state.reload} />
+    <ContractReview contracts={state.data.contracts} reload={state.reload} />
+    <ConfirmationQueue items={state.data.confirmations.data.items} unavailable={state.data.confirmations.error} reload={state.reload} />
+    <RelayObservability live={state.data.live.data} daily={state.data.daily} profiles={state.data.profiles} servers={servers} contracts={state.data.contracts} liveUnavailable={state.data.live.error} reload={state.reload} />
+  </div>
 }
 
 function ServerEditor({ server, close, saved }: { server?: MCPServer; close: () => void; saved: () => void }) {

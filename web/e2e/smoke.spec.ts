@@ -708,6 +708,205 @@ test('editing a pre-contract Profile requires adoption and honors confirmed rena
   })
 })
 
+test('shared relay governance console reviews updates without exposing payloads', async ({ page }, testInfo) => {
+  const consoleErrors: string[] = []
+  page.on('console', (message) => { if (message.type() === 'error') consoleErrors.push(message.text()) })
+  const firstServerID = '81222222-2222-4222-8222-222222222222'
+  const secondServerID = '82222222-2222-4222-8222-222222222222'
+  const firstMCPRevisionID = '83222222-2222-4222-8222-222222222222'
+  const secondMCPRevisionID = '84222222-2222-4222-8222-222222222222'
+  const latestSecondMCPRevisionID = '8e222222-2222-4222-8222-222222222222'
+  const appliedConfigurationID = '85222222-2222-4222-8222-222222222222'
+  const draftConfigurationID = '86222222-2222-4222-8222-222222222222'
+  const savedDraftConfigurationID = '8f222222-2222-4222-8222-222222222222'
+  const acceptedContractID = '87222222-2222-4222-8222-222222222222'
+  const latestContractID = '88222222-2222-4222-8222-222222222222'
+  const stableToolID = '89222222-2222-4222-8222-222222222222'
+  const removedToolID = '8a222222-2222-4222-8222-222222222222'
+  const newToolID = '8b222222-2222-4222-8222-222222222222'
+  const renameID = '8c222222-2222-4222-8222-222222222222'
+  const ambiguousRenameID = '8d222222-2222-4222-8222-222222222222'
+  const profileID = '81333333-3333-4333-8333-333333333333'
+  const profileRevisionID = '82333333-3333-4333-8333-333333333333'
+  const relayTargetID = '81444444-4444-4444-8444-444444444444'
+  const operationID = '81555555-5555-4555-8555-555555555555'
+  const challengeID = 'a'.repeat(64)
+  const bindingHash = 'b'.repeat(64)
+  const argumentHash = 'c'.repeat(64)
+  const targetRevision = 'd'.repeat(64)
+  const routingHash = 'e'.repeat(64)
+  const manifestHash = 'f'.repeat(64)
+  const servers = [
+    { id: firstServerID, currentRevisionId: firstMCPRevisionID, name: 'acemcp', description: 'Semantic code search', revision: 4, transport: 'http', args: [], url: 'http://127.0.0.1:8000/mcp', envKeys: [], headerKeys: [], contentHash: '1'.repeat(64), createdAt: now, updatedAt: now },
+    { id: secondServerID, currentRevisionId: latestSecondMCPRevisionID, name: 'docs', description: 'Documentation search', revision: 3, transport: 'http', args: [], url: 'http://127.0.0.1:8002/mcp', envKeys: [], headerKeys: [], contentHash: '2'.repeat(64), createdAt: now, updatedAt: now },
+  ]
+  const profile = { id: profileID, currentRevisionId: profileRevisionID, publishedRevisionId: profileRevisionID, publishedRevision: 3, publishedAt: now, name: 'claude-coding', description: '', clientKind: 'claude', category: 'coding', variant: 'default', migrationState: 'ready', revision: 3, canonicalHash: '3'.repeat(64), pendingBindings: false, skillIds: [], mcpServerIds: [firstServerID], skills: [], mcpServers: [], mcpGovernance: [], toolRules: [], effectiveVisibleCount: 1, createdAt: now, updatedAt: now }
+  const configuration = {
+    current: { id: draftConfigurationID, revision: 2, canonicalHash: '4'.repeat(64), mcpServers: [{ serverId: firstServerID, mcpRevisionId: firstMCPRevisionID, position: 0 }, { serverId: secondServerID, mcpRevisionId: secondMCPRevisionID, position: 1 }], metadata: { portChanged: false }, createdAt: now },
+    applied: { id: appliedConfigurationID, revision: 1, canonicalHash: '5'.repeat(64), mcpServers: [{ serverId: firstServerID, mcpRevisionId: firstMCPRevisionID, position: 0 }], metadata: {}, createdAt: now },
+    mode: 'compatibility',
+    defaultProfileId: null,
+  }
+  const contracts = {
+    items: [{
+      serverId: firstServerID,
+      serverName: 'acemcp',
+      reviewState: 'changed',
+      latest: {
+        revision: { id: latestContractID, serverId: firstServerID, revision: 2, canonicalHash: '6'.repeat(64), normalizedContract: {}, createdAt: now },
+        tools: [
+          { id: stableToolID, serverId: firstServerID, name: 'search_code', position: 0, inputSchema: {}, outputSchema: {}, annotations: { readOnlyHint: true }, presentation: { title: 'Search code' }, status: 'changed_presentation', globalDecision: 'allow', reasonCodes: ['annotation_read_only', 'reviewed_read_only'] },
+          { id: newToolID, serverId: firstServerID, name: 'lookup_code', position: 1, inputSchema: {}, outputSchema: {}, annotations: { readOnlyHint: true }, presentation: {}, status: 'new_hidden', globalDecision: 'allow', reasonCodes: ['annotation_read_only', 'reviewed_read_only'] },
+        ],
+      },
+      accepted: {
+        revision: { id: acceptedContractID, serverId: firstServerID, revision: 1, canonicalHash: '7'.repeat(64), normalizedContract: {}, createdAt: now },
+        tools: [
+          { id: stableToolID, serverId: firstServerID, name: 'search_code', position: 0, inputSchema: {}, outputSchema: {}, annotations: { readOnlyHint: true }, presentation: {}, status: 'unchanged', globalDecision: 'allow', reasonCodes: ['annotation_read_only', 'reviewed_read_only'] },
+          { id: removedToolID, serverId: firstServerID, name: 'find_code', position: 1, inputSchema: {}, outputSchema: {}, annotations: { readOnlyHint: true }, presentation: {}, status: 'unchanged', globalDecision: 'allow', reasonCodes: ['annotation_read_only', 'reviewed_read_only'] },
+        ],
+      },
+    }],
+    renames: [
+      { id: renameID, serverId: firstServerID, removedToolId: removedToolID, removedToolName: 'find_code', addedToolId: newToolID, addedToolName: 'lookup_code', removedContractRevisionId: acceptedContractID, addedContractRevisionId: latestContractID, status: 'suspected', createdAt: now },
+      { id: ambiguousRenameID, serverId: firstServerID, removedToolId: stableToolID, removedToolName: 'search_code', addedToolId: newToolID, addedToolName: 'lookup_code', removedContractRevisionId: acceptedContractID, addedContractRevisionId: latestContractID, status: 'ambiguous', createdAt: now },
+    ],
+  }
+  const relayTarget = { id: relayTargetID, targetKey: 'local/shared-relay', nodeId: '81666666-6666-4666-8666-666666666666', nodeName: 'local', nodeKind: 'local', runtime: 'shared-relay', managedUsername: 'root', writable: true, health: 'healthy', desiredRevision: 1, targetRevision, driftSummary: {}, relayFailureCount: 0, relaySuspended: false, relayMemberStatuses: [{ memberId: firstMCPRevisionID, name: 'acemcp', status: 'ready', capabilityKinds: ['tools'], capabilities: { tools: 2, resources: 0, resourceTemplates: 0, prompts: 0 }, checkedAt: now }, { memberId: secondMCPRevisionID, name: 'docs', status: 'unavailable', capabilityKinds: [], capabilities: { tools: 0, resources: 0, resourceTemplates: 0, prompts: 0 }, checkedAt: now, errorCode: 'upstream_unavailable', errorReason: 'connection refused' }] }
+  const confirmations = { items: [{ challengeId: challengeID, bindingHash, argumentHash, createdAt: Date.now() / 1000 - 30, expiresAt: Date.now() / 1000 + 240, profileId: profileID, profileRevisionId: profileRevisionID, profileName: profile.name, clientKind: 'claude', serverId: firstServerID, serverName: 'acemcp', toolId: stableToolID, toolName: 'search_code', runtimeName: 'mcpm', mcpConfigRevisionId: firstMCPRevisionID, contractRevisionId: acceptedContractID, globalPolicyRevisionId: '81777777-7777-4777-8777-777777777777', decision: 'confirm', reasonCodes: ['profile_rule'], argumentSummary: [{ pointer: '/o0', valueType: 'string', arrayLength: null, stringLength: 17, sensitive: true }] }] }
+  const live = { bootId: '81888888-8888-4888-8888-888888888888', nextSequence: 2, items: [{ bootId: '81888888-8888-4888-8888-888888888888', sequence: 1, observedAt: Date.now() / 1000 - 10, minuteBucket: now, profileId: profileID, profileRevisionId: profileRevisionID, serverId: firstServerID, toolId: stableToolID, decision: 'confirm', reasonCodes: ['profile_rule'], outcome: 'confirmed', errorClass: 'none', durationBucket: 'lt_100ms' }, { bootId: '81888888-8888-4888-8888-888888888888', sequence: 2, observedAt: Date.now() / 1000 - 5, minuteBucket: now, profileId: profileID, profileRevisionId: profileRevisionID, serverId: firstServerID, toolId: stableToolID, decision: 'confirm', reasonCodes: ['profile_rule'], outcome: 'unknown', errorClass: 'transport', durationBucket: 'lt_10s' }] }
+  const daily = { days: 30, items: [{ day: '2026-08-16', profileId: profileID, profileRevisionId: profileRevisionID, serverId: firstServerID, toolId: stableToolID, clientKind: 'claude', decision: 'confirm', outcome: 'executed', errorClass: 'none', callCount: 12, errorCount: 0, durationBucket: 'lt_100ms' }] }
+  let prepareBody: unknown = null
+  let preflightBody: unknown = null
+  let applyBody: unknown = null
+  let relayDraftBody: Record<string, unknown> | null = null
+  let confirmationBody: unknown = null
+  let renameConfirmed = false
+  let ambiguousRenameConfirmed = false
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const url = new URL(request.url())
+    const path = url.pathname
+    if (path === '/api/v1/auth/session') return route.fulfill({ json: session() })
+    if (path === '/api/v1/mcp/servers') return route.fulfill({ json: { items: servers } })
+    if (path === '/api/v1/profiles') return route.fulfill({ json: { items: [profile] } })
+    if (path === '/api/v1/targets') return route.fulfill({ json: { items: [relayTarget] } })
+    if (path === '/api/v1/relay/configuration' && request.method() === 'GET') return route.fulfill({ json: configuration })
+    if (path === '/api/v1/relay/configuration' && request.method() === 'PUT') {
+      relayDraftBody = request.postDataJSON() as Record<string, unknown>
+      configuration.current = {
+        ...configuration.current,
+        id: savedDraftConfigurationID,
+        revision: 3,
+        canonicalHash: '8'.repeat(64),
+        mcpServers: [{ serverId: firstServerID, mcpRevisionId: firstMCPRevisionID, position: 0 }, { serverId: secondServerID, mcpRevisionId: latestSecondMCPRevisionID, position: 1 }],
+      }
+      return route.fulfill({ json: configuration.current })
+    }
+    if (path === '/api/v1/relay/contracts') return route.fulfill({ json: contracts })
+    if (path === '/api/v1/relay/confirmations' && request.method() === 'GET') return route.fulfill({ json: confirmations })
+    if (path === '/api/v1/relay/observations/live') return route.fulfill({ json: live })
+    if (path === '/api/v1/relay/observations/daily') return route.fulfill({ json: daily })
+    if (path === '/api/v1/relay/configuration/prepare-profile-updates') {
+      prepareBody = request.postDataJSON()
+      return route.fulfill({ json: { items: [profileID] } })
+    }
+    if (path === '/api/v1/relay/configuration/preflight') {
+      preflightBody = request.postDataJSON()
+      return route.fulfill({ json: { revisionId: draftConfigurationID, routingHash, result: { targetRevision, manifestHash, diff: { add: [{ kind: 'mcp', name: 'docs', afterHash: '9'.repeat(64) }], replace: [], delete: [], excluded: [] } } } })
+    }
+    if (path === '/api/v1/relay/configuration/apply') {
+      applyBody = request.postDataJSON()
+      return route.fulfill({ status: 202, json: { id: operationID, kind: 'relay_config_apply', status: 'queued', metadata: {}, cancelRequested: false, createdAt: now, updatedAt: now } })
+    }
+    if (path === `/api/v1/relay/renames/${renameID}/confirm`) {
+      renameConfirmed = true
+      return route.fulfill({ status: 204 })
+    }
+    if (path === `/api/v1/relay/renames/${ambiguousRenameID}/confirm`) {
+      ambiguousRenameConfirmed = true
+      return route.fulfill({ status: 204 })
+    }
+    if (path === `/api/v1/relay/contracts/${latestContractID}/accept`) return route.fulfill({ status: 204 })
+    if (path === `/api/v1/relay/confirmations/${challengeID}/approve`) {
+      confirmationBody = request.postDataJSON()
+      return route.fulfill({ json: { challengeId: challengeID, bindingHash, grantExpiresAt: Date.now() / 1000 + 60 } })
+    }
+    if (path === '/api/v1/relay/contracts/observe') return route.fulfill({ status: 202, json: { id: operationID, kind: 'contract_observe', status: 'queued', metadata: {}, cancelRequested: false, createdAt: now, updatedAt: now } })
+    return route.fulfill({ status: 404, json: { error: { code: 'not_found', message: `${request.method()} ${path}` } } })
+  })
+
+  await page.goto('/mcp')
+  await expect(page.getByRole('button', { name: 'MCP services' })).toBeVisible()
+  await page.getByRole('button', { name: 'Shared relay' }).click()
+  await expect(page.getByRole('heading', { name: 'Shared relay' })).toBeVisible()
+  await expect(page.getByText('Configuration r2', { exact: true })).toBeVisible()
+  await expect(page.getByText('Applied r1', { exact: true })).toBeVisible()
+  await expect(page.getByText('Will disconnect current sessions')).toBeVisible()
+  const runningSet = page.getByRole('table', { name: 'Running MCP set' })
+  await expect(runningSet.getByRole('row').filter({ hasText: 'acemcp' })).toContainText('ready')
+  await expect(runningSet.getByRole('row').filter({ hasText: 'docs' })).toHaveCount(0)
+
+  const relayConfiguration = page.getByRole('region', { name: 'Relay configuration' })
+  await relayConfiguration.getByText('Edit running set', { exact: true }).click()
+  const saveRelayDraft = relayConfiguration.getByRole('button', { name: 'Save relay draft' })
+  await expect(saveRelayDraft).toBeEnabled()
+  await saveRelayDraft.click()
+  await expect(relayConfiguration.getByText('Configuration r3', { exact: true })).toBeVisible()
+  expect(relayDraftBody).toMatchObject({
+    revision: 2,
+    mcpServerIds: [firstServerID, secondServerID],
+    mcpRevisionIds: { [firstServerID]: firstMCPRevisionID, [secondServerID]: latestSecondMCPRevisionID },
+  })
+  await page.getByRole('button', { name: 'Prepare relay update' }).click()
+  await expect(relayConfiguration.getByText('claude-coding', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Run relay preflight' }).click()
+  await expect(relayConfiguration.getByText('Add · docs', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Apply relay update' }).click()
+  await expect(page.getByText(/Relay update queued/)).toBeVisible()
+  expect(prepareBody).toEqual({ revisionId: savedDraftConfigurationID })
+  expect(preflightBody).toEqual({ revisionId: savedDraftConfigurationID, profileIds: [profileID] })
+  expect(applyBody).toEqual({ revisionId: savedDraftConfigurationID, profileIds: [profileID], targetRevision, routingHash })
+
+  await expect(page.getByText('New tools', { exact: true })).toBeVisible()
+  await expect(page.getByText('Changed tools', { exact: true })).toBeVisible()
+  await expect(page.getByText('Removed tools', { exact: true })).toBeVisible()
+  await expect(page.getByText('Suspected rename', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Confirm rename · find_code → lookup_code' }).click()
+  expect(renameConfirmed).toBeTruthy()
+  const mapping = page.getByLabel('Explicit rename mapping')
+  const confirmMapping = page.getByRole('button', { name: 'Confirm selected mapping' })
+  await expect(confirmMapping).toBeDisabled()
+  await mapping.selectOption(ambiguousRenameID)
+  await expect(confirmMapping).toBeEnabled()
+  await confirmMapping.click()
+  expect(ambiguousRenameConfirmed).toBeTruthy()
+
+  const confirmation = page.getByRole('region', { name: `Confirmation · ${profile.name} · search_code` })
+  await expect(confirmation).toContainText(argumentHash)
+  await expect(confirmation).toContainText('Sensitive string · 17 characters')
+  const profileName = confirmation.getByLabel('Exact Profile name')
+  const approve = confirmation.getByRole('button', { name: 'Approve once' })
+  await expect(approve).toBeDisabled()
+  await profileName.fill('Claude-coding')
+  await expect(approve).toBeDisabled()
+  await profileName.fill(profile.name)
+  await expect(approve).toBeEnabled()
+  await approve.click()
+  expect(confirmationBody).toEqual({ profileName: profile.name, bindingHash })
+
+  await expect(page.getByText('confirmed', { exact: true })).toBeVisible()
+  await expect(page.getByText('unknown', { exact: true })).toBeVisible()
+  await expect(page.getByText('Check actual state before trying and confirming again')).toBeVisible()
+  await expect(page.getByText('12', { exact: true })).toBeVisible()
+  await expect(page.locator('input[type="password"]')).toHaveCount(0)
+  await expect(page.getByText('raw-secret-marker')).toHaveCount(0)
+  await expectNoViewportOverflow(page)
+  await page.screenshot({ path: `../test-results/${testInfo.project.name}-relay-governance.png`, fullPage: true })
+  expect(consoleErrors).toEqual([])
+})
+
 test('shared relay inventory, controls, and write-only MCP secrets use generation-2 contracts', async ({ page }, testInfo) => {
   const targetID = '11111111-1111-4111-8111-111111111111'
   const nodeID = '22222222-2222-4222-8222-222222222222'

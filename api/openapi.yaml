@@ -668,6 +668,7 @@ paths:
     post:
       tags: [Governance]
       operationId: confirmRelayRename
+      description: Confirms a unique suspected rename or an explicitly selected ambiguous proposal. Selecting an ambiguous mapping atomically rejects competing proposals in the same contract transition that share the old or new tool identity.
       parameters:
         - {name: proposalID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
         - {$ref: '#/components/parameters/CSRFToken'}

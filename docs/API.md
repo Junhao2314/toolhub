@@ -214,6 +214,11 @@ versioned classifier used to render relay routing; the browser does not
 reimplement that classifier. Projections never contain MCP call arguments,
 results, prompts, or raw transport errors. The projection returns at most 500
 deterministically ordered servers and 500 most-recent rename proposals.
+`POST /relay/renames/{proposalID}/confirm` accepts a unique suspected rename or
+an explicitly selected ambiguous proposal. Confirming an ambiguous mapping
+atomically rejects competing proposals from the same Contract transition that
+reuse either selected tool identity, then creates immutable candidate Policy
+and Profile revisions; it never Publishes or Applies them.
 
 `GET /relay/confirmations` reads bounded, payload-free, in-memory challenges
 from the Relay. Approval requires the exact case-sensitive Profile name and

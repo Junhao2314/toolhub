@@ -387,11 +387,24 @@ func (s *Store) ConfirmToolRename(ctx context.Context, proposalID string) error 
 		}
 		return err
 	}
-	if status != "suspected" {
+	if status != "suspected" && status != "ambiguous" {
 		return ErrConflict
 	}
 	if err := validateRenameProposalTx(ctx, tx, serverID, oldToolID, newToolID, oldContractID, newContractID); err != nil {
 		return err
+	}
+	if status == "ambiguous" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE mcp_tool_rename_proposals
+			SET status='rejected'
+			WHERE id<>$1
+			  AND server_id=$2
+			  AND removed_contract_revision_id=$3
+			  AND added_contract_revision_id=$4
+			  AND status='ambiguous'
+			  AND (removed_tool_id=$5 OR added_tool_id=$6)`, proposalID, serverID, oldContractID, newContractID, oldToolID, newToolID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO mcp_tool_renames(id,server_id,old_tool_id,new_tool_id,confirmed_removed_contract_revision_id,confirmed_added_contract_revision_id) VALUES($1,$2,$3,$4,$5,$6)`, uuid.NewString(), serverID, oldToolID, newToolID, oldContractID, newContractID); err != nil {
 		return err

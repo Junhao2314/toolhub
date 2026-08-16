@@ -286,6 +286,10 @@ function TargetInspector({
       () => setRelayQueueing(""),
     );
   };
+  const openRelayGovernance = () => {
+    history.pushState({}, "", "/mcp?view=relay");
+    dispatchEvent(new PopStateEvent("popstate"));
+  };
   return (
     <div className="target-inspector">
       <section className="target-hero">
@@ -373,6 +377,10 @@ function TargetInspector({
             />
           </div>
           <div className="relay-actions">
+            <Button variant="ghost" onClick={openRelayGovernance}>
+              <Bot size={16} />
+              {t("Relay governance")}
+            </Button>
             <IconButton
               label={t("Start")}
               disabled={relayQueueing !== ""}

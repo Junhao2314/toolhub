@@ -320,3 +320,77 @@ func TestSuspectedRenameConfirmationInheritsExplicitGovernance(t *testing.T) {
 		t.Fatalf("rename candidate hash=%s want canonical=%s", implicitProfile.CanonicalHash, expectedHash)
 	}
 }
+
+func TestConfirmAmbiguousToolRenameUsesExplicitProposalMapping(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	server, err := st.SaveMCPServer(ctx, "", MCPInput{Name: "ambiguous-renames", Transport: "http", URL: "https://example.invalid/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema := json.RawMessage(`{"type":"object","properties":{"id":{"type":"string"}}}`)
+	oldObservation, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{
+		{Name: "old_a", InputSchema: schema},
+		{Name: "old_b", InputSchema: schema},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AcceptContract(ctx, server.ID, oldObservation.Revision.ID); err != nil {
+		t.Fatal(err)
+	}
+	newObservation, err := st.ObserveContracts(ctx, ContractObservationInput{ServerID: server.ID, Tools: []ObservedToolInput{
+		{Name: "new_a", InputSchema: schema},
+		{Name: "new_b", InputSchema: schema},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selectedProposalID string
+	if err := st.pool.QueryRow(ctx, `
+		SELECT proposal.id::text
+		FROM mcp_tool_rename_proposals proposal
+		JOIN mcp_tools old_tool ON old_tool.id=proposal.removed_tool_id
+		JOIN mcp_tools new_tool ON new_tool.id=proposal.added_tool_id
+		WHERE proposal.server_id=$1 AND old_tool.name='old_a' AND new_tool.name='new_a' AND proposal.status='ambiguous'`, server.ID).Scan(&selectedProposalID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ConfirmToolRename(ctx, selectedProposalID); err != nil {
+		t.Fatalf("confirm explicit ambiguous mapping: %v", err)
+	}
+	var selectedStatus string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM mcp_tool_rename_proposals WHERE id=$1`, selectedProposalID).Scan(&selectedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if selectedStatus != "confirmed" {
+		t.Fatalf("selected proposal status=%q", selectedStatus)
+	}
+	var rejectedCompetitors, remainingCandidates int
+	if err := st.pool.QueryRow(ctx, `
+		WITH selected AS (
+			SELECT server_id,removed_tool_id,added_tool_id,removed_contract_revision_id,added_contract_revision_id
+			FROM mcp_tool_rename_proposals WHERE id=$1
+		)
+		SELECT
+			count(*) FILTER (WHERE proposal.status='rejected' AND (proposal.removed_tool_id=selected.removed_tool_id OR proposal.added_tool_id=selected.added_tool_id)),
+			count(*) FILTER (WHERE proposal.status='ambiguous' AND proposal.removed_tool_id<>selected.removed_tool_id AND proposal.added_tool_id<>selected.added_tool_id)
+		FROM mcp_tool_rename_proposals proposal CROSS JOIN selected
+		WHERE proposal.server_id=selected.server_id
+		  AND proposal.removed_contract_revision_id=selected.removed_contract_revision_id
+		  AND proposal.added_contract_revision_id=selected.added_contract_revision_id`, selectedProposalID).Scan(&rejectedCompetitors, &remainingCandidates); err != nil {
+		t.Fatal(err)
+	}
+	if rejectedCompetitors != 2 || remainingCandidates != 1 {
+		t.Fatalf("ambiguous proposal resolution rejected=%d remaining=%d", rejectedCompetitors, remainingCandidates)
+	}
+	var acceptedID string
+	if err := st.pool.QueryRow(ctx, `SELECT accepted_revision_id::text FROM mcp_contract_state WHERE server_id=$1`, server.ID).Scan(&acceptedID); err != nil {
+		t.Fatal(err)
+	}
+	if acceptedID != newObservation.Revision.ID {
+		t.Fatalf("accepted contract=%s want %s", acceptedID, newObservation.Revision.ID)
+	}
+	if err := st.ConfirmToolRename(ctx, selectedProposalID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replayed ambiguous mapping returned %v, want conflict", err)
+	}
+}
