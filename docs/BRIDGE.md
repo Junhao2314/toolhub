@@ -168,7 +168,17 @@ mount a managed home to work around access failures.
 The private governance routes are typed and remain on the same HMAC Unix
 socket: capability discovery, routing-bundle reload, contract observation,
 confirmation approve/reject, payload-free observation drain, and native-client
-inspection. They do not provide a generic action or body proxy.
+inspection, plus the hash-bound session canary. They do not provide a generic
+action or body proxy.
+
+The session canary is the final enforcement preflight check. It accepts only an
+`enforced` candidate routing bundle whose canonical hash matches the request,
+then uses the live shared upstream pool to verify: the explicit Claude Profile
+catalog, the explicit Codex Profile catalog, missing-Profile empty/default
+behavior, unknown-Profile `profile_unknown` rejection, and two concurrent
+sessions while every configured upstream process count remains exactly one. It
+lists catalogs but never calls a business tool. The HMAC-authenticated result is
+ephemeral and bypasses the BoltDB idempotency journal.
 
 Native-client inspection accepts only the managed username and `claude` or
 `codex` client kind. The Bridge scans only managed-home `~/.local/bin`,
@@ -203,7 +213,12 @@ configuration. Confirmation summaries contain only exact revision bindings,
 hashes, reason codes, and structural argument summaries. Observation drain uses
 `afterBootId`/`afterSequence`, returns at most 1000 payload-free events, and
 carries bounded outcomes, error classes, duration buckets, and minute buckets.
+The mcpm ring holds at most 100,000 events for no longer than 24 hours; ToolHub
+persists only payload-free daily aggregates and retains them for 30 days.
 Confirmation approval returns a finite grant expiry no more than 60 seconds in
 the future; rejection omits the grant expiry entirely.
+A one-shot grant is consumed before upstream dispatch and is never restored.
+Only a proven pre-dispatch failure can be `not_executed`; a post-dispatch
+transport ambiguity is `execution_unknown` and is never retried automatically.
 Mutation routes retain timestamp/nonce replay protection and idempotency
 semantics.

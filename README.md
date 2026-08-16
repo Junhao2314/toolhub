@@ -24,13 +24,22 @@ Licensed under the [MIT License](LICENSE).
   contain one native user-scope `toolhub-relay` anchor. The local Hermes MCP
   map is collapsed to that anchor on Apply; remote Hermes remains read-only.
 
+ToolHub is the MCP control plane: it versions Library inputs, Contracts,
+Profiles, policy, desired snapshots, and routing bundles, then delivers them
+through the Bridge. It never proxies MCP tool traffic. `mcpm` is the local MCP
+data plane: it owns the shared upstream process set, binds each native client
+session to an exact Published Profile revision, filters catalogs, enforces call
+policy, and emits payload-free observations.
+
 Relay governance starts in explicit `compatibility` mode. Contract review and
 Profile candidate creation never publish or Apply automatically. Switching to
 `enforced` is revision-bound and fails closed unless the applied v2 Relay state,
 Restore backup, accepted Contracts, Profile metadata, compatible mcpm features,
-and both Claude/Codex adapters are ready. The legacy `shared-mcp` Profile is
-retained for history and rollback, then hidden from the ordinary Profile list
-only after that transition succeeds.
+and both Claude/Codex adapters are ready. Enforcement preflight runs the fixed
+sequence mcpm capability, Claude inspection, Codex inspection, then a five-part
+session-routing canary over the candidate bundle. The legacy `shared-mcp`
+Profile is retained for history and rollback, then hidden from the ordinary
+Profile list only after that transition succeeds.
 
 There is no Agent, WebSocket enrollment, SSH fallback, RBAC, multi-user API,
 review/approval workflow, deployment table, or legacy job queue.
@@ -106,6 +115,14 @@ Target health is `healthy`, `drifted`, `repairing`, `blocked`, or `unavailable`.
 Operation status is `queued`, `running`, `succeeded`, `partial`, `failed`, or
 `cancelled`. Cancel prevents queued dispatch only; a running atomic target step
 is never interrupted.
+
+Calls classified for confirmation use a five-minute challenge and an exact,
+60-second one-shot grant. The grant is consumed before dispatch and is never
+restored. Only a proven pre-dispatch failure is reported as `not_executed`; a
+post-dispatch transport ambiguity is `execution_unknown` and must be inspected
+before any manual retry. Relay observations retain no payload and live in mcpm
+for at most 24 hours; ToolHub persists payload-free daily aggregates for 30
+days.
 
 ## Development
 

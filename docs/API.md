@@ -196,8 +196,10 @@ The Relay Configuration projection also reports the compatibility migration
 state, pending Contract/Profile review counts, the exact legacy `shared-mcp`
 identity and transition marker, Restore readiness, and a bounded mcpm capability
 view. The capability view exposes only compatibility, the validated runtime
-version, six fixed feature names, and a stable error code; raw Bridge/runtime
-errors are not returned.
+version, seven fixed feature names (`profile-session-binding`, `tool-filtering`,
+`call-policy`, `one-shot-confirmation`, `payload-free-observations`,
+`routing-hot-reload`, and `session-canary`), and a stable error code; raw
+Bridge/runtime errors are not returned.
 
 Relay Configuration Apply is revision-bound. `POST
 /relay/configuration/prepare-profile-updates` returns the Profiles affected by a
@@ -209,11 +211,16 @@ with the exact selected current Profile revisions and returns the target revisio
 and routing hash. Both Preflight and Apply require an explicit `mode` of
 `compatibility` or `enforced`. Enforced Preflight additionally fails closed on
 governance readiness, mcpm capability, or either Claude/Codex native-client
-inspection. `POST /relay/configuration/apply` accepts those values and
-queues a durable `relay_config_apply`; finalization advances the applied Relay
-revision, explicit mode, and selected Published Profile revisions only if every
-predecessor, prior mode, and hash still matches. `POST /mcp/policy/apply` uses the same target-revision
-binding for a durable `policy_apply` operation.
+inspection. Its runtime checks have a fixed order: mcpm capability, Claude
+inspection, Codex inspection, then the candidate bundle's session canary. The
+canary verifies explicit Claude and Codex Profile catalogs, missing-Profile
+empty/default behavior, unknown-Profile hard failure, and two concurrent
+sessions without increasing the one-process-per-upstream set. `POST
+/relay/configuration/apply` accepts those values and queues a durable
+`relay_config_apply`; finalization advances the applied Relay revision, explicit
+mode, and selected Published Profile revisions only if every predecessor, prior
+mode, and hash still matches. `POST /mcp/policy/apply` uses the same
+target-revision binding for a durable `policy_apply` operation.
 
 Contract governance is exposed through `GET /relay/contracts`, the durable
 `POST /relay/contracts/observe`, revision acceptance, and explicit rename
@@ -244,7 +251,10 @@ away; a rejection response must omit the grant expiry. A successful Relay
 decision is not reported as `200` unless its synchronous audit row was
 persisted. A transport failure or mismatched decision response returns
 `confirmation_outcome_unknown`; clients must not retry or claim the tool was not
-executed.
+executed. The Relay consumes a matching grant before dispatch and never restores
+it. A confirmed high-risk call is therefore dispatched at most once; only a
+proven pre-dispatch failure is `not_executed`, while post-dispatch ambiguity is
+`execution_unknown` and requires state inspection before a manual retry.
 
 `GET /profiles/{id}/launch` returns a command only when the current Profile is
 Published, its native Skill target and shared Relay snapshot are healthy and
@@ -257,7 +267,9 @@ observations. `GET
 /relay/observations/daily?days=30&profileId=...` reads PostgreSQL aggregates for
 the current database day and preceding window, capped at 31 days and 5,000 rows.
 Neither surface contains arguments, results, prompts, raw errors, secret values,
-or session identifiers.
+or session identifiers. The in-process Relay ring is bounded to 100,000 entries
+and a 24-hour TTL. ToolHub drains it into daily aggregates and removes aggregate
+buckets older than 30 days.
 
 ## Removed Routes
 

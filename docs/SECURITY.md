@@ -74,7 +74,17 @@ reason codes, and the decision outcome. A successful Relay decision is withheld
 from the Browser if that synchronous audit record cannot be persisted. A
 post-dispatch transport failure or a
 decision response whose challenge/binding does not match is audited and returned
-as an unknown outcome, never retried automatically.
+as an unknown outcome, never retried automatically. The Relay consumes a grant
+before dispatch and never restores it, so a confirmed high-risk call is sent at
+most once. Only an adapter-proven pre-dispatch failure is `not_executed`; any
+unproven transport failure after the boundary is `execution_unknown` and
+requires state inspection before a manual retry.
+
+The typed session canary is bound to the canonical hash of an `enforced`
+candidate routing bundle. It checks Claude/Codex catalog binding,
+missing/unknown Profile behavior, concurrency, and the existing shared process
+counts without invoking a business tool. Its HMAC response is ephemeral and is
+not stored in BoltDB or PostgreSQL.
 
 Local MCP intake requires a separate revision-bound confirmation. Its preview
 returns sanitized transport fields and secret key names only. After confirmation,
@@ -152,6 +162,12 @@ Each managed mcpm registry entry carries its Library content hash plus a runtime
 integrity hash. Relay scans project the Library hash only while the actual entry,
 including its ephemeral secret values, still matches that integrity hash;
 otherwise they return a drift hash. Inventory never returns plaintext values.
+
+Payload-free live observations are held only in the mcpm process, capped at
+100,000 entries and 24 hours. ToolHub stores daily aggregates rather than raw
+events and deletes aggregate buckets older than 30 days. Neither retention tier
+contains arguments, results, prompts, raw errors, Secret values, or persistent
+session identifiers.
 
 Remote Claude writes only top-level user `mcpServers` in `~/.claude.json`.
 Remote Codex writes only `mcp_servers` in `~/.codex/config.toml`. Claude
