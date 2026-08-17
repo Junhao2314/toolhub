@@ -90,9 +90,11 @@ func (s *Store) importSkillTx(ctx context.Context, tx pgx.Tx, source SourceInput
 	if err != nil {
 		return "", "", false, false, err
 	}
-	metadata, err := json.Marshal(source.Metadata)
-	if err != nil {
-		return "", "", false, false, err
+	metadata := []byte("{}")
+	if source.Metadata != nil {
+		if metadata, err = json.Marshal(source.Metadata); err != nil {
+			return "", "", false, false, err
+		}
 	}
 
 	var skillID, sourceID, currentVersionID string
