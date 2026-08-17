@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Junhao2314/toolhub/internal/bridgeprotocol"
+	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/security"
 )
 
@@ -377,4 +378,168 @@ func TestFinalizedProfilePublishCannotBeReplayedOverNewerPointer(t *testing.T) {
 	if publishedRevisionID != profile.CurrentRevisionID {
 		t.Fatalf("replay moved Published pointer to %s, want %s", publishedRevisionID, profile.CurrentRevisionID)
 	}
+}
+
+// relaxRelayApplyFixture creates a Profile Apply with one local client target
+// and one relay target, finishes both targets terminal (the relay with
+// relayCode if non-empty, else successfully), and returns the operation
+// together with the claimed client and relay operation targets.
+func relaxRelayApplyFixture(t *testing.T, st *Store, host, relayCode, clientFailureCode string) (domain.Operation, WorkItem, WorkItem) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.BootstrapEnvironment(ctx, host, "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	clientTarget := integrationTarget(t, st, "local/claude")
+	relayTarget := integrationTarget(t, st, "local/shared-relay")
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "claude-relaxed", ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientManifest, err := st.ResolveProfileManifest(ctx, profile.ID, clientTarget.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayManifest, err := st.ResolveProfileManifest(ctx, profile.ID, relayTarget.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, clientTarget.ID, strings.Repeat("a", 64), clientManifest, bridgeprotocol.Diff{}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayToken, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, relayTarget.ID, strings.Repeat("b", 64), relayManifest, bridgeprotocol.Diff{}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := st.CreateProfileApplyOperation(ctx, profile.ID, []string{clientToken, relayToken}, "relaxed-apply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The relay target depends on the client target; it is only claimable
+	// after the client succeeds, so claim and finish in dependency order.
+	clientItem, err := st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clientFailureCode == "" {
+		if err := st.FinishOperationTarget(ctx, clientItem.OperationTarget.ID, bridgeprotocol.OperationSucceeded, bridgeprotocol.TargetResult{}, nil); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err := st.FinishOperationTarget(ctx, clientItem.OperationTarget.ID, bridgeprotocol.OperationFailed, bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: clientFailureCode, Message: "client unavailable"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var relayItem WorkItem
+	if clientFailureCode != "" {
+		// The relay target is auto-failed as dependency_failed by
+		// FinishOperationTarget and is not claimable.
+		return operation, clientItem, relayItem
+	}
+	relayItem, err = st.ClaimOperationTarget(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if relayItem.Target.Runtime != domain.RuntimeSharedRelay {
+		t.Fatalf("second claim runtime=%s, want shared-relay", relayItem.Target.Runtime)
+	}
+	if relayCode == "" {
+		if err := st.FinishOperationTarget(ctx, relayItem.OperationTarget.ID, bridgeprotocol.OperationSucceeded, map[string]any{"routingReloaded": true, "routingHash": relayManifest.RelayGovernance.RoutingHash}, nil); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err := st.FinishOperationTarget(ctx, relayItem.OperationTarget.ID, bridgeprotocol.OperationFailed, bridgeprotocol.TargetResult{}, &bridgeprotocol.APIError{Code: relayCode, Message: "relay unavailable"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return operation, clientItem, relayItem
+}
+
+func TestFinalizeProfileApplyPublishesClientSnapshotWhenRelayUnavailable(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	operation, _, _ := relaxRelayApplyFixture(t, st, "publish-relaxed-host", bridgeprotocol.ErrMCPMIncompatible, "")
+	var operationStatus string
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, operation.ID).Scan(&operationStatus); err != nil {
+		t.Fatal(err)
+	}
+	if operationStatus != bridgeprotocol.OperationPartial {
+		t.Fatalf("Profile Apply status before relaxed finalization=%s, want partial", operationStatus)
+	}
+	if err := st.FinalizeProfileApply(ctx, operation.ID, operation.SourceID, operationRevisionID(t, st, operation)); err != nil {
+		t.Fatal(err)
+	}
+	var clientSnapshots, clientActive, relaySnapshots int
+	if err := st.pool.QueryRow(ctx, `
+		SELECT count(*) FILTER (WHERE t.runtime<>'shared-relay'),
+		       count(*) FILTER (WHERE t.runtime<>'shared-relay' AND active.snapshot_id=snapshot.id),
+		       count(*) FILTER (WHERE t.runtime='shared-relay')
+		FROM desired_snapshots snapshot
+		JOIN operation_targets ot ON ot.id=snapshot.source_operation_target_id
+		JOIN targets t ON t.id=ot.target_id
+		LEFT JOIN target_desired_snapshots active ON active.target_id=snapshot.target_id
+		WHERE snapshot.source_kind='profile_apply' AND snapshot.source_id=$1`, operation.SourceID).Scan(&clientSnapshots, &clientActive, &relaySnapshots); err != nil {
+		t.Fatal(err)
+	}
+	if clientSnapshots != 1 || clientActive != 1 || relaySnapshots != 0 {
+		t.Fatalf("relaxed finalize snapshots client=%d active=%d relay=%d, want 1/1/0", clientSnapshots, clientActive, relaySnapshots)
+	}
+	var publishedRevision string
+	if err := st.pool.QueryRow(ctx, `SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1`, operation.SourceID).Scan(&publishedRevision); err != nil {
+		t.Fatal(err)
+	}
+	if publishedRevision != operationRevisionID(t, st, operation) {
+		t.Fatalf("relaxed finalize published revision=%s", publishedRevision)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, operation.ID).Scan(&operationStatus); err != nil {
+		t.Fatal(err)
+	}
+	if operationStatus != bridgeprotocol.OperationPartial {
+		t.Fatalf("Profile Apply status after relaxed finalization=%s, want partial", operationStatus)
+	}
+}
+
+func TestFinalizeProfileApplyDefersRetryableRelayFailure(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	operation, _, _ := relaxRelayApplyFixture(t, st, "publish-deferred-host", bridgeprotocol.ErrRelayUnhealthy, "")
+	if err := st.FinalizeProfileApply(ctx, operation.ID, operation.SourceID, operationRevisionID(t, st, operation)); err != ErrFinalizationDeferred {
+		t.Fatalf("retryable relay failure finalization=%v, want ErrFinalizationDeferred", err)
+	}
+	var snapshots, published int
+	if err := st.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM desired_snapshots WHERE source_kind='profile_apply' AND source_id=$1),(SELECT count(*) FROM published_profiles WHERE profile_id=$1)`, operation.SourceID).Scan(&snapshots, &published); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 0 || published != 0 {
+		t.Fatalf("deferred finalize left snapshots=%d published=%d, want 0/0", snapshots, published)
+	}
+}
+
+func TestFinalizeProfileApplyRejectsFailedClientTarget(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	operation, _, _ := relaxRelayApplyFixture(t, st, "publish-client-failed-host", "", bridgeprotocol.ErrManagedUserMissing)
+	if err := st.FinalizeProfileApply(ctx, operation.ID, operation.SourceID, operationRevisionID(t, st, operation)); err != ErrConflict {
+		t.Fatalf("failed client finalization=%v, want ErrConflict", err)
+	}
+	var snapshots, published int
+	if err := st.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM desired_snapshots WHERE source_kind='profile_apply' AND source_id=$1),(SELECT count(*) FROM published_profiles WHERE profile_id=$1)`, operation.SourceID).Scan(&snapshots, &published); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 0 || published != 0 {
+		t.Fatalf("failed client finalize left snapshots=%d published=%d, want 0/0", snapshots, published)
+	}
+}
+
+// operationRevisionID returns the profile revision id recorded on the
+// operation metadata for a profile apply.
+func operationRevisionID(t *testing.T, st *Store, operation domain.Operation) string {
+	t.Helper()
+	ctx := context.Background()
+	var revisionID string
+	if err := st.pool.QueryRow(ctx, `SELECT metadata->>'profileRevisionId' FROM operations WHERE id=$1`, operation.ID).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
+	return revisionID
 }

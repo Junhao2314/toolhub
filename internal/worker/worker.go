@@ -365,10 +365,21 @@ func (w *Worker) loop(ctx context.Context, index int) {
 			w.logger.Error("finish operation target", "operationTargetId", item.OperationTarget.ID, "error", err)
 			continue
 		}
-		if status == bridgeprotocol.OperationSucceeded && item.Target.Runtime == domain.RuntimeSharedRelay && governanceOperationKind(item.Operation.Kind) {
-			if err := w.finalizeGovernanceOperation(ctx, item.Operation); err != nil {
-				w.logger.Error("finalize governance operation", "operationId", item.Operation.ID, "error", err)
+		if governanceOperationKind(item.Operation.Kind) {
+			terminal, err := w.store.OperationTargetsTerminal(ctx, item.Operation.ID)
+			if err != nil {
+				w.logger.Error("check governance finalization readiness", "operationId", item.Operation.ID, "error", err)
 				continue
+			}
+			// Profile Apply finalizes from the last terminal target with any
+			// outcome (the store gates on the exact target statuses), while
+			// relay-only governance operations keep finalizing only on relay
+			// success.
+			if terminal && (item.Operation.Kind == "apply" || (item.Target.Runtime == domain.RuntimeSharedRelay && status == bridgeprotocol.OperationSucceeded)) {
+				if err := w.finalizeGovernanceOperation(ctx, item.Operation); err != nil {
+					w.logger.Error("finalize governance operation", "operationId", item.Operation.ID, "error", err)
+					continue
+				}
 			}
 		}
 		if _, err := w.store.EnqueuePendingRerun(ctx, item.OperationTarget.ID); err != nil {
@@ -428,6 +439,11 @@ func (w *Worker) finalizeGovernanceOperation(ctx context.Context, operation doma
 		}
 	}
 	if finalizationErr == nil {
+		return nil
+	}
+	if errors.Is(finalizationErr, store.ErrFinalizationDeferred) {
+		// The operation is already terminal as partial (e.g. a retryable
+		// relay failure); defer without marking the whole operation failed.
 		return nil
 	}
 	apiErr := publicError(finalizationErr)

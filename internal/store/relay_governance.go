@@ -1607,23 +1607,61 @@ func (s *Store) FinalizeProfileApply(ctx context.Context, operationID, profileID
 		}
 		return err
 	}
-	if operationKind != "apply" || operationStatus != "running" || operationSource != profileID || stringMetadata(operationMetadata, "profileRevisionId") != profileRevisionID {
+	if operationKind != "apply" || operationSource != profileID || stringMetadata(operationMetadata, "profileRevisionId") != profileRevisionID {
+		return ErrConflict
+	}
+	if operationStatus != bridgeprotocol.OperationRunning && operationStatus != bridgeprotocol.OperationPartial {
 		return ErrConflict
 	}
 	var total, succeeded, pending int
-	if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE status='succeeded'),count(*) FILTER (WHERE governance_finalization_pending) FROM operation_targets WHERE operation_id=$1`, operationID).Scan(&total, &succeeded, &pending); err != nil {
+	var relayTargets, relaySucceededCount, relayFailedCount int
+	var relayFailedCode *string
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*),
+		       count(*) FILTER (WHERE ot.status='succeeded'),
+		       count(*) FILTER (WHERE ot.governance_finalization_pending),
+		       count(*) FILTER (WHERE t.runtime='shared-relay'),
+		       count(*) FILTER (WHERE t.runtime='shared-relay' AND ot.status='succeeded'),
+		       count(*) FILTER (WHERE t.runtime='shared-relay' AND ot.status='failed'),
+		       (SELECT ot2.error_code FROM operation_targets ot2 JOIN targets t2 ON t2.id=ot2.target_id
+		        WHERE ot2.operation_id=$1 AND t2.runtime='shared-relay' AND ot2.status='failed' LIMIT 1)
+		FROM operation_targets ot JOIN targets t ON t.id=ot.target_id
+		WHERE ot.operation_id=$1`, operationID).Scan(&total, &succeeded, &pending, &relayTargets, &relaySucceededCount, &relayFailedCount, &relayFailedCode); err != nil {
 		return err
 	}
-	if total == 0 || total != succeeded || total != pending {
+	if total == 0 {
 		return ErrConflict
 	}
+	clientTargets := total - relayTargets
+	clientSucceeded := succeeded - relaySucceededCount
+	allClientSucceeded := clientTargets > 0 && clientSucceeded == clientTargets
+	relaySucceeded := relayTargets == 1 && relaySucceededCount == 1 && relayFailedCount == 0
+	relayFailed := relayTargets == 1 && relaySucceededCount == 0 && relayFailedCount == 1 && relayFailedCode != nil
+	relayUnavailable := relayFailed && profileApplyAcceptsRelayUnavailable(*relayFailedCode)
+
 	routingHash := stringMetadata(operationMetadata, "routingHash")
-	var invalidRequests, relayTargets, reloadedRelayTargets int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE ot.request->>'sourceKind' <> 'profile_apply' OR ot.request->>'sourceId' <> $2), count(*) FILTER (WHERE t.runtime='shared-relay'), count(*) FILTER (WHERE t.runtime='shared-relay' AND ot.status='succeeded' AND ot.result->>'routingReloaded'='true' AND ot.result->>'routingHash'=$3) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=$1`, operationID, profileID, routingHash).Scan(&invalidRequests, &relayTargets, &reloadedRelayTargets); err != nil {
-		return err
-	}
-	if invalidRequests != 0 || relayTargets != 1 || reloadedRelayTargets != 1 || !bridgeprotocol.IsSHA256(routingHash) {
+	strictReady := operationStatus == bridgeprotocol.OperationRunning && relaySucceeded && succeeded == total && pending == total && bridgeprotocol.IsSHA256(routingHash)
+	// Relaxed finalize: routing governance is not installed, so a
+	// deterministically unavailable relay target is excluded and the client
+	// snapshots are published on their own.
+	relaxedReady := operationStatus == bridgeprotocol.OperationPartial && pending == 0 && allClientSucceeded && relayUnavailable
+	if !strictReady && !relaxedReady {
+		if operationStatus == bridgeprotocol.OperationPartial && pending == 0 && allClientSucceeded && relayFailed {
+			// The relay failed with a retryable or unexpected condition; the
+			// operation is already terminal as partial, so defer without
+			// marking the operation failed.
+			return ErrFinalizationDeferred
+		}
 		return ErrConflict
+	}
+	if strictReady {
+		var invalidRequests, reloadedRelayTargets int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE ot.request->>'sourceKind' <> 'profile_apply' OR ot.request->>'sourceId' <> $2), count(*) FILTER (WHERE t.runtime='shared-relay' AND ot.status='succeeded' AND ot.result->>'routingReloaded'='true' AND ot.result->>'routingHash'=$3) FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=$1`, operationID, profileID, routingHash).Scan(&invalidRequests, &reloadedRelayTargets); err != nil {
+			return err
+		}
+		if invalidRequests != 0 || reloadedRelayTargets != 1 {
+			return ErrConflict
+		}
 	}
 	var owner, clientKind string
 	var profileRevision int64
@@ -1643,10 +1681,19 @@ func (s *Store) FinalizeProfileApply(ctx context.Context, operationID, profileID
 	if err := validatePublishedProfilePredecessorTx(ctx, tx, profileID, stringMetadata(operationMetadata, "expectedPublishedProfileRevisionId")); err != nil {
 		return err
 	}
-	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profileID: profileRevisionID}}, routingHash); err != nil {
-		return err
+	if strictReady {
+		if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profileID: profileRevisionID}}, routingHash); err != nil {
+			return err
+		}
+	} else {
+		// Relaxed finalize without a routing publication: re-mark ownership so
+		// the finalizer clears it below and the operation status is
+		// recalculated atomically with the snapshot publish.
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=true,updated_at=now() WHERE operation_id=$1`, operationID); err != nil {
+			return err
+		}
 	}
-	snapshots, err := profileApplySnapshotsTx(ctx, tx, operationID, profileID, profileRevision, clientKind, routingHash)
+	snapshots, err := profileApplySnapshotsTx(ctx, tx, operationID, profileID, profileRevision, clientKind, routingHash, strictReady)
 	if err != nil {
 		return err
 	}
@@ -1674,7 +1721,7 @@ type profileApplySnapshot struct {
 	manifest          bridgeprotocol.DesiredManifest
 }
 
-func profileApplySnapshotsTx(ctx context.Context, tx pgx.Tx, operationID, profileID string, profileRevision int64, clientKind, routingHash string) ([]profileApplySnapshot, error) {
+func profileApplySnapshotsTx(ctx context.Context, tx pgx.Tx, operationID, profileID string, profileRevision int64, clientKind, routingHash string, includeRelay bool) ([]profileApplySnapshot, error) {
 	rows, err := tx.Query(ctx, `SELECT ot.id::text,ot.target_id::text,t.runtime,coalesce(ot.request->>'sourceKind',''),coalesce(ot.request->>'sourceId',''),ot.request->'manifest' FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=$1 ORDER BY ot.target_id`, operationID)
 	if err != nil {
 		return nil, err
@@ -1688,6 +1735,11 @@ func profileApplySnapshotsTx(ctx context.Context, tx pgx.Tx, operationID, profil
 		var manifestJSON []byte
 		if err := rows.Scan(&item.operationTargetID, &item.targetID, &runtime, &sourceKind, &sourceID, &manifestJSON); err != nil {
 			return nil, err
+		}
+		if runtime == domain.RuntimeSharedRelay && !includeRelay {
+			// The relay target failed and is excluded from finalization; its
+			// request manifest is intentionally not validated or pinned.
+			continue
 		}
 		manifest, err := bridgeprotocol.DecodeManifest(manifestJSON, true)
 		if err != nil || sourceKind != "profile_apply" || sourceID != profileID || manifest.Target.ID != item.targetID || manifest.Target.Runtime != runtime || manifest.ProfileID != profileID || manifest.ProfileRevision != profileRevision {
@@ -1713,8 +1765,21 @@ func profileApplySnapshotsTx(ctx context.Context, tx pgx.Tx, operationID, profil
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(result) != 2 || clientTargets != 1 || relayTargets != 1 {
+	if clientTargets != 1 || (includeRelay && relayTargets != 1) || (!includeRelay && relayTargets != 0) || len(result) != clientTargets+relayTargets {
 		return nil, ErrConflict
 	}
 	return result, nil
+}
+
+// profileApplyAcceptsRelayUnavailable reports whether a failed relay apply can
+// be finalized without the relay participating. Routing governance is not
+// installed, so a deterministically unavailable relay (missing or incompatible
+// mcpm runtime, or a port conflict) still allows the client snapshots to be
+// published; retryable and unexpected failures defer finalization instead.
+func profileApplyAcceptsRelayUnavailable(code string) bool {
+	switch code {
+	case bridgeprotocol.ErrMCPMMissing, bridgeprotocol.ErrMCPMIncompatible, bridgeprotocol.ErrRelayPortConflict:
+		return true
+	}
+	return false
 }

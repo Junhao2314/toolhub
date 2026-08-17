@@ -99,6 +99,14 @@ atomically consumes the tokens and queues one
 fleet operation. A changed Profile, changed target, expired token, reused
 token, or mismatched manifest returns `409`.
 
+Apply finalization publishes each client target's desired snapshot only after
+every client target succeeds. When routing governance is uninstalled, a
+deterministically unavailable relay target (`mcpm_missing`,
+`mcpm_incompatible`, `relay_port_conflict`) is excluded from finalization and
+the operation completes `partial` with the client snapshots published;
+retryable relay failures defer finalization without advancing snapshots, and
+client failures still block it.
+
 ## Targets And Snapshots
 
 `POST /nodes/refresh` creates a durable `refresh` operation and returns `202`.

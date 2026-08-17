@@ -25,6 +25,7 @@ const SchemaGeneration = 2
 var (
 	ErrNotFound               = errors.New("not found")
 	ErrConflict               = errors.New("state conflict")
+	ErrFinalizationDeferred   = errors.New("governance finalization deferred")
 	ErrLegacySchema           = errors.New("legacy database schema")
 	ErrInvalidCurrentPassword = errors.New("current password is incorrect")
 	ErrUsernameUnavailable    = errors.New("username is unavailable")

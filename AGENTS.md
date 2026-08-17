@@ -81,6 +81,12 @@ Use the matching project skills:
   Refresh; Preflight never silently advances a Profile.
 - Apply/Restore create immutable desired snapshots. The active target
   pointer and health projection are mutable; snapshot manifests are not.
+- Apply finalization publishes every client target's desired snapshot only
+  after all client targets succeed. With routing governance uninstalled, a
+  deterministically unavailable relay target (`mcpm_missing`,
+  `mcpm_incompatible`, `relay_port_conflict`) is excluded from finalization
+  and the apply completes partial; retryable relay failures defer
+  finalization without advancing snapshots.
 - Apply mirrors only manageable scope. Protected/built-in/hidden entries,
   `.system`, and non-user Claude MCP scopes are excluded.
 - Reconcile repairs pinned members only and preserves later unmanaged content.

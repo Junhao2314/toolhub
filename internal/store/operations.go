@@ -451,6 +451,17 @@ func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, st
 	return tx.Commit(ctx)
 }
 
+// OperationTargetsTerminal reports whether every operation target has reached
+// a terminal status. The worker uses it to attempt governance finalization
+// only after the last target of a fleet operation completes.
+func (s *Store) OperationTargetsTerminal(ctx context.Context, operationID string) (bool, error) {
+	var remaining int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM operation_targets WHERE operation_id=$1 AND status NOT IN ('succeeded','partial','failed','cancelled')`, operationID).Scan(&remaining); err != nil {
+		return false, err
+	}
+	return remaining == 0, nil
+}
+
 func (s *Store) FailGovernanceFinalization(ctx context.Context, operationID string, apiErr *bridgeprotocol.APIError) error {
 	if uuid.Validate(operationID) != nil {
 		return ErrNotFound

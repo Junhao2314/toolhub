@@ -72,6 +72,13 @@ HTTP mutation
 A target has at most one queued/running operation. Cancel marks only queued
 targets cancelled. A running destructive step completes atomically.
 
+Profile Apply finalization advances client desired snapshots only after every
+client target succeeded. When routing governance is uninstalled, a
+deterministically unavailable relay (`mcpm_missing`, `mcpm_incompatible`,
+`relay_port_conflict`) is excluded from finalization and the apply completes
+partial with the client snapshots published; retryable relay failures defer
+finalization without advancing snapshots, and client failures still block it.
+
 ## Reconcile
 
 Every five minutes the scheduler queues targets with an active desired
