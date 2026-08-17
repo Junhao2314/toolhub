@@ -343,19 +343,12 @@ func (r *RelayManager) Apply(ctx context.Context, user ManagedUser, request brid
 }
 
 func (r *RelayManager) RestartAndCheck(ctx context.Context, port int, manifest *bridgeprotocol.DesiredManifest) bridgeprotocol.RelayStatus {
-	_, contractErr := r.ValidateMCPM(ctx)
 	if err := r.RestartFixed(ctx, port); err != nil {
-		if contractErr != nil {
-			return r.relayBlockedFromError(ctx, port, contractErr, manifest)
-		}
 		var apiErr *bridgeprotocol.APIError
 		if errors.As(err, &apiErr) {
 			return r.relayBlockedStatus(ctx, port, apiErr.Code, apiErr.Message, manifest)
 		}
 		return r.relayBlockedStatus(ctx, port, bridgeprotocol.ErrRelayUnhealthy, "relay could not be restarted", manifest)
-	}
-	if contractErr != nil {
-		return r.relayBlockedFromError(ctx, port, contractErr, manifest)
 	}
 	if manifest == nil {
 		status, _ := r.Status(ctx, port, false)
@@ -382,7 +375,6 @@ func (r *RelayManager) RestartFixed(ctx context.Context, port int) error {
 }
 
 func (r *RelayManager) StartAndCheck(ctx context.Context, port int, manifest *bridgeprotocol.DesiredManifest) bridgeprotocol.RelayStatus {
-	_, contractErr := r.ValidateMCPM(ctx)
 	state, _ := r.Controller.Action(ctx, "status")
 	if strings.TrimSpace(state) != "active" {
 		if err := r.checkPortAvailable(port); err != nil {
@@ -390,13 +382,7 @@ func (r *RelayManager) StartAndCheck(ctx context.Context, port int, manifest *br
 		}
 	}
 	if _, err := r.Controller.Action(ctx, "start"); err != nil {
-		if contractErr != nil {
-			return r.relayBlockedFromError(ctx, port, contractErr, manifest)
-		}
 		return r.relayBlockedStatus(ctx, port, bridgeprotocol.ErrRelayUnhealthy, "relay unit could not be enabled and started", manifest)
-	}
-	if contractErr != nil {
-		return r.relayBlockedFromError(ctx, port, contractErr, manifest)
 	}
 	if manifest == nil {
 		status, _ := r.Status(ctx, port, false)
@@ -1226,7 +1212,9 @@ func writeRelayEnvironment(path string, port int) error {
 
 func relayProfileName(manifest bridgeprotocol.DesiredManifest) (string, error) {
 	if manifest.RelayGovernance == nil {
-		return "", errors.New("relay Profile routing is required")
+		// Compatibility/pass-through mode has no published mcpm Profile route;
+		// the shared relay endpoint intentionally exposes the configured set.
+		return "", nil
 	}
 	var bundle bridgeprotocol.RoutingBundle
 	if err := bridgeprotocol.DecodeGovernanceBody(manifest.RelayGovernance.RoutingBundle, &bundle); err != nil {

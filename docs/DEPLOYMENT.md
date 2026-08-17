@@ -138,9 +138,9 @@ credentials have no effect after the account exists.
 1. Refresh nodes and verify only accepted Salt keys are shown.
 2. Restore Salt connectivity until remote nodes report `3008.x`.
 3. Scan `local/claude`, `local/codex`, `local/hermes`, and `local/shared-relay`.
-4. For local MCP, verify `/usr/libexec/toolhub-mcpm` and its capability
-   contract, configure the fixed port, and Apply
-   a Profile to `local/shared-relay`.
+4. For local MCP, verify `/usr/libexec/toolhub-mcpm`, its `toolhub` profile,
+   and the fixed port. Configure the shared MCP set from the ToolHub MCP page
+   and apply the Relay Configuration; do not add MCP members to a Profile.
 5. Canary one non-critical Salt minion before a fleet Apply.
 
 Apply is destructive only inside the documented manageable scope and always

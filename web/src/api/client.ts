@@ -58,6 +58,7 @@ export interface MCPServer {
   envKeys: string[];
   headerKeys: string[];
   contentHash: string;
+  enabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -79,41 +80,13 @@ export interface Profile {
   pendingBindings?: boolean;
   archivedAt?: string | null;
   skillIds: string[];
-  mcpServerIds: string[];
   skills?: ProfileSkillPin[];
-  mcpServers?: ProfileMCPPin[];
-  mcpGovernance: ProfileMCPGovernance[];
-  toolRules: ProfileToolRule[];
-  effectiveVisibleCount: number;
   createdAt: string;
   updatedAt: string;
 }
 
 export type ProfileClientKind = "claude" | "codex" | "shared" | "unknown";
-export type MCPVisibilityMode = "all_accepted" | "selected" | "hidden";
 export type ToolDecision = "allow" | "confirm" | "deny";
-
-export interface ProfileMCPGovernance {
-  serverId: string;
-  mcpRevisionId: string;
-  acceptedContractRevisionId?: string;
-  visibilityMode: MCPVisibilityMode;
-}
-
-export interface ProfileToolRule {
-  toolId: string;
-  visible: boolean;
-  decision: ToolDecision;
-  reasonCodes?: string[];
-}
-
-export interface EffectiveToolDecision {
-  toolId: string;
-  globalDecision: ToolDecision;
-  profileDecision?: ToolDecision;
-  effectiveDecision: ToolDecision;
-  reasonCodes: string[];
-}
 
 export interface ProfileSkillPin {
   skillId: string;
@@ -124,30 +97,6 @@ export interface ProfileSkillPin {
   sha256: string;
   contentHash: string;
   current: boolean;
-}
-export interface ProfileMCPPin {
-  serverId: string;
-  revisionId: string;
-  revision: number;
-  name: string;
-  description?: string;
-  transport: string;
-  command?: string;
-  args?: string[];
-  url?: string;
-  envKeys: string[];
-  headerKeys: string[];
-  contentHash: string;
-  current: boolean;
-}
-export interface PendingSecretBinding {
-  profileRevisionId: string;
-  mcpRevisionId: string;
-  namespace: "env" | "header" | string;
-  key: string;
-  slotHash: string;
-  bound: boolean;
-  boundAt?: string;
 }
 export interface ProfileRevision extends Profile {
   profileId: string;

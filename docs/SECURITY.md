@@ -142,18 +142,15 @@ read-only for Skills and inventory.
 
 ## MCP Scope
 
-Local MCP requires a compatible installation-owned mcpm launcher
+Local MCP requires the installation-owned mcpm launcher
 (`/usr/libexec/toolhub-mcpm`, materialized by the installer with its runtime
-under `/var/lib/toolhub-bridge/mcpm`) whose machine-readable ToolHub contract
-advertises admin protocol 1, routing schema 1, and all required governance
-features. The installer and runtime fail closed; neither
-auto-finds, installs, upgrades, nor falls back to native per-server local
-delivery. ToolHub manages one profile named `toolhub`, one fixed relay unit, one
-atomic routing file at `~/.config/mcpm/toolhub-routing.json`, one admin socket at
-`/run/toolhub-mcpm/relay.sock`, and one `toolhub-relay` user-scope anchor in
-`~/.claude.json`, `~/.codex/config.toml`, and `~/.hermes/config.yaml`. Local
-Hermes' existing `mcp_servers` map is collapsed on Apply; reconcile preserves
-later unmanaged entries.
+under `/var/lib/toolhub-bridge/mcpm`). ToolHub manages MCP definitions and the
+enabled Relay Configuration set; mcpm manages the `toolhub` registry, upstream
+process lifecycle, and fixed relay unit. ToolHub Profiles manage Skills only.
+The relay runs pass-through without routing-governance flags. The optional admin
+socket at `/run/toolhub-mcpm/relay.sock` is not required for compatibility-mode
+health; fixed HTTP/systemd liveness is used when it is absent. ToolHub maintains
+only the fixed `toolhub-relay` consumer anchors in managed client configs.
 
 The relay unit hides all homes with a private tmpfs and binds back only the
 selected canonical managed home as writable. It binds the installation-owned

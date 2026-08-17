@@ -27,10 +27,11 @@ deployment table, review/approval state, legacy jobs, or Profile activation.
 - Skill artifacts are immutable and content-addressed; Library current versions
   can advance without changing an active desired snapshot.
 - One Profile head points to an immutable revision that pins exact Skill
-  versions, MCP revisions, and installation-local Secret bindings.
-- Preflight resolves that pinned revision and issues a
+  versions and installation-local Skill Secret bindings. MCP configuration is
+  owned by Relay Configuration revisions, never by a Profile.
+- Profile preflight resolves that pinned Skill revision and issues a
   five-minute one-use token bound to Profile revision, target revision, and
-  canonical manifest.
+  canonical Skill manifest.
 - Apply/Restore create immutable pinned desired snapshots. Only the target
   pointer and projected health are mutable.
 - All asynchronous work uses `operations` and `operation_targets`.
@@ -38,8 +39,9 @@ deployment table, review/approval state, legacy jobs, or Profile activation.
 ## Target Model
 
 The local node has `local/claude` and `local/codex` Skill targets,
-`local/shared-relay` for MCP, and read-only `local/hermes`. Each Salt node has
-Claude/Codex writable Skill+MCP targets and a read-only Hermes inventory target.
+`local/shared-relay` for MCP, and read-only `local/hermes`. The shared relay's
+MCP set is edited in ToolHub's MCP/Relay Configuration workflow and materialized
+by mcpm. Profiles do not select MCP members.
 
 Apply performs a destructive mirror only inside manageable
 scope. Runtime built-ins, hidden/protected entries, `.system`, ToolHub-reserved
@@ -72,12 +74,10 @@ HTTP mutation
 A target has at most one queued/running operation. Cancel marks only queued
 targets cancelled. A running destructive step completes atomically.
 
-Profile Apply finalization advances client desired snapshots only after every
-client target succeeded. When routing governance is uninstalled, a
-deterministically unavailable relay (`mcpm_missing`, `mcpm_incompatible`,
-`relay_port_conflict`) is excluded from finalization and the apply completes
-partial with the client snapshots published; retryable relay failures defer
-finalization without advancing snapshots, and client failures still block it.
+Profile Apply finalization advances Skill target snapshots only after every
+selected Skill target succeeds. Relay Configuration Apply is an independent
+operation; a relay failure cannot make a Skill-only Profile own or publish MCP
+state.
 
 ## Reconcile
 

@@ -98,20 +98,23 @@ type SkillVersion struct {
 }
 
 type MCPServer struct {
-	ID                string    `json:"id"`
-	CurrentRevisionID string    `json:"currentRevisionId"`
-	Name              string    `json:"name"`
-	Description       string    `json:"description,omitempty"`
-	Revision          int64     `json:"revision"`
-	Transport         string    `json:"transport"`
-	Command           string    `json:"command,omitempty"`
-	Args              []string  `json:"args,omitempty"`
-	URL               string    `json:"url,omitempty"`
-	EnvKeys           []string  `json:"envKeys"`
-	HeaderKeys        []string  `json:"headerKeys"`
-	ContentHash       string    `json:"contentHash"`
-	CreatedAt         time.Time `json:"createdAt"`
-	UpdatedAt         time.Time `json:"updatedAt"`
+	ID                string   `json:"id"`
+	CurrentRevisionID string   `json:"currentRevisionId"`
+	Name              string   `json:"name"`
+	Description       string   `json:"description,omitempty"`
+	Revision          int64    `json:"revision"`
+	Transport         string   `json:"transport"`
+	Command           string   `json:"command,omitempty"`
+	Args              []string `json:"args,omitempty"`
+	URL               string   `json:"url,omitempty"`
+	EnvKeys           []string `json:"envKeys"`
+	HeaderKeys        []string `json:"headerKeys"`
+	// Enabled is projected from the applied shared relay configuration. MCP
+	// library CRUD remains independent from Profile membership.
+	Enabled     bool      `json:"enabled"`
+	ContentHash string    `json:"contentHash"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
 type MCPRevision struct {
@@ -173,28 +176,30 @@ type ProfileToolRule struct {
 }
 
 type Profile struct {
-	ID                    string                 `json:"id"`
-	CurrentRevisionID     string                 `json:"currentRevisionId"`
-	PublishedRevisionID   string                 `json:"publishedRevisionId,omitempty"`
-	PublishedRevision     int64                  `json:"publishedRevision,omitempty"`
-	PublishedAt           *time.Time             `json:"publishedAt,omitempty"`
-	Name                  string                 `json:"name"`
-	Description           string                 `json:"description,omitempty"`
-	ClientKind            string                 `json:"clientKind,omitempty"`
-	Category              string                 `json:"category,omitempty"`
-	Variant               string                 `json:"variant,omitempty"`
-	MigrationState        string                 `json:"migrationState,omitempty"`
-	Revision              int64                  `json:"revision"`
-	CanonicalHash         string                 `json:"canonicalHash"`
-	PendingBindings       bool                   `json:"pendingBindings"`
-	ArchivedAt            *time.Time             `json:"archivedAt,omitempty"`
-	SkillIDs              []string               `json:"skillIds"`
-	MCPServerIDs          []string               `json:"mcpServerIds"`
+	ID                  string     `json:"id"`
+	CurrentRevisionID   string     `json:"currentRevisionId"`
+	PublishedRevisionID string     `json:"publishedRevisionId,omitempty"`
+	PublishedRevision   int64      `json:"publishedRevision,omitempty"`
+	PublishedAt         *time.Time `json:"publishedAt,omitempty"`
+	Name                string     `json:"name"`
+	Description         string     `json:"description,omitempty"`
+	ClientKind          string     `json:"clientKind,omitempty"`
+	Category            string     `json:"category,omitempty"`
+	Variant             string     `json:"variant,omitempty"`
+	MigrationState      string     `json:"migrationState,omitempty"`
+	Revision            int64      `json:"revision"`
+	CanonicalHash       string     `json:"canonicalHash"`
+	PendingBindings     bool       `json:"pendingBindings"`
+	ArchivedAt          *time.Time `json:"archivedAt,omitempty"`
+	SkillIDs            []string   `json:"skillIds"`
+	// Deprecated compatibility fields are retained in memory for reading old
+	// rows during migration, but are never part of the browser Profile API.
+	MCPServerIDs          []string               `json:"-"`
 	Skills                []ProfileSkillPin      `json:"skills"`
-	MCPServers            []ProfileMCPPin        `json:"mcpServers"`
-	MCPGovernance         []ProfileMCPGovernance `json:"mcpGovernance"`
-	ToolRules             []ProfileToolRule      `json:"toolRules"`
-	EffectiveVisibleCount int                    `json:"effectiveVisibleCount"`
+	MCPServers            []ProfileMCPPin        `json:"-"`
+	MCPGovernance         []ProfileMCPGovernance `json:"-"`
+	ToolRules             []ProfileToolRule      `json:"-"`
+	EffectiveVisibleCount int                    `json:"-"`
 	CreatedAt             time.Time              `json:"createdAt"`
 	UpdatedAt             time.Time              `json:"updatedAt"`
 }
@@ -213,9 +218,9 @@ type ProfileRevision struct {
 	PendingBindings bool                   `json:"pendingBindings"`
 	ArchivedRestore bool                   `json:"archivedRestore"`
 	Skills          []ProfileSkillPin      `json:"skills"`
-	MCPServers      []ProfileMCPPin        `json:"mcpServers"`
-	MCPGovernance   []ProfileMCPGovernance `json:"mcpGovernance"`
-	ToolRules       []ProfileToolRule      `json:"toolRules"`
+	MCPServers      []ProfileMCPPin        `json:"-"`
+	MCPGovernance   []ProfileMCPGovernance `json:"-"`
+	ToolRules       []ProfileToolRule      `json:"-"`
 	CreatedAt       time.Time              `json:"createdAt"`
 }
 

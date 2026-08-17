@@ -365,7 +365,7 @@ func (w *Worker) loop(ctx context.Context, index int) {
 			w.logger.Error("finish operation target", "operationTargetId", item.OperationTarget.ID, "error", err)
 			continue
 		}
-		if governanceOperationKind(item.Operation.Kind) {
+		if governanceOperationKind(item.Operation.Kind) && governanceFinalizationRequired(item.Operation) {
 			terminal, err := w.store.OperationTargetsTerminal(ctx, item.Operation.ID)
 			if err != nil {
 				w.logger.Error("check governance finalization readiness", "operationId", item.Operation.ID, "error", err)
@@ -808,9 +808,26 @@ func governanceOperationKind(kind string) bool {
 	return kind == "apply" || kind == "relay_config_apply" || kind == "policy_apply"
 }
 
+func governanceFinalizationRequired(operation domain.Operation) bool {
+	if operation.Kind != "apply" {
+		return true
+	}
+	// The active Skill-only Profile Apply carries no routing hash and therefore
+	// has no relay publication/finalization phase. Older governance applies
+	// retain the hash and continue through the compatibility finalizer.
+	return bridgeprotocol.IsSHA256(operationRoutingHash(operation.Metadata))
+}
+
 func desiredSnapshotOwnedByFinalizer(item store.WorkItem, sourceKind string) bool {
 	if item.Operation.Kind == "apply" {
-		return sourceKind == "profile_apply"
+		if sourceKind != "profile_apply" {
+			return false
+		}
+		var metadata struct {
+			Mode string `json:"mode"`
+		}
+		_ = json.Unmarshal(item.Operation.Metadata, &metadata)
+		return metadata.Mode != "skills_only"
 	}
 	return item.Target.Runtime == domain.RuntimeSharedRelay && (item.Operation.Kind == "relay_config_apply" || item.Operation.Kind == "policy_apply")
 }

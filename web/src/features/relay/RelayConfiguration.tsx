@@ -4,24 +4,21 @@ import {
   api,
   type MCPServer,
   type Operation,
-  type Profile,
   type RelayConfigurationProjection,
   type RelayPreflightResponse,
   type Target,
 } from "../../api/client";
-import { Button, ErrorNotice, Segments, Status } from "../../components/ui";
+import { Button, ErrorNotice, Status } from "../../components/ui";
 import { useI18n } from "../../i18n";
 
 export default function RelayConfiguration({
   configuration,
   servers,
-  profiles,
   relayTarget,
   reload,
 }: {
   configuration: RelayConfigurationProjection;
   servers: MCPServer[];
-  profiles: Profile[];
   relayTarget?: Target;
   reload: () => void;
 }) {
@@ -29,20 +26,20 @@ export default function RelayConfiguration({
   const [selected, setSelected] = useState(
     () => new Set(configuration.current.mcpServers.map((pin) => pin.serverId)),
   );
-  const [affectedProfileIDs, setAffectedProfileIDs] = useState<string[] | null>(
-    null,
-  );
   const [preflight, setPreflight] = useState<RelayPreflightResponse | null>(null);
-  const [requestedMode, setRequestedMode] = useState(configuration.mode);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   const currentIDs = configuration.current.mcpServers.map((pin) => pin.serverId);
   const currentIDSet = new Set(currentIDs);
+  const serverByID = useMemo(
+    () => new Map(servers.map((server) => [server.id, server])),
+    [servers],
+  );
   const orderedSelectedServers = [
     ...configuration.current.mcpServers.flatMap((pin) => {
-      const server = servers.find((candidate) => candidate.id === pin.serverId);
+      const server = serverByID.get(pin.serverId);
       return server && selected.has(server.id) ? [server] : [];
     }),
     ...servers.filter(
@@ -57,22 +54,8 @@ export default function RelayConfiguration({
         pin.serverId !== orderedSelectedServers[index]?.id ||
         pin.mcpRevisionId !== orderedSelectedServers[index]?.currentRevisionId,
     );
-  const profileByID = useMemo(
-    () => new Map(profiles.map((profile) => [profile.id, profile])),
-    [profiles],
-  );
-  const serverByID = useMemo(
-    () => new Map(servers.map((server) => [server.id, server])),
-    [servers],
-  );
   const configurationChanged =
     configuration.current.canonicalHash !== configuration.applied.canonicalHash;
-  const migrationStateLabel = {
-    waiting_contract_review: "Waiting for tool definition review",
-    profile_metadata_review: "Profile metadata review required",
-    compatibility_ready: "Ready to enforce routing",
-    enforced: "Routing enforcement active",
-  }[configuration.migration.state];
 
   const toggleServer = (serverID: string) => {
     setSelected((current) => {
@@ -80,12 +63,6 @@ export default function RelayConfiguration({
       next.has(serverID) ? next.delete(serverID) : next.add(serverID);
       return next;
     });
-    setAffectedProfileIDs(null);
-    setPreflight(null);
-  };
-
-  const changeMode = (label: string) => {
-    setRequestedMode(label === "Enforced" ? "enforced" : "compatibility");
     setPreflight(null);
   };
 
@@ -108,73 +85,45 @@ export default function RelayConfiguration({
         revision: configuration.current.revision,
         mcpServerIds: selectedIDs,
         mcpRevisionIds: Object.fromEntries(
-          orderedSelectedServers.map((server) => [
-            server.id,
-            server.currentRevisionId,
-          ]),
+          orderedSelectedServers.map((server) => [server.id, server.currentRevisionId]),
         ),
         metadata: configuration.current.metadata ?? {},
       });
-      setNotice(t("Relay configuration draft saved"));
-      reload();
-    });
-
-  const prepare = () =>
-    run("prepare", async () => {
-      const result = await api.post<{ items: string[] }>(
-        "/relay/configuration/prepare-profile-updates",
-        { revisionId: configuration.current.id },
-      );
-      setAffectedProfileIDs(result.items);
       setPreflight(null);
-      setNotice(t("Affected Profile revisions prepared"));
+      setNotice(t("Shared mcpm configuration draft saved"));
+      reload();
     });
 
   const runPreflight = () =>
     run("preflight", async () => {
       const result = await api.post<RelayPreflightResponse>(
         "/relay/configuration/preflight",
-        {
-          revisionId: configuration.current.id,
-          profileIds: affectedProfileIDs ?? [],
-          mode: requestedMode,
-        },
+        { revisionId: configuration.current.id, profileIds: [], mode: "compatibility" },
       );
       setPreflight(result);
-      setNotice(t("Relay preflight passed"));
+      setNotice(t("Shared relay preflight passed"));
     });
 
   const apply = () =>
     run("apply", async () => {
       if (!preflight) return;
-      const operation = await api.post<Operation>(
-        "/relay/configuration/apply",
-        {
-          revisionId: configuration.current.id,
-          profileIds: affectedProfileIDs ?? [],
-          mode: requestedMode,
-          targetRevision: preflight.result.targetRevision,
-          routingHash: preflight.routingHash,
-        },
-      );
-      setNotice(`${t("Relay update queued")} · ${operation.id.slice(0, 8)}`);
+      const operation = await api.post<Operation>("/relay/configuration/apply", {
+        revisionId: configuration.current.id,
+        profileIds: [],
+        mode: "compatibility",
+        targetRevision: preflight.result.targetRevision,
+        routingHash: preflight.routingHash,
+      });
+      setNotice(`${t("Shared relay update queued")} · ${operation.id.slice(0, 8)}`);
+      reload();
     });
 
   const preflightItems = preflight
     ? [
         ...preflight.result.diff.add.map((item) => ({ ...item, action: "Add" })),
-        ...preflight.result.diff.replace.map((item) => ({
-          ...item,
-          action: "Replace",
-        })),
-        ...preflight.result.diff.delete.map((item) => ({
-          ...item,
-          action: "Delete",
-        })),
-        ...preflight.result.diff.excluded.map((item) => ({
-          ...item,
-          action: "Excluded",
-        })),
+        ...preflight.result.diff.replace.map((item) => ({ ...item, action: "Replace" })),
+        ...preflight.result.diff.delete.map((item) => ({ ...item, action: "Delete" })),
+        ...preflight.result.diff.excluded.map((item) => ({ ...item, action: "Excluded" })),
       ]
     : [];
 
@@ -182,10 +131,10 @@ export default function RelayConfiguration({
     <section className="relay-section" aria-labelledby="relay-configuration-title">
       <header className="relay-section-heading">
         <div>
-          <h2 id="relay-configuration-title">{t("Relay configuration")}</h2>
-          <p>{t("One shared process set with revision-bound routing")}</p>
+          <h2 id="relay-configuration-title">{t("Shared mcpm relay")}</h2>
+          <p>{t("ToolHub edits the enabled set; mcpm owns every upstream process")}</p>
         </div>
-        <Status value={configuration.mode} />
+        <Status value="compatibility" />
       </header>
 
       {error && <ErrorNotice message={error} />}
@@ -204,62 +153,28 @@ export default function RelayConfiguration({
         </div>
         <div className={configurationChanged ? "restart" : "hot-reload"}>
           <span>{t("Runtime impact")}</span>
-          <strong>
-            {t(
-              configurationChanged
-                ? "Will disconnect current sessions"
-                : "Profile-only routing update does not restart relay",
-            )}
-          </strong>
+          <strong>{t(configurationChanged ? "mcpm will reconcile the shared process set" : "No pending relay change")}</strong>
         </div>
       </div>
 
       <div className="relay-readiness-strip">
         <div>
-          <span>{t("Migration readiness")}</span>
-          <strong>{t(migrationStateLabel)}</strong>
-          <small>
-            {t("{count} pending tool definition reviews", {
-              count: configuration.migration.pendingContractReviews,
-            })}
-          </small>
-          {configuration.migration.ambiguousProfiles > 0 && (
-            <small>
-              {t("{count} Profiles need metadata review", {
-                count: configuration.migration.ambiguousProfiles,
-              })}
-            </small>
-          )}
-        </div>
-        <div>
           <span>{t("mcpm capability")}</span>
           <strong>
             {configuration.runtimeCapability.compatible
               ? `mcpm ${configuration.runtimeCapability.runtimeVersion}`
-              : t("mcpm incompatible or unavailable")}
+              : t("mcpm unavailable")}
           </strong>
           <small>
             {configuration.runtimeCapability.compatible
-              ? t("{count} required features available", {
-                  count: configuration.runtimeCapability.features.length,
-                })
+              ? t("Compatibility/pass-through health is HTTP-backed")
               : configuration.runtimeCapability.errorCode}
           </small>
         </div>
         <div>
-          <span>{t("Routing mode")}</span>
-          <Segments
-            options={["Compatibility", "Enforced"]}
-            value={requestedMode === "enforced" ? "Enforced" : "Compatibility"}
-            onChange={changeMode}
-          />
-          <small>
-            {t(
-              requestedMode === "enforced"
-                ? "Enforcement fails closed until every readiness check passes"
-                : "Compatibility preserves the complete native tool catalog",
-            )}
-          </small>
+          <span>{t("Ownership")}</span>
+          <strong>{t("ToolHub config · mcpm processes")}</strong>
+          <small>{t("Profiles manage Skills only")}</small>
         </div>
       </div>
 
@@ -267,7 +182,7 @@ export default function RelayConfiguration({
         <table aria-label={t("Running MCP set")}>
           <thead>
             <tr>
-              <th>{t("Running set")}</th>
+              <th>{t("Enabled member")}</th>
               <th>{t("Config revision")}</th>
               <th>{t("Process state")}</th>
               <th>{t("Capabilities")}</th>
@@ -277,28 +192,14 @@ export default function RelayConfiguration({
             {configuration.applied.mcpServers.map((pin) => {
               const server = serverByID.get(pin.serverId);
               const member = relayTarget?.relayMemberStatuses.find(
-                (item) =>
-                  item.memberId === pin.mcpRevisionId ||
-                  item.name === server?.name,
+                (item) => item.memberId === pin.mcpRevisionId || item.name === server?.name,
               );
               return (
                 <tr key={pin.serverId}>
-                  <td>
-                    <strong>{server?.name ?? pin.serverId}</strong>
-                    <small>{server?.transport ?? "—"}</small>
-                  </td>
-                  <td>
-                    <code>{pin.mcpRevisionId.slice(0, 12)}</code>
-                  </td>
-                  <td>
-                    <Status value={member?.status ?? "unavailable"} />
-                    {member?.errorReason && <small>{member.errorReason}</small>}
-                  </td>
-                  <td>
-                    {member
-                      ? `${member.capabilities.tools} ${t("Tools").toLowerCase()}`
-                      : "—"}
-                  </td>
+                  <td><strong>{server?.name ?? pin.serverId}</strong><small>{server?.transport ?? "—"}</small></td>
+                  <td><code>{pin.mcpRevisionId.slice(0, 12)}</code></td>
+                  <td><Status value={member?.status ?? "unavailable"} />{member?.errorReason && <small>{member.errorReason}</small>}</td>
+                  <td>{member ? `${member.capabilities.tools} ${t("Tools").toLowerCase()}` : "—"}</td>
                 </tr>
               );
             })}
@@ -306,86 +207,29 @@ export default function RelayConfiguration({
         </table>
       </div>
 
-      <details className="relay-editor">
-        <summary>{t("Edit running set")}</summary>
+      <details className="relay-editor" open>
+        <summary>{t("Edit enabled mcpm members")}</summary>
         <div className="relay-server-options">
           {servers.map((server) => (
             <label key={server.id}>
-              <input
-                type="checkbox"
-                checked={selected.has(server.id)}
-                onChange={() => toggleServer(server.id)}
-              />
-              <span>
-                <strong>{server.name}</strong>
-                <small>
-                  {server.transport} · r{server.revision}
-                </small>
-              </span>
+              <input type="checkbox" checked={selected.has(server.id)} onChange={() => toggleServer(server.id)} />
+              <span><strong>{server.name}</strong><small>{server.transport} · r{server.revision}</small></span>
             </label>
           ))}
         </div>
-        <Button disabled={!dirty || busy !== ""} onClick={saveDraft}>
-          <Save size={15} />
-          {t("Save relay draft")}
-        </Button>
+        <Button disabled={!dirty || busy !== ""} onClick={saveDraft}><Save size={15} />{t("Save relay draft")}</Button>
       </details>
 
       <div className="relay-apply-flow">
         <div>
-          <span>1</span>
-          <strong>{t("Affected Profiles")}</strong>
-          {affectedProfileIDs === null ? (
-            <small>{t("Prepare exact candidate revisions before preflight")}</small>
-          ) : affectedProfileIDs.length === 0 ? (
-            <small>{t("No affected Published Profiles")}</small>
-          ) : (
-            <div className="relay-profile-list">
-              {affectedProfileIDs.map((id) => (
-                <span key={id}>{profileByID.get(id)?.name ?? id}</span>
-              ))}
-            </div>
-          )}
-          <Button
-            variant="secondary"
-            disabled={busy !== "" || dirty}
-            onClick={prepare}
-          >
-            <Play size={15} />
-            {t("Prepare relay update")}
-          </Button>
+          <span>1</span><strong>{t("Relay preflight")}</strong>
+          {preflightItems.length > 0 ? <div className="relay-diff-list">{preflightItems.map((item, index) => <small key={`${item.action}-${item.name}-${index}`}>{t(item.action)} · {item.name}</small>)}</div> : <small>{t("Save a draft, then preflight the exact enabled set")}</small>}
+          <Button variant="secondary" disabled={busy !== "" || dirty} onClick={runPreflight}><ShieldCheck size={15} />{t("Run relay preflight")}</Button>
         </div>
         <div>
-          <span>2</span>
-          <strong>{t("Relay preflight")}</strong>
-          {preflightItems.length > 0 ? (
-            <div className="relay-diff-list">
-              {preflightItems.map((item, index) => (
-                <small key={`${item.action}-${item.name}-${index}`}>
-                  {t(item.action)} · {item.name}
-                </small>
-              ))}
-            </div>
-          ) : (
-            <small>{t("No preflight result")}</small>
-          )}
-          <Button
-            variant="secondary"
-            disabled={busy !== "" || affectedProfileIDs === null}
-            onClick={runPreflight}
-          >
-            <ShieldCheck size={15} />
-            {t("Run relay preflight")}
-          </Button>
-        </div>
-        <div>
-          <span>3</span>
-          <strong>{t("Apply relay update")}</strong>
-          <small>{t("Publishes only after relay health verification")}</small>
-          <Button disabled={busy !== "" || !preflight} onClick={apply}>
-            <Play size={15} />
-            {t("Apply relay update")}
-          </Button>
+          <span>2</span><strong>{t("Apply shared relay")}</strong>
+          <small>{t("mcpm starts, stops, and reuses one process per enabled member")}</small>
+          <Button disabled={busy !== "" || !preflight} onClick={apply}><Play size={15} />{t("Apply relay update")}</Button>
         </div>
       </div>
     </section>

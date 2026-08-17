@@ -106,8 +106,11 @@ runs to its atomic terminal state.
 
 - Claude Skills: managed user's `~/.claude/skills`.
 - Codex Skills: managed user's `~/.codex/skills`.
-- Claude MCP: top-level user entries in `~/.claude.json`.
-- Codex MCP: `mcp_servers` in `~/.codex/config.toml`.
+- Claude MCP: top-level user entries in `~/.claude.json`; these native
+  inventories are not Profile membership.
+- Codex MCP: `mcp_servers` in `~/.codex/config.toml`; these native inventories
+  are not Profile membership. The local shared MCP service is edited through
+  ToolHub Relay Configuration and owned at runtime by mcpm.
 - Hermes: inventory-only; it is never a Library import source and every write
   is rejected.
 

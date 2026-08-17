@@ -31,6 +31,7 @@ type Report struct {
 	Skills             int                       `json:"skills"`
 	MCPServers         int                       `json:"mcpServers"`
 	MCPSecrets         int                       `json:"mcpSecrets"`
+	RelayMCPServers    int                       `json:"relayMcpServers"`
 	Profiles           int                       `json:"profiles"`
 	Renames            int                       `json:"renames"`
 	TransportChanges   int                       `json:"transportChanges"`
@@ -49,6 +50,7 @@ func (r Report) Human() []byte {
 	fmt.Fprintf(&output, "Library Skills: %d\n", r.Skills)
 	fmt.Fprintf(&output, "MCP definitions: %d\n", r.MCPServers)
 	fmt.Fprintf(&output, "MCP Secret records: %d (values redacted)\n", r.MCPSecrets)
+	fmt.Fprintf(&output, "enabled shared-relay MCP definitions: %d\n", r.RelayMCPServers)
 	fmt.Fprintf(&output, "generated Profiles: %d\n", r.Profiles)
 	fmt.Fprintf(&output, "update schedule: %s [%s]\n", r.UpdateCron, r.Timezone)
 	for _, profile := range r.ProfileMemberships {

@@ -51,6 +51,32 @@ func TestRelayProjectionUsesAdditiveMigration(t *testing.T) {
 	}
 }
 
+func TestTextProcessingCleanupMigrationIsExactAndScoped(t *testing.T) {
+	body, err := migrationFS.ReadFile("migrations/017_remove_text_processing_profiles.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{
+		"claude-text-processing",
+		"codex-text-processing",
+		"toolhub_text_processing_profiles",
+		"toolhub_text_processing_revisions",
+		"ALTER TABLE profile_revision_skills DISABLE TRIGGER USER",
+		"ALTER TABLE profile_revision_skills ENABLE TRIGGER USER",
+		"archived_at IS NOT NULL",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("text-processing cleanup migration is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"TRUNCATE", "DROP TABLE", "DELETE FROM account", "DELETE FROM sessions"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("text-processing cleanup migration contains broad or security-sensitive operation %q", forbidden)
+		}
+	}
+}
+
 func TestLegacySchemaErrorIsActionable(t *testing.T) {
 	err := legacySchemaError()
 	if !strings.Contains(err.Error(), "fresh PostgreSQL volume") || !strings.Contains(err.Error(), "generation 2") {

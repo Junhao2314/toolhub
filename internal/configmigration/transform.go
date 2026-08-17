@@ -138,12 +138,12 @@ func Prepare(snapshot Snapshot, legacyCipher *security.Cipher) (Prepared, error)
 	}
 	claudeSkills := sortedUnique(snapshot.SkillDesired["claude"])
 	codexSkills := sortedUnique(snapshot.SkillDesired["codex"])
-	sharedMCP := sortedUnique(append(append([]string(nil), snapshot.MCPDesired["claude"]...), snapshot.MCPDesired["codex"]...))
+	relayMCP := sortedUnique(append(append([]string(nil), snapshot.MCPDesired["claude"]...), snapshot.MCPDesired["codex"]...))
 	input.Profiles = []store.ConfigImportProfile{
 		{Name: "claude-skills", Description: "Claude Skill selection", LegacySkillIDs: claudeSkills},
 		{Name: "codex-skills", Description: "Codex Skill selection", LegacySkillIDs: codexSkills},
-		{Name: "shared-mcp", Description: "Claude and Codex MCP servers", LegacyMCPServerIDs: sharedMCP},
 	}
+	input.RelayMCPServerIDs = relayMCP
 	input.SourceFingerprint = sourceFingerprint(snapshot.Migrations, input)
 
 	report := Report{
@@ -161,10 +161,10 @@ func Prepare(snapshot Snapshot, legacyCipher *security.Cipher) (Prepared, error)
 		ProfileMemberships: []ProfileMembershipReport{
 			{Name: "claude-skills", Skills: len(claudeSkills)},
 			{Name: "codex-skills", Skills: len(codexSkills)},
-			{Name: "shared-mcp", MCPServers: len(sharedMCP)},
 		},
-		UpdateCron: input.UpdateCron,
-		Timezone:   input.Timezone,
+		RelayMCPServers: len(relayMCP),
+		UpdateCron:      input.UpdateCron,
+		Timezone:        input.Timezone,
 	}
 	return Prepared{Import: input, Report: report}, nil
 }
@@ -433,6 +433,7 @@ func sourceFingerprint(migrations []int64, input store.ConfigImportInput) string
 		Skills     []fingerprintSkill
 		MCPServers []fingerprintMCP
 		Profiles   []fingerprintProfile
+		RelayMCP   []string
 		UpdateCron string
 		Timezone   string
 	}{
@@ -461,6 +462,7 @@ func sourceFingerprint(migrations []int64, input store.ConfigImportInput) string
 			SkillIDs: sortedUnique(profile.LegacySkillIDs), MCPServerIDs: sortedUnique(profile.LegacyMCPServerIDs),
 		})
 	}
+	canonical.RelayMCP = sortedUnique(input.RelayMCPServerIDs)
 	body, _ := json.Marshal(canonical)
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])

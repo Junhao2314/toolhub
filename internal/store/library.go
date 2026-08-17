@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"regexp"
 	"sort"
@@ -259,12 +260,83 @@ type MCPInput struct {
 	URL         string            `json:"url,omitempty"`
 	Env         map[string]string `json:"env,omitempty"`
 	Headers     map[string]string `json:"headers,omitempty"`
-	Provenance  map[string]any    `json:"-"`
+	// CustomJSON accepts the standard MCP client configuration shape:
+	// {"mcpServers":{"name":{"type":"stdio",...}}}. It is parsed into
+	// the same bounded fields as the form input; arbitrary commands or fields
+	// are never forwarded to mcpm.
+	CustomJSON json.RawMessage `json:"customJson,omitempty"`
+	Provenance map[string]any  `json:"-"`
 }
 
 var mcpNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
+type customMCPConfig struct {
+	MCPServers map[string]customMCPServer `json:"mcpServers"`
+}
+
+type customMCPServer struct {
+	Type        string            `json:"type,omitempty"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Description string            `json:"description,omitempty"`
+}
+
+func normalizeCustomMCPJSON(raw json.RawMessage) (MCPInput, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return MCPInput{}, errors.New("custom MCP JSON is empty")
+	}
+	var document []byte
+	trimmed := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(trimmed, `"`) {
+		var text string
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return MCPInput{}, errors.New("custom MCP JSON must be an object")
+		}
+		document = []byte(text)
+	} else {
+		document = append([]byte(nil), raw...)
+	}
+	var config customMCPConfig
+	decoder := json.NewDecoder(strings.NewReader(string(document)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&config); err != nil {
+		return MCPInput{}, fmt.Errorf("custom MCP JSON is invalid: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return MCPInput{}, errors.New("custom MCP JSON must contain one object")
+	}
+	if len(config.MCPServers) != 1 {
+		return MCPInput{}, errors.New("custom MCP JSON must contain exactly one mcpServers entry")
+	}
+	for name, server := range config.MCPServers {
+		if server.Type == "streamable-http" {
+			server.Type = "http"
+		}
+		if server.Type == "" {
+			switch {
+			case strings.TrimSpace(server.Command) != "":
+				server.Type = "stdio"
+			case strings.TrimSpace(server.URL) != "":
+				server.Type = "http"
+			}
+		}
+		return MCPInput{Name: name, Description: server.Description, Transport: server.Type, Command: server.Command, Args: server.Args, URL: server.URL, Env: server.Env, Headers: server.Headers}, nil
+	}
+	return MCPInput{}, errors.New("custom MCP JSON is invalid")
+}
+
 func NormalizeMCPInput(input MCPInput) (MCPInput, error) {
+	if len(input.CustomJSON) > 0 {
+		custom, err := normalizeCustomMCPJSON(input.CustomJSON)
+		if err != nil {
+			return MCPInput{}, err
+		}
+		input = custom
+	}
 	input.Name = strings.ToLower(strings.TrimSpace(input.Name))
 	input.Description = strings.TrimSpace(input.Description)
 	if !mcpNamePattern.MatchString(input.Name) || strings.HasPrefix(input.Name, ".") || strings.HasPrefix(input.Name, "toolhub-") {
@@ -285,6 +357,7 @@ func NormalizeMCPInput(input MCPInput) (MCPInput, error) {
 	if input.Args == nil {
 		input.Args = []string{}
 	}
+	input.CustomJSON = nil
 	return input, nil
 }
 
@@ -410,12 +483,20 @@ func sortedMapKeys(values map[string]string) []string {
 }
 
 func (s *Store) ListMCPServers(ctx context.Context) (json.RawMessage, error) {
-	return s.JSONList(ctx, `SELECT id::text,current_revision_id::text AS "currentRevisionId",name,description,revision,transport,command,args,url,(SELECT coalesce(jsonb_agg(key ORDER BY key),'[]'::jsonb) FROM jsonb_object_keys(env_refs) key) AS "envKeys",(SELECT coalesce(jsonb_agg(key ORDER BY key),'[]'::jsonb) FROM jsonb_object_keys(header_refs) key) AS "headerKeys",content_hash AS "contentHash",created_at AS "createdAt",updated_at AS "updatedAt" FROM mcp_servers ORDER BY name,id`)
+	return s.JSONList(ctx, `SELECT server.id::text,server.current_revision_id::text AS "currentRevisionId",server.name,server.description,server.revision,server.transport,server.command,server.args,server.url,
+		(SELECT coalesce(jsonb_agg(key ORDER BY key),'[]'::jsonb) FROM jsonb_object_keys(server.env_refs) key) AS "envKeys",
+		(SELECT coalesce(jsonb_agg(key ORDER BY key),'[]'::jsonb) FROM jsonb_object_keys(server.header_refs) key) AS "headerKeys",
+		server.content_hash AS "contentHash",
+		EXISTS (SELECT 1 FROM relay_configuration_state state JOIN relay_configuration_revision_mcp_servers member ON member.relay_configuration_revision_id=state.applied_revision_id AND member.server_id=server.id AND member.mcp_revision_id=server.current_revision_id WHERE state.singleton) AS enabled,
+		server.created_at AS "createdAt",server.updated_at AS "updatedAt"
+		FROM mcp_servers server ORDER BY server.name,server.id`)
 }
 
 func (s *Store) MCPServer(ctx context.Context, id string) (domain.MCPServer, error) {
 	var server domain.MCPServer
-	err := s.pool.QueryRow(ctx, `SELECT id::text,current_revision_id::text,name,description,revision,transport,command,args,url,ARRAY(SELECT jsonb_object_keys(env_refs) ORDER BY 1),ARRAY(SELECT jsonb_object_keys(header_refs) ORDER BY 1),content_hash,created_at,updated_at FROM mcp_servers WHERE id=$1`, id).Scan(&server.ID, &server.CurrentRevisionID, &server.Name, &server.Description, &server.Revision, &server.Transport, &server.Command, &server.Args, &server.URL, &server.EnvKeys, &server.HeaderKeys, &server.ContentHash, &server.CreatedAt, &server.UpdatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT server.id::text,server.current_revision_id::text,server.name,server.description,server.revision,server.transport,server.command,server.args,server.url,ARRAY(SELECT jsonb_object_keys(server.env_refs) ORDER BY 1),ARRAY(SELECT jsonb_object_keys(server.header_refs) ORDER BY 1),server.content_hash,
+		EXISTS (SELECT 1 FROM relay_configuration_state state JOIN relay_configuration_revision_mcp_servers member ON member.relay_configuration_revision_id=state.applied_revision_id AND member.server_id=server.id AND member.mcp_revision_id=server.current_revision_id WHERE state.singleton),
+		server.created_at,server.updated_at FROM mcp_servers server WHERE server.id=$1`, id).Scan(&server.ID, &server.CurrentRevisionID, &server.Name, &server.Description, &server.Revision, &server.Transport, &server.Command, &server.Args, &server.URL, &server.EnvKeys, &server.HeaderKeys, &server.ContentHash, &server.Enabled, &server.CreatedAt, &server.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.MCPServer{}, ErrNotFound
 	}

@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -121,6 +123,40 @@ func TestRelayProbeReasonIsBoundedAndSingleLine(t *testing.T) {
 	if len(reason) != 200 || strings.Contains(reason, "\n") || strings.Contains(reason, "secret-line") {
 		t.Fatalf("unsafe relay reason %q", reason)
 	}
+}
+
+func TestRelayCompatibilityProbeReportsAggregatedCapabilities(t *testing.T) {
+	manager := probeManager(t)
+	manager.Admin = newMCPMAdminClient(filepath.Join(t.TempDir(), "missing.sock"), time.Second)
+	manifest := probeManifest("alpha", "beta")
+	manager.HTTPClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodDelete {
+			return &http.Response{StatusCode: http.StatusAccepted, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+		}
+		body := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\"}}\n\n"
+		session := "compatibility-session"
+		if request.Header.Get("Mcp-Session-Id") != "" && strings.Contains(string(mustReadBody(t, request)), "tools/list") {
+			body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"alpha_lookup\",\"description\":\"x\"},{\"name\":\"alpha_write\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"beta_search\"}],\"resources\":[{\"name\":\"beta_doc\"}],\"resourceTemplates\":[],\"prompts\":[{\"name\":\"alpha_prompt\"}]}}\n\n"
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{"Mcp-Session-Id": []string{session}}}, nil
+	})}
+	status, err := manager.ProbeMembers(context.Background(), 6276, manifest)
+	if err != nil || !status.Healthy || status.Contract != "compatibility" {
+		t.Fatalf("compatibility status=%+v err=%v", status, err)
+	}
+	if len(status.MemberStatuses) != 2 || status.MemberStatuses[0].Capabilities.Tools != 2 || status.MemberStatuses[0].Capabilities.Prompts != 1 || status.MemberStatuses[1].Capabilities.Tools != 1 || status.MemberStatuses[1].Capabilities.Resources != 1 {
+		t.Fatalf("member capabilities=%+v", status.MemberStatuses)
+	}
+}
+
+func mustReadBody(t *testing.T, request *http.Request) []byte {
+	t.Helper()
+	body, err := io.ReadAll(request.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Body = io.NopCloser(bytes.NewReader(body))
+	return body
 }
 
 func probeManager(t *testing.T) *RelayManager {

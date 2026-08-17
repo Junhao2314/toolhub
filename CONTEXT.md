@@ -38,9 +38,9 @@ a visible non-importable result with a reason.
 _Avoid_: Filesystem path, Library member
 
 **Profile**:
-A named, client-specific task configuration that pins exact Skill versions and
-MCP Config Revisions and defines MCP Tool Visibility plus risk-tightening rules.
-It can be selected by a client session and Applied to compatible Targets.
+A named, client-specific task configuration that pins exact Skill versions for
+delivery to compatible Targets. MCP configuration is not Profile membership;
+it is owned by the Shared Relay Configuration edited from the MCP page.
 _Avoid_: Installed state, runtime inventory, client session
 
 **Profile Revision**:
@@ -61,13 +61,12 @@ _Avoid_: Archive, Target Restore
 
 **Profile Refresh**:
 An explicit change that advances a Profile to selected newer Library Skill
-versions or MCP revisions. Refresh changes the Profile but does not Apply it to
-any Target.
+versions. Refresh changes the Profile but does not Apply it to any Target.
 _Avoid_: Automatic update, Apply Profile
 
 **MCP Config Revision**:
-An immutable version of one MCP server's launch or connection configuration that
-a Profile can pin. It is separate from the tools observed from the running server.
+An immutable version of one MCP server's launch or connection configuration.
+Relay Configuration revisions pin these rows; Profiles do not.
 _Avoid_: Observed Contract Revision, mutable MCP row
 
 **Observed Contract Revision**:
@@ -86,32 +85,21 @@ An immutable desired set of exact MCP Config Revisions started by the Shared
 Relay Runtime. It is infrastructure state and is not a user task Profile.
 _Avoid_: Profile Revision, observed runtime inventory
 
-**Tool Visibility**:
-The Profile rule that exposes all accepted tools, selected accepted tools, or no
-tools from one MCP server without starting or stopping that server.
-_Avoid_: Authorization, MCP process state
-
-**Risk Policy**:
-The effective allow, confirm, or deny decision applied again at each MCP tool
-call. Global policy sets the permission ceiling; a Profile may only tighten it.
-_Avoid_: Tool Visibility, MCP annotation
-
-**Profile Selection**:
-Choosing the Profile whose current revision is bound when a client opens an MCP
-session. A missing choice uses the configured Default Profile; an invalid choice
-never silently falls back.
-_Avoid_: Apply Profile, Profile activation
+**MCP Enabled State**:
+Whether an MCP Config Revision is included in the applied Relay Configuration.
+Disabled means configured-off, not a process failure.
+_Avoid_: Profile membership, tool visibility policy
 
 **Published Profile Revision**:
-The exact, successfully Applied Profile Revision available to new Shared Relay
-sessions under a stable Profile ID. Saving a newer draft does not publish it.
-_Avoid_: Current draft, client session, Profile activation
+The exact Profile Skill revision successfully delivered to a target. Saving a
+newer draft does not publish it.
+_Avoid_: Shared relay MCP owner, client session activation
 
-**Tool Call Confirmation**:
-A short-lived, one-use permission for one exact tool call, bound to the Profile,
-MCP Config and Observed Contract revisions plus the canonical argument hash.
-It contains no raw arguments and never permits an automatic retry.
-_Avoid_: Session approval, reusable grant, password verification
+**Shared Relay Member Health**:
+The bounded mcpm/systemd/HTTP projection for one configured MCP member. A
+healthy compatibility relay reports `ready`; an intentionally disabled member
+reports `disabled`; genuine runtime failure reports `unavailable`.
+_Avoid_: Synthetic MCP call, Profile health
 
 **Agent Profile**:
 A reusable, client-specific subagent team definition that a Profile Revision may
@@ -225,15 +213,17 @@ _Avoid_: Profile, node
 
 **Target Projection**:
 The runtime-applicable subset of one Profile revision delivered to a specific
-Target. Local Skill Targets receive Skills; the local Shared Relay receives a
-composite Relay Configuration and Published Profile routing bundle; Salt
-Claude/Codex Targets continue to receive their native applicable members.
+Target. Local Claude/Codex and Salt Claude/Codex Targets receive the Profile's
+pinned Skills; `local/shared-relay` receives the independent Relay
+Configuration owned by the MCP workflow. Profile revisions never contribute
+MCP members or routing policy.
 _Avoid_: Partial Profile, Target override
 
 **Desired State**:
-The exact, pinned target contents established by Apply Profile or Restore and
-subsequently maintained by reconcile. Long-term configuration changes are made
-through Profile revisions rather than direct Target edits.
+The exact, pinned target contents established by Apply Profile, Relay
+Configuration Apply, or Restore and subsequently maintained by reconcile.
+Long-term Skill changes are made through Profile revisions; shared MCP changes
+are made through Relay Configuration revisions.
 _Avoid_: Latest Library versions, observed inventory
 
 **Restored Desired State**:

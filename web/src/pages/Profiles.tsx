@@ -3,7 +3,6 @@ import {
   Download,
   Eye,
   History,
-  KeyRound,
   Pencil,
   Play,
   Plus,
@@ -16,13 +15,9 @@ import { useState } from "react";
 import {
   api,
   type BundlePreview,
-  type ContractGovernanceProjection,
-  type MCPServer,
   type Operation,
-  type PendingSecretBinding,
   type Profile,
   type ProfileRevision,
-  type RelayConfigurationProjection,
   type Skill,
   type Target,
 } from "../api/client";
@@ -30,7 +25,6 @@ import {
   Button,
   Empty,
   ErrorNotice,
-  Field,
   IconButton,
   Loading,
   Modal,
@@ -67,21 +61,15 @@ interface PreflightItem {
 export default function Profiles() {
   const { t } = useI18n();
   const state = useData(async () => {
-    const [profiles, skills, servers, targets, contracts, relayConfiguration] = await Promise.all([
+    const [profiles, skills, targets] = await Promise.all([
       api.list<Profile>("/profiles?includeArchived=true"),
       api.list<Skill>("/skills"),
-      api.list<MCPServer>("/mcp/servers"),
       api.list<Target>("/targets"),
-      api.request<ContractGovernanceProjection>("/relay/contracts"),
-      api.get<RelayConfigurationProjection>("/relay/configuration"),
     ]);
     return {
       profiles: profiles.items,
       skills: skills.items,
-      servers: servers.items,
       targets: targets.items,
-      contracts,
-      relayConfiguration,
     };
   }, []);
   const [selected, setSelected] = useState<Profile | null>(null);
@@ -93,22 +81,13 @@ export default function Profiles() {
   const [bundlePreview, setBundlePreview] = useState<BundlePreview | null>(
     null,
   );
-  const [secretExportProfile, setSecretExportProfile] =
-    useState<Profile | null>(null);
   const [notice, setNotice] = useState("");
   if (state.loading) return <Loading />;
   if (state.error || !state.data)
     return <ErrorNotice message={state.error} retry={state.reload} />;
-  const hiddenLegacyProfileID =
-    state.data.relayConfiguration.migration.legacyProfileState === "migrated_relay"
-      ? state.data.relayConfiguration.migration.legacyProfileId
-      : undefined;
-  const visibleProfiles = state.data.profiles.filter(
-    (profile) => profile.id !== hiddenLegacyProfileID,
-  );
-  const selectedProfile = selected && selected.id !== hiddenLegacyProfileID
-    ? (visibleProfiles.find((profile) => profile.id === selected.id) ??
-      selected)
+  const visibleProfiles = state.data.profiles;
+  const selectedProfile = selected
+    ? (visibleProfiles.find((profile) => profile.id === selected.id) ?? selected)
     : null;
   const reloadSelected = () => state.reload();
   const remove = (profile: Profile) => {
@@ -121,11 +100,7 @@ export default function Profiles() {
       })
       .catch((reason: Error) => setNotice(reason.message));
   };
-  const exportBundle = (profile: Profile, secrets: boolean) => {
-    if (secrets) {
-      setSecretExportProfile(profile);
-      return;
-    }
+  const exportBundle = (profile: Profile) => {
     api
       .download(
         `/profiles/${profile.id}/bundle/export`,
@@ -172,7 +147,7 @@ export default function Profiles() {
     <>
       <PageHeader
         title={t("Profiles")}
-        detail={t("Unified Skill and MCP membership")}
+        detail={t("Skill-only membership; shared MCP is managed in MCP")}
         actions={
           <>
             <label className="button secondary">
@@ -206,7 +181,6 @@ export default function Profiles() {
                 <th>{t("Profile")}</th>
                 <th>{t("Revision")}</th>
                 <th>{t("Skills")}</th>
-                <th>{t("MCP servers")}</th>
                 <th>{t("Updated")}</th>
                 <th aria-label={t("Actions")} />
               </tr>
@@ -235,7 +209,6 @@ export default function Profiles() {
                   </td>
                   <td>{profile.revision}</td>
                   <td>{profile.skillIds.length}</td>
-                  <td>{profile.mcpServerIds.length}</td>
                   <td>{new Date(profile.updatedAt).toLocaleString()}</td>
                   <td className="row-actions">
                     {!archived && !profile.pendingBindings && <IconButton
@@ -346,8 +319,6 @@ export default function Profiles() {
         <ProfileGovernanceEditor
           profile={editing === "new" ? undefined : editing}
           skills={state.data.skills}
-          servers={state.data.servers}
-          contracts={state.data.contracts}
           close={() => setEditing(null)}
           saved={(profile) => {
             setEditing(null);
@@ -384,30 +355,6 @@ export default function Profiles() {
           confirm={importBundle}
         />
       )}
-      {secretExportProfile && (
-        <SecretExportDialog
-          profile={secretExportProfile}
-          close={() => setSecretExportProfile(null)}
-          exportBundle={(password) => {
-            const profile = secretExportProfile;
-            setSecretExportProfile(null);
-            api
-              .download(`/profiles/${profile.id}/bundle/export-secrets`, {
-                currentPassword: password,
-                originLabel: "ToolHub",
-              })
-              .then((blob) => {
-                const url = URL.createObjectURL(blob);
-                const anchor = document.createElement("a");
-                anchor.href = url;
-                anchor.download = `${profile.name}.toolhub-profile-secrets`;
-                anchor.click();
-                URL.revokeObjectURL(url);
-              })
-              .catch((reason: Error) => setNotice(reason.message));
-          }}
-        />
-      )}
     </>
   );
 }
@@ -435,7 +382,7 @@ function ProfileDetail({
   restore: () => void;
   purge: () => void;
   clone: () => void;
-  exportBundle: (profile: Profile, secrets: boolean) => void;
+  exportBundle: (profile: Profile) => void;
 }) {
   const { t } = useI18n();
   const loadHistory = () =>
@@ -494,16 +441,10 @@ function ProfileDetail({
           </IconButton>
           <IconButton
             label={t("Export Bundle")}
-            onClick={() => exportBundle(profile, false)}
+            onClick={() => exportBundle(profile)}
           >
             <Download size={16} />
           </IconButton>
-          {!archived && !profile.pendingBindings && <IconButton
-            label={t("Export Secret Bundle")}
-            onClick={() => exportBundle(profile, true)}
-          >
-            <KeyRound size={16} />
-          </IconButton>}
         </div>
       </header>
       <div className="detail-grid">
@@ -513,16 +454,6 @@ function ProfileDetail({
             <div className="detail-row" key={item.skillId}>
               <strong>{item.name}</strong>
               <code>{item.versionId.slice(0, 12)}</code>
-              <Status value={item.current ? "current" : "historical"} />
-            </div>
-          )) || <span>—</span>}
-        </div>
-        <div>
-          <h3>{t("Pinned MCP revisions")}</h3>
-          {profile.mcpServers?.map((item) => (
-            <div className="detail-row" key={item.serverId}>
-              <strong>{item.name}</strong>
-              <code>r{item.revision}</code>
               <Status value={item.current ? "current" : "historical"} />
             </div>
           )) || <span>—</span>}
@@ -545,18 +476,10 @@ function ProfileDetail({
           <strong>{profile.clientKind || "—"}</strong>
         </div>
         <div>
-          <span>{t("Effective visibility")}</span>
-          <strong>{profile.effectiveVisibleCount ?? 0}</strong>
+          <span>{t("Pinned Skills")}</span>
+          <strong>{profile.skillIds.length}</strong>
         </div>
       </div>
-      {profile.pendingBindings && archived && (
-        <div className="inline-notice">
-          {t("Restore this archived Profile before completing secret bindings.")}
-        </div>
-      )}
-      {profile.pendingBindings && !archived && (
-        <PendingBindingsForm profile={profile} completed={refresh} />
-      )}
       {history && (
         <div className="table-scroll">
           <table>
@@ -584,141 +507,6 @@ function ProfileDetail({
         </div>
       )}
     </section>
-  );
-}
-
-function PendingBindingsForm({
-  profile,
-  completed,
-}: {
-  profile: Profile;
-  completed: () => void;
-}) {
-  const { t } = useI18n();
-  const state = useData(
-    () =>
-      api.list<PendingSecretBinding>(
-        `/profiles/${profile.id}/secret-bindings`,
-      ),
-    [profile.id, profile.revision],
-  );
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  if (state.loading) return <Loading />;
-  if (state.error || !state.data)
-    return <ErrorNotice message={state.error} retry={state.reload} />;
-  const items = state.data.items.filter((item) => !item.bound);
-  if (items.length === 0) return null;
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    setError("");
-    if (items.some((item) => !values[item.slotHash])) {
-      setError(t("Enter a value for every pending secret binding."));
-      return;
-    }
-    setBusy(true);
-    api
-      .post(`/profiles/${profile.id}/secret-bindings`, {
-        revision: profile.revision,
-        values,
-      })
-      .then(() => {
-        setValues({});
-        completed();
-      })
-      .catch((reason: Error) => setError(reason.message))
-      .finally(() => setBusy(false));
-  };
-  return (
-    <form className="pending-bindings" onSubmit={submit}>
-      <header>
-        <div>
-          <h3>{t("Complete secret bindings")}</h3>
-          <small>{t("Values are write-only and encrypted immediately.")}</small>
-        </div>
-        <Status value="pending" />
-      </header>
-      {error && <ErrorNotice message={error} />}
-      <div className="detail-grid">
-        {items.map((item) => (
-          <Field
-            key={item.slotHash}
-            label={`${item.namespace} · ${item.key}`}
-          >
-            <input
-              type="password"
-              autoComplete="new-password"
-              value={values[item.slotHash] ?? ""}
-              onChange={(event) =>
-                setValues((current) => ({
-                  ...current,
-                  [item.slotHash]: event.target.value,
-                }))
-              }
-            />
-          </Field>
-        ))}
-      </div>
-      <div className="modal-actions">
-        <Button type="submit" disabled={busy}>
-          {busy ? t("Saving") : t("Save secret bindings")}
-        </Button>
-      </div>
-    </form>
-  );
-}
-
-function SecretExportDialog({
-  profile,
-  close,
-  exportBundle,
-}: {
-  profile: Profile;
-  close: () => void;
-  exportBundle: (password: string) => void;
-}) {
-  const { t } = useI18n();
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!password) {
-      setError(t("Current password is required."));
-      return;
-    }
-    setBusy(true);
-    setError("");
-    exportBundle(password);
-  };
-  return (
-    <Modal title={`${t("Export Secret Bundle")} · ${profile.name}`} close={close}>
-      <form className="modal-form" onSubmit={submit}>
-        <div className="inline-notice warning-notice">
-          <KeyRound size={16} />
-          {t("This bundle contains plaintext secrets. Store it securely and delete it after use.")}
-        </div>
-        {error && <ErrorNotice message={error} />}
-        <Field label={t("Current password")}>
-          <input
-            type="password"
-            autoComplete="current-password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-          />
-        </Field>
-        <div className="modal-actions">
-          <Button type="button" variant="secondary" onClick={close}>
-            {t("Cancel")}
-          </Button>
-          <Button type="submit" disabled={busy}>
-            <Download size={15} />
-            {t("Export")}
-          </Button>
-        </div>
-      </form>
-    </Modal>
   );
 }
 
@@ -817,7 +605,9 @@ function ProfileApply({
   queued: (operation: Operation) => void;
 }) {
   const { t } = useI18n();
-  const available = targets.filter((target) => target.writable);
+	const available = targets.filter(
+	  (target) => target.writable && target.runtime !== "shared-relay",
+	);
   const [selected, setSelected] = useState(new Set<string>());
   const [items, setItems] = useState<PreflightItem[] | null>(null);
   const [error, setError] = useState("");

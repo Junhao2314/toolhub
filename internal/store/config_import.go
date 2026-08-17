@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/robfig/cron/v3"
 
+	"github.com/Junhao2314/toolhub/internal/domain"
 	"github.com/Junhao2314/toolhub/internal/security"
 	"github.com/Junhao2314/toolhub/internal/skills"
 )
@@ -24,7 +25,7 @@ import (
 const (
 	configImportMarkerKey              = "legacy_config_import_v1"
 	configImportLock                   = int64(1848002)
-	configImportExpectedMigrationCount = 12
+	configImportExpectedMigrationCount = 17
 )
 
 var ErrConfigImportConflict = errors.New("legacy configuration import conflict")
@@ -34,6 +35,7 @@ type ConfigImportInput struct {
 	SourceDatabaseIdentity   string
 	Skills                   []ConfigImportSkill
 	MCPServers               []ConfigImportMCP
+	RelayMCPServerIDs        []string
 	Secrets                  []ConfigImportSecret
 	Profiles                 []ConfigImportProfile
 	UpdateCron               string
@@ -85,6 +87,7 @@ type ConfigImportCounts struct {
 	ProfileMCPServers  int            `json:"profileMcpServers"`
 	ProfileSkillCounts map[string]int `json:"profileSkillCounts"`
 	ProfileMCPCounts   map[string]int `json:"profileMcpCounts"`
+	RelayMCPServers    int            `json:"relayMcpServers"`
 }
 
 type configImportMarker struct {
@@ -251,6 +254,7 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 	}
 
 	mcpMap := make(map[string]string, len(input.MCPServers))
+	mcpRevisionMap := make(map[string]string, len(input.MCPServers))
 	for _, item := range input.MCPServers {
 		serverID, revisionID := uuid.NewString(), uuid.NewString()
 		envRefs, err := remapConfigImportRefs(item.EnvRefs, secretMap)
@@ -275,8 +279,12 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 			return ConfigImportResult{}, err
 		}
 		mcpMap[item.LegacyID] = serverID
+		mcpRevisionMap[item.LegacyID] = revisionID
 	}
 	if err := failConfigImportPhase(input, "mcp"); err != nil {
+		return ConfigImportResult{}, err
+	}
+	if err := insertConfigImportRelayConfiguration(ctx, tx, input.RelayMCPServerIDs, mcpMap, mcpRevisionMap); err != nil {
 		return ConfigImportResult{}, err
 	}
 
@@ -290,13 +298,9 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 			}
 			profileInput.SkillIDs = append(profileInput.SkillIDs, skillID)
 		}
-		for _, legacyID := range uniqueSortedStrings(profile.LegacyMCPServerIDs) {
-			serverID := mcpMap[legacyID]
-			if serverID == "" {
-				return ConfigImportResult{}, errors.New("imported Profile references an unavailable MCP definition")
-			}
-			profileInput.MCPServerIDs = append(profileInput.MCPServerIDs, serverID)
-		}
+		// MCP definitions are imported into the Relay Configuration owner above.
+		// A legacy Profile may mention those definitions, but that membership is
+		// deliberately not recreated: Profiles are Skill-only after migration.
 		if _, _, err := s.saveProfileTx(ctx, tx, profileID, profileInput); err != nil {
 			return ConfigImportResult{}, err
 		}
@@ -348,11 +352,57 @@ func (s *Store) ImportLegacyConfig(ctx context.Context, input ConfigImportInput,
 	return ConfigImportResult{SourceFingerprint: input.SourceFingerprint, Counts: counts}, nil
 }
 
+func insertConfigImportRelayConfiguration(ctx context.Context, tx pgx.Tx, legacyIDs []string, serverIDs, revisionIDs map[string]string) error {
+	pins := make([]domain.RelayConfigurationMCPServerPin, 0, len(legacyIDs))
+	for position, legacyID := range uniqueSortedStrings(legacyIDs) {
+		serverID := serverIDs[legacyID]
+		revisionID := revisionIDs[legacyID]
+		if uuid.Validate(serverID) != nil || uuid.Validate(revisionID) != nil {
+			return errors.New("configuration import relay MCP selection is unavailable")
+		}
+		pins = append(pins, domain.RelayConfigurationMCPServerPin{ServerID: serverID, MCPRevisionID: revisionID, Position: position})
+	}
+	metadataJSON, err := json.Marshal(map[string]any{"source": "generation-1-config-import"})
+	if err != nil {
+		return err
+	}
+	hash, err := relayConfigurationHash(pins, metadataJSON)
+	if err != nil {
+		return err
+	}
+	var currentID string
+	var currentRevision int64
+	var currentHash string
+	if err := tx.QueryRow(ctx, `SELECT current_revision_id::text FROM relay_configuration_state WHERE singleton FOR UPDATE`).Scan(&currentID); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(ctx, `SELECT revision,canonical_hash FROM relay_configuration_revisions WHERE id=$1`, currentID).Scan(&currentRevision, &currentHash); err != nil {
+		return err
+	}
+	if currentHash == hash {
+		return nil
+	}
+	id := uuid.NewString()
+	if _, err := tx.Exec(ctx, `INSERT INTO relay_configuration_revisions(id,revision,canonical_hash,metadata) VALUES($1,$2,$3,$4)`, id, currentRevision+1, hash, jsonText(metadataJSON)); err != nil {
+		return err
+	}
+	for _, pin := range pins {
+		if _, err := tx.Exec(ctx, `INSERT INTO relay_configuration_revision_mcp_servers(relay_configuration_revision_id,server_id,mcp_revision_id,position) VALUES($1,$2,$3,$4)`, id, pin.ServerID, pin.MCPRevisionID, pin.Position); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO relay_configuration_revision_seals(relay_configuration_revision_id) VALUES($1)`, id); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE relay_configuration_state SET current_revision_id=$1,updated_at=now() WHERE singleton`, id)
+	return err
+}
+
 func validateConfigImportInput(input ConfigImportInput, legacyCipher *security.Cipher) error {
 	if legacyCipher == nil || !isLowerSHA256(input.SourceFingerprint) || !isLowerSHA256(input.SourceDatabaseIdentity) {
 		return errors.New("configuration import identity is invalid")
 	}
-	if len(input.Skills) == 0 || len(input.Profiles) != 3 {
+	if len(input.Skills) == 0 || len(input.Profiles) != 2 {
 		return errors.New("configuration import selection is incomplete")
 	}
 	if _, err := cron.ParseStandard(strings.TrimSpace(input.UpdateCron)); err != nil {
@@ -409,6 +459,13 @@ func validateConfigImportInput(input ConfigImportInput, legacyCipher *security.C
 		return errors.New("configuration import contains unreferenced encrypted records")
 	}
 	profileNames := map[string]bool{}
+	relayIDs := map[string]bool{}
+	for _, id := range input.RelayMCPServerIDs {
+		if !serverIDs[id] || relayIDs[id] {
+			return errors.New("configuration import contains an invalid or duplicate relay MCP selection")
+		}
+		relayIDs[id] = true
+	}
 	for _, profile := range input.Profiles {
 		if profile.Name == "" || profileNames[profile.Name] {
 			return errors.New("configuration import contains invalid Profiles")
@@ -423,9 +480,12 @@ func validateConfigImportInput(input ConfigImportInput, legacyCipher *security.C
 			if !serverIDs[id] {
 				return errors.New("configuration import Profile references an unavailable MCP definition")
 			}
+			// The source reference is accepted for migration compatibility, but
+			// ImportLegacyConfig intentionally projects it only into the Relay
+			// Configuration owner and never recreates Profile MCP membership.
 		}
 	}
-	for _, required := range []string{"claude-skills", "codex-skills", "shared-mcp"} {
+	for _, required := range []string{"claude-skills", "codex-skills"} {
 		if !profileNames[required] {
 			return errors.New("configuration import generated Profile set is incomplete")
 		}
@@ -549,17 +609,17 @@ func configImportExpectedCounts(input ConfigImportInput) ConfigImportCounts {
 		MCPServers: len(input.MCPServers), EncryptedRecords: len(input.Secrets), Profiles: len(input.Profiles),
 		ProfileSkillCounts: map[string]int{}, ProfileMCPCounts: map[string]int{},
 	}
+	counts.RelayMCPServers = len(uniqueSortedStrings(input.RelayMCPServerIDs))
 	for _, skill := range input.Skills {
 		artifacts[skill.Package.SHA256] = true
 	}
 	counts.SkillArtifacts = len(artifacts)
 	for _, profile := range input.Profiles {
 		skillCount := len(uniqueSortedStrings(profile.LegacySkillIDs))
-		mcpCount := len(uniqueSortedStrings(profile.LegacyMCPServerIDs))
 		counts.ProfileSkillCounts[profile.Name] = skillCount
-		counts.ProfileMCPCounts[profile.Name] = mcpCount
+		// Legacy MCP membership is intentionally not projected into Profiles.
+		counts.ProfileMCPCounts[profile.Name] = 0
 		counts.ProfileSkills += skillCount
-		counts.ProfileMCPServers += mcpCount
 	}
 	return counts
 }
@@ -593,6 +653,13 @@ func verifyConfigImportCore(ctx context.Context, query interface {
 		if actual != check.want {
 			return fmt.Errorf("%s count=%d expected=%d", check.table, actual, check.want)
 		}
+	}
+	var relayCount int
+	if err := query.QueryRow(ctx, `SELECT count(*) FROM relay_configuration_revision_mcp_servers member JOIN relay_configuration_state state ON state.current_revision_id=member.relay_configuration_revision_id WHERE state.singleton`).Scan(&relayCount); err != nil {
+		return err
+	}
+	if relayCount != marker.Counts.RelayMCPServers {
+		return fmt.Errorf("relay MCP membership count=%d expected=%d", relayCount, marker.Counts.RelayMCPServers)
 	}
 	for name, want := range marker.Counts.ProfileSkillCounts {
 		var actual int

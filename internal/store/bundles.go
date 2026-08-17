@@ -85,45 +85,14 @@ func (s *Store) ExportProfileBundle(ctx context.Context, profileID, originLabel 
 		manifest.Skills = append(manifest.Skills, profilebundle.Skill{Slug: pin.Slug, Name: name, Description: description, SHA256: pin.SHA256, ContentHash: pin.ContentHash, Provenance: safeBundleProvenance(sourceKind, sourceURL, sourceCommit, rawProvenance)})
 		archives[pin.SHA256] = archive
 	}
+	// Profile bundles intentionally contain Skills only. MCP configuration and
+	// its write-only secrets belong to the MCP/Relay Configuration workflow.
+	// Keep the includeSecrets argument for route compatibility, but never
+	// export MCP material from a Profile bundle.
 	var secretDoc *profilebundle.SecretDocument
 	if includeSecrets {
 		secretDoc = &profilebundle.SecretDocument{SchemaVersion: profilebundle.SchemaVersion, MCPServers: []profilebundle.SecretMCP{}}
 		defer wipeBundleSecrets(secretDoc)
-	}
-	for _, pin := range profile.MCPServers {
-		var item profilebundle.MCP
-		var envRefs, headerRefs map[string]string
-		var provenance []byte
-		err := s.pool.QueryRow(ctx, `SELECT name,description,transport,command,args,url,env_slots,header_slots,env_refs,header_refs,provenance FROM mcp_revisions WHERE id=$1`, pin.RevisionID).Scan(&item.Name, &item.Description, &item.Transport, &item.Command, &item.Args, &item.URL, &item.EnvSlots, &item.HeaderSlots, &envRefs, &headerRefs, &provenance)
-		if err != nil {
-			return nil, err
-		}
-		item.Provenance = safeBundleProvenance("local", "", "", provenance)
-		item.Key, err = profilebundle.MCPKey(item)
-		if err != nil {
-			return nil, err
-		}
-		manifest.MCPServers = append(manifest.MCPServers, item)
-		if includeSecrets && (len(item.EnvSlots) > 0 || len(item.HeaderSlots) > 0) {
-			secretItem := profilebundle.SecretMCP{Key: item.Key, Env: map[string]string{}, Headers: map[string]string{}}
-			for key, id := range envRefs {
-				value, err := s.secretValue(ctx, id)
-				if err != nil {
-					return nil, err
-				}
-				secretItem.Env[key] = string(value)
-				clear(value)
-			}
-			for key, id := range headerRefs {
-				value, err := s.secretValue(ctx, id)
-				if err != nil {
-					return nil, err
-				}
-				secretItem.Headers[key] = string(value)
-				clear(value)
-			}
-			secretDoc.MCPServers = append(secretDoc.MCPServers, secretItem)
-		}
 	}
 	body, err := profilebundle.Encode(manifest, archives, secretDoc)
 	if err != nil {
@@ -162,6 +131,9 @@ func (s *Store) PreviewProfileBundle(ctx context.Context, body []byte, ttl time.
 	parsed, err := profilebundle.Parse(body)
 	if err != nil {
 		return BundlePreview{}, err
+	}
+	if len(parsed.Manifest.MCPServers) > 0 {
+		return BundlePreview{}, errors.New("Profile bundles may contain Skills only; import MCP configuration from the MCP page")
 	}
 	preview := BundlePreview{BundleHash: parsed.BundleHash, Kind: parsed.Manifest.Kind, ProfileName: parsed.Manifest.Profile.Name, CanonicalHash: parsed.Manifest.Profile.CanonicalHash, Origin: parsed.Manifest.Origin, Components: []BundleComponentDecision{}}
 	for _, item := range parsed.Manifest.Skills {
@@ -305,7 +277,7 @@ func (s *Store) ImportProfileBundle(ctx context.Context, body []byte, input Bund
 		}
 	}
 
-	profileInput := ProfileInput{Name: name, Description: parsed.Manifest.Profile.Description, SkillVersionIDs: map[string]string{}, MCPRevisionIDs: map[string]string{}, Revision: expectedRevision, PendingBindings: preview.PendingBindings > 0}
+	profileInput := ProfileInput{Name: name, Description: parsed.Manifest.Profile.Description, SkillVersionIDs: map[string]string{}, Revision: expectedRevision, PendingBindings: preview.PendingBindings > 0}
 	for _, item := range parsed.Manifest.Skills {
 		pkg := parsed.Packages[item.SHA256]
 		source := SourceInput{Kind: "local", Name: "bundle:" + parsed.Manifest.Origin.Label, Metadata: map[string]any{"bundleHash": parsed.BundleHash}}
@@ -317,31 +289,12 @@ func (s *Store) ImportProfileBundle(ctx context.Context, body []byte, input Bund
 		profileInput.SkillIDs = append(profileInput.SkillIDs, skillID)
 		profileInput.SkillVersionIDs[skillID] = versionID
 	}
-	mcpPins := map[string]string{}
-	for _, item := range parsed.Manifest.MCPServers {
-		serverID, revisionID, err := s.importBundleMCPTx(ctx, tx, item, parsed.Secrets, parsed.Manifest.Kind == profilebundle.KindSecrets && preview.UpdateExisting && !input.ImportAsNew)
-		if err != nil {
-			return domain.Profile{}, err
-		}
-		profileInput.MCPServerIDs = append(profileInput.MCPServerIDs, serverID)
-		profileInput.MCPRevisionIDs[serverID] = revisionID
-		mcpPins[item.Key] = revisionID
-	}
 	profileID, profileRevisionID, err := s.saveProfileTx(ctx, tx, profileID, profileInput)
 	if err != nil {
 		return domain.Profile{}, err
 	}
 	if preview.PendingBindings > 0 {
-		for _, item := range parsed.Manifest.MCPServers {
-			for namespace, keys := range map[string][]string{"env": item.EnvSlots, "header": item.HeaderSlots} {
-				for _, key := range keys {
-					slotHash := bundleSlotHash(item.Key, namespace, key)
-					if _, err := tx.Exec(ctx, `INSERT INTO pending_secret_bindings(profile_revision_id,mcp_revision_id,namespace,key,slot_hash) VALUES($1,$2,$3,$4,$5)`, profileRevisionID, mcpPins[item.Key], namespace, key, slotHash); err != nil {
-						return domain.Profile{}, err
-					}
-				}
-			}
-		}
+		return domain.Profile{}, errors.New("Profile bundle contains unsupported MCP secret bindings")
 	}
 	metadata, _ := json.Marshal(map[string]any{"kind": parsed.Manifest.Kind, "skills": len(parsed.Manifest.Skills), "mcpServers": len(parsed.Manifest.MCPServers), "pendingBindings": preview.PendingBindings})
 	if _, err := tx.Exec(ctx, `INSERT INTO bundle_import_fingerprints(bundle_hash,profile_id,profile_revision_id,canonical_hash,metadata) VALUES($1,$2,$3,$4,$5)`, parsed.BundleHash, profileID, profileRevisionID, parsed.Manifest.Profile.CanonicalHash, jsonText(metadata)); err != nil {
@@ -580,27 +533,13 @@ func (s *Store) CompletePendingSecretBindings(ctx context.Context, profileID str
 		}
 		byRevision[item.revisionID][item.namespace][item.key] = values[item.hash]
 	}
-	input := ProfileInput{Name: profile.Name, Description: profile.Description, Revision: profile.Revision, SkillVersionIDs: map[string]string{}, MCPRevisionIDs: map[string]string{}, PendingBindings: false}
+	input := ProfileInput{Name: profile.Name, Description: profile.Description, Revision: profile.Revision, SkillVersionIDs: map[string]string{}, PendingBindings: false}
 	for _, pin := range profile.Skills {
 		input.SkillIDs = append(input.SkillIDs, pin.SkillID)
 		input.SkillVersionIDs[pin.SkillID] = pin.VersionID
 	}
-	for _, pin := range profile.MCPServers {
-		input.MCPServerIDs = append(input.MCPServerIDs, pin.ServerID)
-		input.MCPRevisionIDs[pin.ServerID] = pin.RevisionID
-		if slots := byRevision[pin.RevisionID]; len(slots) > 0 {
-			item := profilebundle.MCP{Name: pin.Name, Description: pin.Description, Transport: pin.Transport, Command: pin.Command, Args: pin.Args, URL: pin.URL, EnvSlots: pin.EnvKeys, HeaderSlots: pin.HeaderKeys}
-			item.Key, err = profilebundle.MCPKey(item)
-			if err != nil {
-				return domain.Profile{}, err
-			}
-			secretDoc := profilebundle.SecretDocument{SchemaVersion: profilebundle.SchemaVersion, MCPServers: []profilebundle.SecretMCP{{Key: item.Key, Env: slots["env"], Headers: slots["header"]}}}
-			_, revisionID, err := s.importBundleMCPTx(ctx, tx, item, secretDoc, true)
-			if err != nil {
-				return domain.Profile{}, err
-			}
-			input.MCPRevisionIDs[pin.ServerID] = revisionID
-		}
+	if len(byRevision) > 0 {
+		return domain.Profile{}, errors.New("Profile secret bindings for MCP are retired; manage MCP secrets from the MCP page")
 	}
 	if _, _, err := s.saveProfileTx(ctx, tx, profileID, input); err != nil {
 		return domain.Profile{}, err

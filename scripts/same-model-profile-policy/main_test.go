@@ -29,8 +29,6 @@ const (
 	legacyPinned     = "00000000-0000-4000-8000-000000000114"
 	legacyCurrent    = "00000000-0000-4000-8000-000000000115"
 	sameModelVersion = "00000000-0000-4000-8000-000000000116"
-	mcpID            = "00000000-0000-4000-8000-000000000201"
-	mcpPinned        = "00000000-0000-4000-8000-000000000211"
 )
 
 func TestPlanComputesExactIdempotentDelta(t *testing.T) {
@@ -85,9 +83,6 @@ func TestApplyUploadsCanonicalSkillAndPreservesEveryExistingPin(t *testing.T) {
 	if claude.SkillVersionIDs[legacyID] != legacyPinned {
 		t.Fatalf("non-current Skill pin changed: %+v", claude.SkillVersionIDs)
 	}
-	if claude.MCPRevisionIDs[mcpID] != mcpPinned {
-		t.Fatalf("non-current MCP pin changed: %+v", claude.MCPRevisionIDs)
-	}
 	if claude.SkillVersionIDs[sameModelID] != sameModelVersion {
 		t.Fatalf("new Skill pin missing: %+v", claude.SkillVersionIDs)
 	}
@@ -100,10 +95,6 @@ func TestApplyUploadsCanonicalSkillAndPreservesEveryExistingPin(t *testing.T) {
 			t.Fatalf("non-coding membership changed unexpectedly for %s: got=%v want=%v", name, input.SkillIDs, wantIDs)
 		}
 	}
-	if server.hasPut("shared-mcp") {
-		t.Fatal("shared-mcp received a PUT")
-	}
-
 	uploadsBefore, putsBefore := server.uploadCount, server.putCount()
 	second, err := execute(context.Background(), server.config(modeApply))
 	if err != nil {
@@ -188,13 +179,13 @@ func TestCheckRejectsMissingMandatoryMembership(t *testing.T) {
 	server := newPolicyServer(t)
 	server.installSameModelSkill(server.pkg.SHA256)
 	for _, name := range ordinaryProfiles {
-		if name != "codex-text-processing" {
+		if name != "codex-data-analysis" {
 			server.convergeProfile(name)
 		}
 	}
 
 	report, err := execute(context.Background(), server.config(modeCheck))
-	if err == nil || !strings.Contains(err.Error(), "codex-text-processing") || !strings.Contains(err.Error(), "same-model-subagents") {
+	if err == nil || !strings.Contains(err.Error(), "codex-data-analysis") || !strings.Contains(err.Error(), "same-model-subagents") {
 		t.Fatalf("expected strict missing-membership error, report=%+v err=%v", report, err)
 	}
 	if report.Verified || server.uploadCount != 0 || server.putCount() != 0 {
@@ -218,33 +209,14 @@ func TestCommandNeverCallsPreflightOrApplyRoutes(t *testing.T) {
 	}
 }
 
-func TestCheckRejectsSharedMCPMutationBetweenReads(t *testing.T) {
-	server := newPolicyServer(t)
-	server.installSameModelSkill(server.pkg.SHA256)
-	for _, name := range ordinaryProfiles {
-		server.convergeProfile(name)
-	}
-	server.mutateSharedOnSecondList = true
-
-	report, err := execute(context.Background(), server.config(modeCheck))
-	if err == nil || !strings.Contains(err.Error(), "shared-mcp changed") {
-		t.Fatalf("expected shared-mcp mutation error, report=%+v err=%v", report, err)
-	}
-	if server.profileListCount != 2 {
-		t.Fatalf("check read Profiles %d times, want 2", server.profileListCount)
-	}
-}
-
 func TestPlanRejectsUnexpectedActiveProfile(t *testing.T) {
 	server := newPolicyServer(t)
 	server.profiles["unexpected-profile"] = profile{
-		ID:           "00000000-0000-4000-8000-000000000398",
-		Name:         "unexpected-profile",
-		Revision:     1,
-		SkillIDs:     []string{reviewID},
-		MCPServerIDs: []string{},
-		Skills:       []skillPin{{SkillID: reviewID, VersionID: reviewVersion, Slug: "requesting-code-review"}},
-		MCPServers:   []mcpPin{},
+		ID:       "00000000-0000-4000-8000-000000000398",
+		Name:     "unexpected-profile",
+		Revision: 1,
+		SkillIDs: []string{reviewID},
+		Skills:   []skillPin{{SkillID: reviewID, VersionID: reviewVersion, Slug: "requesting-code-review"}},
 	}
 
 	report, err := execute(context.Background(), server.config(modePlan))
@@ -259,19 +231,17 @@ type recordedRequest struct {
 }
 
 type policyServer struct {
-	t                        *testing.T
-	server                   *httptest.Server
-	pkg                      toolskills.Package
-	mu                       sync.Mutex
-	library                  []skill
-	profiles                 map[string]profile
-	requests                 []recordedRequest
-	puts                     map[string][]profileInput
-	uploadCount              int
-	uploadSHA                string
-	conflictProfile          string
-	profileListCount         int
-	mutateSharedOnSecondList bool
+	t               *testing.T
+	server          *httptest.Server
+	pkg             toolskills.Package
+	mu              sync.Mutex
+	library         []skill
+	profiles        map[string]profile
+	requests        []recordedRequest
+	puts            map[string][]profileInput
+	uploadCount     int
+	uploadSHA       string
+	conflictProfile string
 }
 
 func newPolicyServer(t *testing.T) *policyServer {
@@ -335,9 +305,8 @@ func (s *policyServer) handle(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/api/v1/skills/upload" && r.Method == http.MethodPost:
 		s.handleUpload(w, r)
 	case r.URL.Path == "/api/v1/profiles" && r.Method == http.MethodGet:
-		s.profileListCount++
 		items := make([]profile, 0, len(s.profiles))
-		names := append(append([]string{}, ordinaryProfiles...), "shared-mcp")
+		names := append([]string{}, ordinaryProfiles...)
 		for name := range s.profiles {
 			if !containsString(names, name) {
 				names = append(names, name)
@@ -345,9 +314,6 @@ func (s *policyServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, name := range names {
 			item := cloneProfile(s.profiles[name])
-			if name == "shared-mcp" && s.mutateSharedOnSecondList && s.profileListCount == 2 {
-				item.Revision++
-			}
 			items = append(items, item)
 		}
 		writeTestJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -419,9 +385,7 @@ func (s *policyServer) handleProfilePut(w http.ResponseWriter, r *http.Request) 
 		Revision:      current.Revision + 1,
 		CanonicalHash: fmt.Sprintf("hash-%s-%d", currentName, current.Revision+1),
 		SkillIDs:      append([]string{}, input.SkillIDs...),
-		MCPServerIDs:  append([]string{}, input.MCPServerIDs...),
 		Skills:        s.pinsFor(input),
-		MCPServers:    mcpPinsFor(input),
 	}
 	s.profiles[currentName] = updated
 	writeTestJSON(w, http.StatusOK, updated)
@@ -431,14 +395,6 @@ func (s *policyServer) pinsFor(input profileInput) []skillPin {
 	result := make([]skillPin, 0, len(input.SkillIDs))
 	for _, id := range input.SkillIDs {
 		result = append(result, skillPin{SkillID: id, VersionID: input.SkillVersionIDs[id], Slug: s.slugFor(id)})
-	}
-	return result
-}
-
-func mcpPinsFor(input profileInput) []mcpPin {
-	result := make([]mcpPin, 0, len(input.MCPServerIDs))
-	for _, id := range input.MCPServerIDs {
-		result = append(result, mcpPin{ServerID: id, RevisionID: input.MCPRevisionIDs[id]})
 	}
 	return result
 }
@@ -566,42 +522,20 @@ func baseProfiles() map[string]profile {
 		for _, pin := range pins {
 			item.SkillIDs = append(item.SkillIDs, pin.SkillID)
 		}
-		if name == "claude-coding" {
-			item.MCPServerIDs = []string{mcpID}
-			item.MCPServers = []mcpPin{{ServerID: mcpID, RevisionID: mcpPinned}}
-		} else {
-			item.MCPServerIDs = []string{}
-			item.MCPServers = []mcpPin{}
-		}
 		result[name] = item
-	}
-	result["shared-mcp"] = profile{
-		ID:            "00000000-0000-4000-8000-000000000399",
-		Name:          "shared-mcp",
-		Description:   "Shared MCP only",
-		Revision:      9,
-		CanonicalHash: "shared-canonical-hash",
-		SkillIDs:      []string{},
-		MCPServerIDs:  []string{mcpID},
-		Skills:        []skillPin{},
-		MCPServers:    []mcpPin{{ServerID: mcpID, RevisionID: mcpPinned}},
 	}
 	return result
 }
 
 func cloneProfile(input profile) profile {
 	input.SkillIDs = append([]string{}, input.SkillIDs...)
-	input.MCPServerIDs = append([]string{}, input.MCPServerIDs...)
 	input.Skills = append([]skillPin{}, input.Skills...)
-	input.MCPServers = append([]mcpPin{}, input.MCPServers...)
 	return input
 }
 
 func cloneInput(input profileInput) profileInput {
 	input.SkillIDs = append([]string{}, input.SkillIDs...)
-	input.MCPServerIDs = append([]string{}, input.MCPServerIDs...)
 	input.SkillVersionIDs = cloneMap(input.SkillVersionIDs)
-	input.MCPRevisionIDs = cloneMap(input.MCPRevisionIDs)
 	return input
 }
 

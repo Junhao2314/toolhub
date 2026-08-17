@@ -1,3 +1,12 @@
-# Pin Profile And MCP Revisions
+# Superseded: Pin Profile And MCP Revisions
 
-ToolHub Profiles pin immutable Skill versions and MCP revisions instead of following mutable Library heads. This adds retained revision history and explicit Refresh, but prevents Library discovery or edits from silently changing a reusable desired state and makes Profile Bundles reproducible.
+Status: superseded on 2026-08-17 by
+`docs/superpowers/specs/2026-08-17-toolhub-mcpm-mcp-profile-boundary.md`.
+
+The original decision treated MCP revisions as Profile membership. That owner
+boundary is retired. Profiles now pin immutable Skill versions only; the
+ToolHub MCP/Relay Configuration revision pins MCP revisions, while mcpm owns
+the shared registry, relay, and upstream process lifecycle.
+
+The immutable-pin and explicit-refresh principles remain valid for both owners,
+but MCP pins must never be added to a Profile revision or Profile bundle.

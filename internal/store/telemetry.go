@@ -223,8 +223,10 @@ func (s *Store) RelayGovernanceHealthy(ctx context.Context) (bool, error) {
 	err := s.pool.QueryRow(ctx, `SELECT EXISTS(
 		SELECT 1 FROM targets target
 		JOIN target_desired_snapshots desired ON desired.target_id=target.id
+		JOIN relay_configuration_state relay ON relay.singleton
 		CROSS JOIN settings
 		WHERE target.target_key='local/shared-relay'
+		  AND relay.mode='enforced'
 		  AND desired.health='healthy'
 		  AND NOT settings.relay_intentional_paused
 	)`).Scan(&healthy)

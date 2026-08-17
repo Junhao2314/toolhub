@@ -355,11 +355,15 @@ paths:
     get:
       tags: [Profiles]
       operationId: listPendingSecretBindings
+      deprecated: true
+      description: Legacy compatibility route. New Profiles cannot create MCP secret bindings.
       parameters: [{$ref: '#/components/parameters/ProfileID'}]
       responses: {'200': {$ref: '#/components/responses/PendingSecretBindingList'}, '409': {$ref: '#/components/responses/Error'}}
     post:
       tags: [Profiles]
       operationId: completePendingSecretBindings
+      deprecated: true
+      description: Legacy compatibility route. MCP secret bindings are managed from the MCP/Relay Configuration workflow.
       parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
       requestBody:
         required: true
@@ -383,7 +387,8 @@ paths:
     post:
       tags: [Profiles]
       operationId: exportSecretProfileBundle
-      description: Explicit plaintext Secret backup. Requires current-password reauthentication and Cache-Control no-store.
+      deprecated: true
+      description: Legacy compatibility route. Profiles are Skill-only; MCP secrets are managed by the MCP/Relay Configuration workflow and are not exported from this route.
       parameters: [{$ref: '#/components/parameters/ProfileID'}, {$ref: '#/components/parameters/CSRFToken'}]
       requestBody:
         required: true
@@ -645,7 +650,8 @@ paths:
     post:
       tags: [Governance]
       operationId: prepareRelayProfileUpdates
-      description: Creates exact candidate Profile revisions from their Published predecessors. Repeating the same preparation is a no-op; a conflicting current draft returns 409 and is never replaced.
+      deprecated: true
+      description: Legacy compatibility route for the retired Profile-owned MCP pin flow. New MCP changes are edited directly in Relay Configuration and never require Profile updates.
       parameters: [{$ref: '#/components/parameters/CSRFToken'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/GovernanceRevisionRequest'}}}}
       responses: {'200': {description: Affected Profile IDs, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}}}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
@@ -653,7 +659,7 @@ paths:
     post:
       tags: [Governance]
       operationId: preflightRelayConfiguration
-      description: Preflights an explicit compatibility or enforced transition. Enforced mode fails closed unless persisted governance readiness, mcpm capability, and both Claude and Codex native-client inspections pass.
+      description: Preflights the exact Relay Configuration MCP set before mcpm applies it. The optional profileIds field is retained only for legacy governance clients and must be empty for the active Skill-only Profile model.
       parameters: [{$ref: '#/components/parameters/CSRFToken'}, {$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RelayPreflightRequest'}}}}
       responses: {'200': {description: Revision-bound Relay preflight, content: {application/json: {schema: {$ref: '#/components/schemas/RelayPreflightResponse'}}}}, '400': {$ref: '#/components/responses/Error'}, '409': {$ref: '#/components/responses/Error'}}
@@ -977,7 +983,9 @@ components:
     MCPServerInput:
       type: object
       additionalProperties: false
-      required: [name, description, transport, command, args, url, env, headers]
+      oneOf:
+        - required: [name, description, transport, command, args, url, env, headers]
+        - required: [customJson]
       properties:
         name: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}
         description: {type: string}
@@ -987,6 +995,27 @@ components:
         url: {type: string}
         env: {$ref: '#/components/schemas/WriteOnlySecretMap'}
         headers: {$ref: '#/components/schemas/WriteOnlySecretMap'}
+        customJson:
+          description: Standard MCP client JSON. Exactly one server must be present under mcpServers; values are parsed into the bounded MCP fields and secret values are write-only.
+          type: object
+          additionalProperties: false
+          required: [mcpServers]
+          properties:
+            mcpServers:
+              type: object
+              minProperties: 1
+              maxProperties: 1
+              additionalProperties:
+                type: object
+                additionalProperties: false
+                properties:
+                  type: {type: string, enum: [stdio, http, sse, streamable-http]}
+                  command: {type: string}
+                  args: {type: array, items: {type: string}}
+                  url: {type: string}
+                  env: {$ref: '#/components/schemas/WriteOnlySecretMap'}
+                  headers: {$ref: '#/components/schemas/WriteOnlySecretMap'}
+                  description: {type: string}
     WriteOnlySecretMap:
       type: object
       writeOnly: true
@@ -994,7 +1023,7 @@ components:
       description: Non-empty values create/replace secrets; an existing key with an empty value is retained; an omitted key is removed.
     MCPServer:
       type: object
-      required: [id, name, revision, transport, args, envKeys, headerKeys, contentHash, createdAt, updatedAt]
+      required: [id, name, revision, transport, args, envKeys, headerKeys, contentHash, enabled, createdAt, updatedAt]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         name: {type: string}
@@ -1007,6 +1036,7 @@ components:
         envKeys: {type: array, items: {type: string}}
         headerKeys: {type: array, items: {type: string}}
         contentHash: {$ref: '#/components/schemas/SHA256'}
+        enabled: {type: boolean, description: Member is present in the applied shared relay configuration.}
         createdAt: {type: string, format: date-time}
         updatedAt: {type: string, format: date-time}
     LocalMCPServerPreview:
@@ -1034,7 +1064,7 @@ components:
     ProfileInput:
       type: object
       additionalProperties: false
-      required: [name, description, revision, skillIds, mcpServerIds]
+      required: [name, description, revision, skillIds]
       properties:
         name: {type: string, minLength: 1, maxLength: 120}
         description: {type: string}
@@ -1044,11 +1074,7 @@ components:
         migrationState: {type: string, enum: [ready, needs_review, compatibility]}
         revision: {type: integer, minimum: 0}
         skillIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
-        mcpServerIds: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/UUID'}}
         skillVersionIds: {type: object, additionalProperties: {$ref: '#/components/schemas/UUID'}}
-        mcpRevisionIds: {type: object, additionalProperties: {$ref: '#/components/schemas/UUID'}}
-        mcpGovernance: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileMCPGovernance'}}
-        toolRules: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileToolRule'}}
     ProfileSkillPin:
       type: object
       required: [skillId, versionId, slug, name, sha256, contentHash, current]
@@ -1061,40 +1087,6 @@ components:
         sha256: {$ref: '#/components/schemas/SHA256'}
         contentHash: {$ref: '#/components/schemas/SHA256'}
         current: {type: boolean}
-    ProfileMCPPin:
-      type: object
-      required: [serverId, revisionId, revision, name, transport, envKeys, headerKeys, contentHash, current]
-      properties:
-        serverId: {$ref: '#/components/schemas/UUID'}
-        revisionId: {$ref: '#/components/schemas/UUID'}
-        revision: {type: integer, minimum: 1}
-        name: {type: string}
-        transport: {type: string, enum: [stdio, http, sse]}
-        command: {type: string}
-        args: {type: array, items: {type: string}}
-        url: {type: string}
-        envKeys: {type: array, items: {type: string}}
-        headerKeys: {type: array, items: {type: string}}
-        contentHash: {$ref: '#/components/schemas/SHA256'}
-        current: {type: boolean}
-    ProfileMCPGovernance:
-      type: object
-      additionalProperties: false
-      required: [serverId, mcpRevisionId, visibilityMode]
-      properties:
-        serverId: {$ref: '#/components/schemas/UUID'}
-        mcpRevisionId: {$ref: '#/components/schemas/UUID'}
-        acceptedContractRevisionId: {$ref: '#/components/schemas/UUID'}
-        visibilityMode: {type: string, enum: [all_accepted, selected, hidden]}
-    ProfileToolRule:
-      type: object
-      additionalProperties: false
-      required: [toolId, visible, decision]
-      properties:
-        toolId: {$ref: '#/components/schemas/UUID'}
-        visible: {type: boolean}
-        decision: {type: string, enum: [deny, confirm, allow]}
-        reasonCodes: {type: array, maxItems: 16, items: {$ref: '#/components/schemas/PolicyReasonCode'}}
     PendingSecretBinding:
       type: object
       required: [profileRevisionId, mcpRevisionId, namespace, key, slotHash, bound]
@@ -1110,7 +1102,7 @@ components:
       allOf:
         - {$ref: '#/components/schemas/ProfileInput'}
         - type: object
-          required: [id, currentRevisionId, canonicalHash, pendingBindings, skills, mcpServers, mcpGovernance, toolRules, effectiveVisibleCount, createdAt, updatedAt]
+          required: [id, currentRevisionId, canonicalHash, pendingBindings, skills, createdAt, updatedAt]
           properties:
             id: {$ref: '#/components/schemas/UUID'}
             currentRevisionId: {$ref: '#/components/schemas/UUID'}
@@ -1121,13 +1113,11 @@ components:
             pendingBindings: {type: boolean}
             archivedAt: {type: [string, 'null'], format: date-time}
             skills: {type: array, items: {$ref: '#/components/schemas/ProfileSkillPin'}}
-            mcpServers: {type: array, items: {$ref: '#/components/schemas/ProfileMCPPin'}}
-            effectiveVisibleCount: {type: integer, minimum: 0}
             createdAt: {type: string, format: date-time}
             updatedAt: {type: string, format: date-time}
     ProfileRevision:
       type: object
-      required: [id, profileId, revision, name, clientKind, variant, migrationState, canonicalHash, pendingBindings, archivedRestore, skills, mcpServers, mcpGovernance, toolRules, createdAt]
+      required: [id, profileId, revision, name, clientKind, variant, migrationState, canonicalHash, pendingBindings, archivedRestore, skills, createdAt]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         profileId: {$ref: '#/components/schemas/UUID'}
@@ -1142,9 +1132,6 @@ components:
         pendingBindings: {type: boolean}
         archivedRestore: {type: boolean}
         skills: {type: array, items: {$ref: '#/components/schemas/ProfileSkillPin'}}
-        mcpServers: {type: array, items: {$ref: '#/components/schemas/ProfileMCPPin'}}
-        mcpGovernance: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileMCPGovernance'}}
-        toolRules: {type: array, maxItems: 500, items: {$ref: '#/components/schemas/ProfileToolRule'}}
         createdAt: {type: string, format: date-time}
     BundlePreview:
       type: object
@@ -1429,18 +1416,18 @@ components:
     RelayPreflightRequest:
       type: object
       additionalProperties: false
-      required: [revisionId, profileIds, mode]
+      required: [revisionId, mode]
       properties:
         revisionId: {$ref: '#/components/schemas/UUID'}
-        profileIds: {type: array, uniqueItems: true, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}
+        profileIds: {deprecated: true, description: Retired Profile routing IDs; send an empty array when interoperating with legacy clients., type: array, uniqueItems: true, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}
         mode: {type: string, enum: [compatibility, enforced]}
     RelayApplyRequest:
       type: object
       additionalProperties: false
-      required: [revisionId, profileIds, mode, targetRevision, routingHash]
+      required: [revisionId, mode, targetRevision, routingHash]
       properties:
         revisionId: {$ref: '#/components/schemas/UUID'}
-        profileIds: {type: array, uniqueItems: true, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}
+        profileIds: {deprecated: true, description: Retired Profile routing IDs; send an empty array when interoperating with legacy clients., type: array, uniqueItems: true, maxItems: 100, items: {$ref: '#/components/schemas/UUID'}}
         mode: {type: string, enum: [compatibility, enforced]}
         targetRevision: {$ref: '#/components/schemas/SHA256'}
         routingHash: {$ref: '#/components/schemas/SHA256'}

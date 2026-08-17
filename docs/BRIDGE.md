@@ -183,21 +183,30 @@ Bridge is unavailable, inspect the service, socket group/GID, key equality,
 Salt CLI availability, and recovery logs. Never relax the socket to `0666` or
 mount a managed home to work around access failures.
 
-## Relay Governance Boundary
+## Shared mcpm Relay Boundary
 
-Routing governance was removed from the relay unit on 2026-08-16. The unit
-starts mcpm with `profile run --http --host 127.0.0.1 --port ${TOOLHUB_RELAY_PORT}
-toolhub` — no `--toolhub-routing`/`--toolhub-admin-socket` flags — so the relay
-runs in compatibility (pass-through) mode and exposes every configured MCP tool.
-Do not re-add those flags without a working contract-publication flow
-(`run.py` requires them as a pair).
+The unit starts mcpm with `profile run --http --host 127.0.0.1 --port
+${TOOLHUB_RELAY_PORT} toolhub` — no `--toolhub-routing` or
+`--toolhub-admin-socket` flags — so the relay runs in compatibility
+(pass-through) mode and exposes every enabled MCP member. Do not re-add those
+flags: the retired governance bundle is not a runtime dependency.
 
-The private governance routes remain typed on the same HMAC Unix
-socket for control-plane compatibility: capability discovery, routing-bundle
-reload, contract observation, confirmation approve/reject, payload-free
-observation drain, and native-client inspection. They do not provide a generic
-action or body proxy. The running relay no longer enforces filtered catalogs,
-session binding, or call policy.
+ToolHub Web/DB owns declarative MCP definitions and the enabled Relay
+Configuration revision. mcpm owns the `toolhub` runtime Profile, registry,
+upstream process lifecycle, and relay HTTP endpoint. Profiles in ToolHub own
+Skills only. MCP add/edit/enable/disable/delete changes must use the existing
+typed Bridge, operation, backup, and rollback path; no generic mcpm command or
+MCP proxy is exposed.
+
+When the governance admin socket is absent, relay health uses fixed systemd and
+HTTP liveness in compatibility mode. Healthy configured members are projected
+as `ready`; disabled members are `disabled`; only real runtime failures become
+`unavailable`.
+
+The private socket retains only bounded typed health/control calls needed by the
+Bridge. It does not provide a generic action or body proxy. Contract/routing
+governance records are historical compatibility data and are not required for
+normal pass-through relay health.
 
 The session canary was the final enforcement preflight check of the removed
 flow. It accepted only an
@@ -224,11 +233,10 @@ aliases by device and inode. More than one distinct executable fails closed as
 entries are part of the external launch environment and cannot be verified by
 ToolHub.
 
-The relay admin protocol is a separate bounded one-line JSON protocol at the
-fixed `/run/toolhub-mcpm/relay.sock`. The control plane still writes the fixed
-routing file `~/.config/mcpm/toolhub-routing.json`; neither path is
-caller-selectable. With routing governance removed (2026-08-16), the unit no
-longer passes `--toolhub-routing`, so mcpm does not read that file at runtime.
+The optional relay admin protocol is a separate bounded one-line JSON protocol
+at the fixed `/run/toolhub-mcpm/relay.sock`; its absence is compatible with
+pass-through mode. The legacy routing file is not read by the running unit and
+is not a source of MCP process health. Neither path is caller-selectable.
 The installer requires a compatible mcpm launcher contract (`/usr/libexec/toolhub-mcpm`)
 and does not download, install, or update mcpm. The resolved interpreter must remain
 under `/root/.local/share/uv/python`.

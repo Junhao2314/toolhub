@@ -114,7 +114,27 @@ func (s *Store) ProfileReadiness(ctx context.Context, profileID string, inspecti
 	if relayHealth != bridgeprotocol.HealthHealthy {
 		return notReady("relay_unhealthy")
 	}
+	var legacyProfileRelaySnapshot bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM target_desired_snapshots active
+			JOIN desired_snapshots snapshot ON snapshot.id=active.snapshot_id
+			JOIN targets target ON target.id=active.target_id
+			WHERE target.target_key='local/shared-relay'
+			  AND snapshot.source_kind='profile_apply'
+			  AND snapshot.source_id=$1
+		)`, profileID).Scan(&legacyProfileRelaySnapshot); err != nil {
+		return ProfileLaunchReadiness{}, err
+	}
+	skillOnlyApply := !legacyProfileRelaySnapshot
 	var unfinalizedMutation bool
+	mutationTargets := "$1,$2"
+	mutationArgs := []any{skillTargetID, relayTargetID}
+	if skillOnlyApply {
+		mutationTargets = "$1"
+		mutationArgs = []any{skillTargetID}
+	}
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS(
 			SELECT 1
@@ -122,28 +142,30 @@ func (s *Store) ProfileReadiness(ctx context.Context, profileID string, inspecti
 			JOIN operations o ON o.id=ot.operation_id
 			JOIN target_desired_snapshots active ON active.target_id=ot.target_id
 			JOIN desired_snapshots snapshot ON snapshot.id=active.snapshot_id
-			WHERE ot.target_id IN ($1,$2)
+			WHERE ot.target_id IN (`+mutationTargets+`)
 			  AND o.kind='apply'
 			  AND ot.request->>'sourceKind'='profile_apply'
 			  AND (
 				ot.status IN ('queued','running')
 				OR (ot.status='succeeded' AND ot.finished_at>snapshot.created_at)
 			  )
-		)`, skillTargetID, relayTargetID).Scan(&unfinalizedMutation); err != nil {
+		)`, mutationArgs...).Scan(&unfinalizedMutation); err != nil {
 		return ProfileLaunchReadiness{}, err
 	}
 	if unfinalizedMutation {
 		return notReady("profile_apply_unfinalized")
 	}
-	_, currentRoutingHash, err := s.RenderRoutingBundleTx(ctx, tx)
-	if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
-		return notReady("relay_routing_unavailable")
-	}
-	if err != nil {
-		return ProfileLaunchReadiness{}, err
-	}
-	if currentRoutingHash != appliedRoutingHash {
-		return notReady("relay_routing_mismatch")
+	if !skillOnlyApply {
+		_, currentRoutingHash, err := s.RenderRoutingBundleTx(ctx, tx)
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrNotFound) {
+			return notReady("relay_routing_unavailable")
+		}
+		if err != nil {
+			return ProfileLaunchReadiness{}, err
+		}
+		if currentRoutingHash != appliedRoutingHash {
+			return notReady("relay_routing_mismatch")
+		}
 	}
 
 	if inspection.ClientKind != clientKind {

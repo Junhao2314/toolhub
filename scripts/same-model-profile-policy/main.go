@@ -30,7 +30,6 @@ var ordinaryProfiles = []string{
 	"claude-coding", "codex-coding",
 	"claude-data-analysis", "codex-data-analysis",
 	"claude-frontend-ui", "codex-frontend-ui",
-	"claude-text-processing", "codex-text-processing",
 }
 
 var codingProfiles = map[string]bool{
@@ -62,11 +61,6 @@ type skillPin struct {
 	Slug      string `json:"slug"`
 }
 
-type mcpPin struct {
-	ServerID   string `json:"serverId"`
-	RevisionID string `json:"revisionId"`
-}
-
 type profile struct {
 	ID            string     `json:"id"`
 	Name          string     `json:"name"`
@@ -74,9 +68,7 @@ type profile struct {
 	Revision      int64      `json:"revision"`
 	CanonicalHash string     `json:"canonicalHash"`
 	SkillIDs      []string   `json:"skillIds"`
-	MCPServerIDs  []string   `json:"mcpServerIds"`
 	Skills        []skillPin `json:"skills"`
-	MCPServers    []mcpPin   `json:"mcpServers"`
 }
 
 type profileInput struct {
@@ -84,9 +76,7 @@ type profileInput struct {
 	Description     string            `json:"description"`
 	Revision        int64             `json:"revision"`
 	SkillIDs        []string          `json:"skillIds"`
-	MCPServerIDs    []string          `json:"mcpServerIds"`
 	SkillVersionIDs map[string]string `json:"skillVersionIds"`
-	MCPRevisionIDs  map[string]string `json:"mcpRevisionIds"`
 }
 
 type commandMode string
@@ -247,7 +237,7 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 	if err != nil {
 		return result, err
 	}
-	profilesByName, sharedBefore, err := validateBaseline(library, profiles)
+	profilesByName, err := validateBaseline(library, profiles)
 	if err != nil {
 		return result, err
 	}
@@ -265,11 +255,11 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 		if err != nil {
 			return result, err
 		}
-		finalByName, _, err := validateBaseline(library, finalProfiles)
+		finalByName, err := validateBaseline(library, finalProfiles)
 		if err != nil {
 			return result, err
 		}
-		if err := verifyState(library, finalByName, policySkill, sharedBefore); err != nil {
+		if err := verifyState(library, finalByName, policySkill); err != nil {
 			return result, err
 		}
 		result.Verified = true
@@ -306,12 +296,9 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 		if err != nil {
 			return result, err
 		}
-		latestByName, latestShared, err := validateBaseline(library, latestProfiles)
+		latestByName, err := validateBaseline(library, latestProfiles)
 		if err != nil {
 			return result, err
-		}
-		if !sameSharedProfile(sharedBefore, latestShared) {
-			return result, errors.New("shared-mcp changed during migration")
 		}
 		current := latestByName[name]
 		result.Profiles[index] = buildReport(latestByName, policySkill, found)[index]
@@ -338,7 +325,7 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 	if err != nil {
 		return result, err
 	}
-	finalByName, sharedAfter, err := validateBaseline(finalLibrary, finalProfiles)
+	finalByName, err := validateBaseline(finalLibrary, finalProfiles)
 	if err != nil {
 		return result, err
 	}
@@ -349,11 +336,8 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 	if !found || finalPolicySkill.ID != policySkill.ID || finalPolicySkill.CurrentVersionID != policySkill.CurrentVersionID || finalPolicySkill.CurrentSHA256 != pkg.SHA256 {
 		return result, errors.New("same-model-subagents Library state changed during migration")
 	}
-	if err := verifyState(finalLibrary, finalByName, finalPolicySkill, sharedBefore); err != nil {
+	if err := verifyState(finalLibrary, finalByName, finalPolicySkill); err != nil {
 		return result, err
-	}
-	if !sameSharedProfile(sharedBefore, sharedAfter) {
-		return result, errors.New("shared-mcp changed during migration")
 	}
 	result.Verified = true
 	return result, nil
@@ -521,47 +505,40 @@ func (c *apiClient) send(request *http.Request, output any) error {
 	return nil
 }
 
-func validateBaseline(library []skill, profiles []profile) (map[string]profile, profile, error) {
+func validateBaseline(library []skill, profiles []profile) (map[string]profile, error) {
 	for _, slug := range retainedLibrarySlugs {
 		if _, found, err := uniqueSkillBySlug(library, slug); err != nil {
-			return nil, profile{}, err
+			return nil, err
 		} else if !found {
-			return nil, profile{}, fmt.Errorf("required Library Skill %s is missing", slug)
+			return nil, fmt.Errorf("required Library Skill %s is missing", slug)
 		}
 	}
 
 	counts := map[string]int{}
 	profilesByName := map[string]profile{}
-	allowedProfiles := map[string]bool{"shared-mcp": true}
+	allowedProfiles := map[string]bool{}
 	for _, name := range ordinaryProfiles {
 		allowedProfiles[name] = true
 	}
 	for _, item := range profiles {
 		if !allowedProfiles[item.Name] {
-			return nil, profile{}, fmt.Errorf("unexpected active Profile %s", item.Name)
+			return nil, fmt.Errorf("unexpected active Profile %s", item.Name)
 		}
 		counts[item.Name]++
 		profilesByName[item.Name] = item
 	}
 	for _, name := range ordinaryProfiles {
 		if counts[name] != 1 {
-			return nil, profile{}, fmt.Errorf("expected active Profile %s exactly once, found %d", name, counts[name])
+			return nil, fmt.Errorf("expected active Profile %s exactly once, found %d", name, counts[name])
 		}
 		if err := validateProfileProjection(profilesByName[name]); err != nil {
-			return nil, profile{}, fmt.Errorf("Profile %s: %w", name, err)
+			return nil, fmt.Errorf("Profile %s: %w", name, err)
 		}
 		if !profileHasSlug(profilesByName[name], "requesting-code-review") {
-			return nil, profile{}, fmt.Errorf("Profile %s is missing requesting-code-review", name)
+			return nil, fmt.Errorf("Profile %s is missing requesting-code-review", name)
 		}
 	}
-	if counts["shared-mcp"] != 1 {
-		return nil, profile{}, fmt.Errorf("expected active Profile shared-mcp exactly once, found %d", counts["shared-mcp"])
-	}
-	shared := profilesByName["shared-mcp"]
-	if err := validateProfileProjection(shared); err != nil {
-		return nil, profile{}, fmt.Errorf("Profile shared-mcp: %w", err)
-	}
-	return profilesByName, shared, nil
+	return profilesByName, nil
 }
 
 func validateProfileProjection(item profile) error {
@@ -582,21 +559,6 @@ func validateProfileProjection(item profile) error {
 	}
 	if !reflect.DeepEqual(skillIDs, item.SkillIDs) {
 		return errors.New("skillIds do not match ordered Skill pins")
-	}
-	mcpIDs := make([]string, 0, len(item.MCPServers))
-	seenMCP := map[string]bool{}
-	for _, pin := range item.MCPServers {
-		if pin.ServerID == "" || pin.RevisionID == "" {
-			return errors.New("MCP pin omitted server or revision ID")
-		}
-		if seenMCP[pin.ServerID] {
-			return fmt.Errorf("duplicate MCP server ID %s", pin.ServerID)
-		}
-		seenMCP[pin.ServerID] = true
-		mcpIDs = append(mcpIDs, pin.ServerID)
-	}
-	if !reflect.DeepEqual(mcpIDs, item.MCPServerIDs) {
-		return errors.New("mcpServerIds do not match ordered MCP pins")
 	}
 	return nil
 }
@@ -664,9 +626,7 @@ func desiredProfile(current profile, policySkill skill) (profileInput, bool, err
 		Description:     current.Description,
 		Revision:        current.Revision,
 		SkillIDs:        []string{},
-		MCPServerIDs:    []string{},
 		SkillVersionIDs: map[string]string{},
-		MCPRevisionIDs:  map[string]string{},
 	}
 	foundPolicy := false
 	for _, pin := range current.Skills {
@@ -689,27 +649,16 @@ func desiredProfile(current profile, policySkill skill) (profileInput, bool, err
 		input.SkillIDs = append(input.SkillIDs, policySkill.ID)
 		input.SkillVersionIDs[policySkill.ID] = policySkill.CurrentVersionID
 	}
-	for _, pin := range current.MCPServers {
-		input.MCPServerIDs = append(input.MCPServerIDs, pin.ServerID)
-		input.MCPRevisionIDs[pin.ServerID] = pin.RevisionID
-	}
-
 	currentSkillPins := map[string]string{}
 	for _, pin := range current.Skills {
 		currentSkillPins[pin.SkillID] = pin.VersionID
 	}
-	currentMCPPins := map[string]string{}
-	for _, pin := range current.MCPServers {
-		currentMCPPins[pin.ServerID] = pin.RevisionID
-	}
 	changed := !reflect.DeepEqual(current.SkillIDs, input.SkillIDs) ||
-		!reflect.DeepEqual(current.MCPServerIDs, input.MCPServerIDs) ||
-		!reflect.DeepEqual(currentSkillPins, input.SkillVersionIDs) ||
-		!reflect.DeepEqual(currentMCPPins, input.MCPRevisionIDs)
+		!reflect.DeepEqual(currentSkillPins, input.SkillVersionIDs)
 	return input, changed, nil
 }
 
-func verifyState(library []skill, profilesByName map[string]profile, policySkill skill, sharedBefore profile) error {
+func verifyState(library []skill, profilesByName map[string]profile, policySkill skill) error {
 	for _, slug := range retainedLibrarySlugs {
 		if _, found, err := uniqueSkillBySlug(library, slug); err != nil {
 			return err
@@ -738,9 +687,6 @@ func verifyState(library []skill, profilesByName map[string]profile, policySkill
 			return fmt.Errorf("Profile %s is missing requesting-code-review", name)
 		}
 	}
-	if !sameSharedProfile(sharedBefore, profilesByName["shared-mcp"]) {
-		return errors.New("shared-mcp changed during verification")
-	}
 	return nil
 }
 
@@ -751,14 +697,4 @@ func profileHasSlug(item profile, slug string) bool {
 		}
 	}
 	return false
-}
-
-func sameSharedProfile(first, second profile) bool {
-	return first.ID == second.ID &&
-		first.Revision == second.Revision &&
-		first.CanonicalHash == second.CanonicalHash &&
-		reflect.DeepEqual(first.SkillIDs, second.SkillIDs) &&
-		reflect.DeepEqual(first.MCPServerIDs, second.MCPServerIDs) &&
-		reflect.DeepEqual(first.Skills, second.Skills) &&
-		reflect.DeepEqual(first.MCPServers, second.MCPServers)
 }

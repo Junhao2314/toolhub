@@ -68,11 +68,12 @@ Legacy Secret values are decrypted into bounded buffers, re-encrypted under
 fresh UUIDs with the destination key, and zeroed. A failed import transaction
 leaves the initialized destination baseline retryable.
 
-The generated Profiles are:
+The generated Skill-only Profiles are:
 
 - `claude-skills`: Claude Skill selection;
 - `codex-skills`: Codex Skill selection;
-- `shared-mcp`: Claude and Codex MCP servers.
+- No MCP Profile is generated. Imported MCP definitions belong to the shared
+  Relay Configuration and are applied separately through the MCP page.
 
 Review these Profiles in the generation-2 UI. Applying them is a separate,
 explicit post-cutover operation requiring normal target scan and preflight.

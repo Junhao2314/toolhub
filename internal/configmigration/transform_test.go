@@ -26,8 +26,11 @@ func TestPrepareNormalizesMCPAndBuildsStagingProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(prepared.Import.Skills) != 1 || len(prepared.Import.MCPServers) != 2 || len(prepared.Import.Secrets) != 2 || len(prepared.Import.Profiles) != 3 {
+	if len(prepared.Import.Skills) != 1 || len(prepared.Import.MCPServers) != 2 || len(prepared.Import.Secrets) != 2 || len(prepared.Import.Profiles) != 2 {
 		t.Fatalf("unexpected import counts: %+v", prepared.Report)
+	}
+	if len(prepared.Import.RelayMCPServerIDs) != 1 || prepared.Report.RelayMCPServers != 1 {
+		t.Fatalf("unexpected relay MCP selection: %+v", prepared.Report)
 	}
 	names := map[string]string{}
 	transports := map[string]string{}

@@ -37,30 +37,34 @@ Reusing a key with a different canonical request returns `409`.
   Profile revision must include that Skill; a new revision that omits a
   required Skill is rejected. Existing revisions remain immutable.
 - `GET|POST /mcp/servers` and `PUT|DELETE /mcp/servers/{id}` manage the MCP
-  Library. Responses expose only `envKeys` and `headerKeys`, never values.
+  Library. Responses expose only `envKeys`, `headerKeys`, and the applied Relay
+  `enabled` projection, never secret values.
 - MCP input secret semantics are write-only: a non-empty value sets/replaces;
   an existing key with an empty value is retained; an omitted key is removed.
+- MCP create/update also accepts `customJson` in the standard client shape
+  `{ "mcpServers": { "name": { "type": "stdio|http|sse", ... } } }`.
+  Exactly one entry is accepted; supported fields are `type`, `command`,
+  `args`, `url`, `env`, `headers`, and `description`. Unknown fields and
+  multiple entries are rejected, and the parsed values use the same command,
+  URL, name, and secret validation as the form fields.
 - `/profiles` is the only Profile model. Each immutable revision pins exact
-  Skill versions and MCP revisions; current Library pointers are used only for
-  new Profiles or explicit Refresh. Saving a new revision requires every
-  Library Skill tagged `required` (non-`shared` Profiles only).
-- Profile list/detail responses and revision history expose the pinned
-  `mcpGovernance` and `toolRules` arrays so an editor can round-trip a governed
-  revision without weakening or dropping policy. Current Profile responses also
-  expose the optional Published revision ID, revision number, and timestamp;
-  comparing that pointer with `currentRevisionId` distinguishes a draft from the
-  revision active in the Relay. Empty governance and rule collections are `[]`.
+  Skill versions; MCP membership, governance, and tool rules are not Profile
+  fields. Current Library pointers are used only for new Profiles or explicit
+  Skill Refresh. Saving a new revision requires every Library Skill tagged
+  `required` (non-`shared` Profiles only). Legacy MCP fields are rejected by
+  strict JSON decoding.
+- Profile list/detail responses and revision history expose Skill pins only.
+  Shared MCP state is returned by `/relay/configuration` and `/targets` relay
+  projections. The optional Published revision pointer distinguishes a draft
+  Skill revision from the revision last delivered to a target.
 - `GET /profiles?includeArchived=true` includes reversible archived Profiles
   after active rows. `POST /profiles/{id}/archive` requires the current
   revision; `POST /profiles/{id}/restore` creates an `archived_restore`
   revision; `POST /profiles/{id}/purge` is irreversible and succeeds only when
   no snapshot, pending operation, or bundle fingerprint still references the
   archived Profile.
-- Bundle imports that contain MCP slots expose pending write-only bindings via
-  `GET /profiles/{id}/secret-bindings`. Complete them with
-  `POST /profiles/{id}/secret-bindings` using `{revision, values}` where
-  `values` is keyed by the returned `slotHash`; plaintext values are encrypted
-  immediately and never returned.
+- MCP secret slots are completed on the MCP editor itself. Profile Bundle
+  imports are Skill-only and never create MCP bindings.
 
 Unmanaged Skills found in a scanned `local/claude` or `local/codex` target can
 be imported with `POST /targets/{id}/skill-import`. The request is bound to the
@@ -77,13 +81,14 @@ Local Hermes Skills use opaque IDs through the capped batch route
 `POST /targets/{id}/skill-imports`; items commit independently and a partial
 operation exposes failed-only retry data.
 
-Profile Bundles are ZIP uploads. Standard export/import carries no Secret
-values; `export-secrets` requires current-password reauthentication and sends
-an explicit plaintext backup with `Cache-Control: no-store`. Preview stores
-only a short-lived hash-bound token; import re-uploads the same bytes.
+Profile Bundles are ZIP uploads containing Skills only. MCP definitions and
+write-only secrets are managed and exported from the MCP/Relay Configuration
+workflow, never from a Profile. Preview stores only a short-lived hash-bound
+token; importing a legacy bundle that contains MCP entries is rejected.
 
-`POST /profiles/{id}/preflight` accepts 1-100 unique target IDs including the
-Profile's local client target. Before calling any target preflight or issuing a
+`POST /profiles/{id}/preflight` accepts 1-100 unique Skill target IDs including
+the Profile's local client target; `local/shared-relay` is rejected because
+relay configuration is independent. Before calling any target preflight or issuing a
 token, it asks the Bridge to inspect that managed user's fixed Claude/Codex
 adapter. Missing, unsafe, invalid, timed-out, or below-floor clients return a
 stable `409` reason code and issue no tokens. Multiple approved paths that
@@ -99,13 +104,9 @@ atomically consumes the tokens and queues one
 fleet operation. A changed Profile, changed target, expired token, reused
 token, or mismatched manifest returns `409`.
 
-Apply finalization publishes each client target's desired snapshot only after
-every client target succeeds. When routing governance is uninstalled, a
-deterministically unavailable relay target (`mcpm_missing`,
-`mcpm_incompatible`, `relay_port_conflict`) is excluded from finalization and
-the operation completes `partial` with the client snapshots published;
-retryable relay failures defer finalization without advancing snapshots, and
-client failures still block it.
+Skill Profile Apply finalization publishes client Skill target snapshots only
+after the selected Skill targets succeed. Relay Configuration Apply is
+independent and is the only operation that changes the shared MCP set.
 
 ## Targets And Snapshots
 
@@ -141,9 +142,8 @@ Local targets are:
 
 - `local/claude` and `local/codex`: Skills only.
 - `local/shared-relay`: MCP only, including the shared mcpm registry and the
-  Claude/Codex/Hermes relay anchors. Its Apply mirrors Hermes' existing
-  `mcp_servers` map to the single `toolhub-relay` anchor; reconcile preserves
-  later unmanaged Hermes entries while repairing the anchor.
+  Claude/Codex/Hermes relay anchors. Relay Configuration Apply mirrors the
+  enabled set to mcpm; Profile Apply never changes this set.
 - `local/hermes`: read-only inventory.
 
 Salt nodes expose Claude/Codex writable Skill+MCP targets and read-only Hermes.
@@ -189,12 +189,10 @@ Backup GC is scheduled daily with fixed 30-day/10-per-target retention.
 
 ## Relay
 
-Routing governance was removed from the relay unit on 2026-08-16; the running
-relay is a compatibility pass-through that exposes every configured tool. The
-control-plane governance endpoints below remain available and revision-bound,
-and the applied Relay Configuration is still the source of the member set, but
-no filtered catalog, session binding, canary, or call policy is enforced by the
-running relay.
+The relay unit runs mcpm in compatibility/pass-through mode and exposes every
+enabled member in the applied Relay Configuration. The applied Relay
+Configuration is the only ToolHub-side source of the shared member set; Profiles
+do not publish routing or call policy.
 
 `POST /targets/{id}/relay/{start|stop|restart|health}` queues fixed controls for
 `local/shared-relay`. Stop persists `relayIntentionalPaused=true`; periodic
@@ -205,42 +203,25 @@ back to another port. Target detail exposes only bounded protocol health,
 capability counts, stable error codes, and retry timing. Arbitrary unit names are
 impossible.
 
-Relay governance separates draft/current state from applied state. `GET
-/relay/configuration` and `GET /mcp/policy` return both immutable projections;
-their `PUT` routes create a new current revision with optimistic revision
-checking and do not Apply it. Relay Configuration revisions pin an ordered set of
-exact MCP revisions. Global Policy revisions pin the policy catalog version and
-explicit tool decisions.
+Relay Configuration separates draft/current state from applied state. `GET
+/relay/configuration` returns both immutable projections; its `PUT` creates a new
+current revision with optimistic revision checking and does not apply it. Relay
+Configuration revisions pin an ordered set of exact MCP revisions and are
+materialized by mcpm through the existing durable apply operation. MCP list/detail
+projections expose whether each server is enabled in the applied revision.
 
-The Relay Configuration projection also reports the compatibility migration
-state, pending Contract/Profile review counts, the exact legacy `shared-mcp`
-identity and transition marker, Restore readiness, and a bounded mcpm capability
-view. The capability view exposes only compatibility, the validated runtime
-version, seven fixed feature names (`profile-session-binding`, `tool-filtering`,
-`call-policy`, `one-shot-confirmation`, `payload-free-observations`,
-`routing-hot-reload`, and `session-canary`), and a stable error code; raw
-Bridge/runtime errors are not returned.
+The Relay Configuration projection reports current/applied revisions and a
+bounded mcpm capability view. A missing governance admin socket is not by itself
+an incompatibility in pass-through mode: fixed HTTP/systemd liveness is used and
+configured healthy members project as `ready`. Raw Bridge/runtime errors are not
+returned.
 
 Relay Configuration Apply is revision-bound. `POST
-/relay/configuration/prepare-profile-updates` returns the Profiles affected by a
-candidate revision. It creates a candidate only while the current Profile still
-matches its Published predecessor, treats an exact repeated preparation as a
-no-op, and returns `409` instead of replacing an unrelated current draft. `POST
-/relay/configuration/preflight` renders that candidate
-with the exact selected current Profile revisions and returns the target revision
-and routing hash. Both Preflight and Apply require an explicit `mode` of
-`compatibility` or `enforced`. Enforced Preflight additionally fails closed on
-governance readiness, mcpm capability, or either Claude/Codex native-client
-inspection. Its runtime checks have a fixed order: mcpm capability, Claude
-inspection, Codex inspection, then the candidate bundle's session canary. The
-canary verifies explicit Claude and Codex Profile catalogs, missing-Profile
-empty/default behavior, unknown-Profile hard failure, and two concurrent
-sessions without increasing the one-process-per-upstream set. `POST
-/relay/configuration/apply` accepts those values and queues a durable
-`relay_config_apply`; finalization advances the applied Relay revision, explicit
-mode, and selected Published Profile revisions only if every predecessor, prior
-mode, and hash still matches. `POST /mcp/policy/apply` uses the same
-target-revision binding for a durable `policy_apply` operation.
+/relay/configuration/preflight` validates the exact selected MCP revisions and
+returns a target revision/hash. `POST /relay/configuration/apply` queues a
+durable `relay_config_apply`; finalization advances the applied Relay revision
+only if predecessor, target revision, and hash still match. mcpm remains the
+sole process owner and ToolHub never exposes a generic mcpm command proxy.
 
 Contract governance is exposed through `GET /relay/contracts`, the durable
 `POST /relay/contracts/observe`, revision acceptance, and explicit rename
@@ -276,10 +257,11 @@ it. A confirmed high-risk call is therefore dispatched at most once; only a
 proven pre-dispatch failure is `not_executed`, while post-dispatch ambiguity is
 `execution_unknown` and requires state inspection before a manual retry.
 
-`GET /profiles/{id}/launch` returns a command only when the current Profile is
-Published, its native Skill target and shared Relay snapshot are healthy and
-revision-matched, the routing hash is current, and the fixed native adapter is
-supported. Otherwise it returns a stable reason code and no command.
+`GET /profiles/{id}/launch` returns a command only when the current Skill-only
+Profile is published for delivery, its native Skill target and independently
+managed shared Relay snapshot are healthy and revision-matched, and the fixed
+native adapter is supported. Skill Profile changes do not require a routing
+hash match. Otherwise it returns a stable reason code and no command.
 
 Observability remains payload-free. `GET /relay/observations/live` validates the
 Relay cursor and returns no more than the requested limit, capped at 1,000 safe

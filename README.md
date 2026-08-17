@@ -19,33 +19,29 @@ Licensed under the [MIT License](LICENSE).
   providers, and actorless audit.
 - Salt 3008.x: accepted-key discovery and remote Claude/Codex/Hermes inventory.
   Hermes is read-only. Claude/Codex are writable targets.
-- `mcpm`: one shared upstream pool served through one HTTP relay at
-  `http://127.0.0.1:6276/mcp?profile=<published-profile-name>`. Claude, Codex,
-  Hermes, Kimi, and Grok use the same Profile query; the Profile alone controls
-  the visible MCP tools and call policy. A profile member defaults to
-  `all_accepted` (all tools from its pinned accepted MCP contract); `selected`
-  and `hidden` remain explicit opt-in modes. The local Hermes MCP map is
-  collapsed to that anchor on Apply; remote Hermes remains read-only.
+- `mcpm`: the sole shared MCP registry, upstream-process owner, and HTTP relay
+  at `http://127.0.0.1:6276/mcp`. Its `toolhub` runtime Profile is not a
+  ToolHub task Profile; it is materialized from ToolHub's applied Relay
+  Configuration.
 - `mcpm/`: the embedded, ToolHub-owned mcpm Python project. The installer
   materializes it at `/usr/libexec/toolhub-mcpm` (launcher) with its runtime
   under `/var/lib/toolhub-bridge/mcpm`, so the relay keeps working when the
   checkout is moved or re-cloned.
 
-ToolHub is the MCP control plane: it versions Library inputs, Contracts,
-Profiles, policy, desired snapshots, and routing bundles, then delivers them
-through the Bridge. It never proxies MCP tool traffic. `mcpm` is the local MCP
-data plane: it owns the shared upstream process set and exposes every configured
-tool from the `toolhub` Profile through one relay endpoint.
+ToolHub is the MCP configuration plane: the browser edits MCP definitions and
+the enabled Relay Configuration set, then delivers typed changes through the
+Bridge. ToolHub never proxies MCP tool traffic. `mcpm` is the local MCP data
+plane: it owns the shared upstream process set and exposes every enabled member
+through one relay endpoint. ToolHub Profiles manage Skills only.
 
 Relay routing governance was removed on 2026-08-16: the contract-publication
 flow never worked and an empty bundle hid every tool. The relay unit therefore
 runs in compatibility (pass-through) mode — `profile run ... toolhub` without
 `--toolhub-routing` — and exposes all configured MCP tools. Do not re-add
 `--toolhub-routing`/`--toolhub-admin-socket` without a working contract flow.
-The governance control endpoints, revision history, and routing-file writes
-remain in the control plane for compatibility, but the running relay no longer
-enforces filtered catalogs or call policy. The legacy `shared-mcp`
-Profile is retained for history and rollback.
+The legacy `shared-mcp` Profile/governance owner is retired by migrations
+013-015 and must not be recreated. Compatibility-only control records are
+cleaned when they belong exclusively to that retired owner.
 
 There is no Agent, WebSocket enrollment, SSH fallback, RBAC, multi-user API,
 review/approval workflow, deployment table, or legacy job queue.
@@ -118,11 +114,10 @@ smoke must set `TOOLHUB_SECURE_COOKIES=false`.
 
 ## Desired State
 
-Profiles reference Skill IDs and MCP server IDs. Every Apply begins with a
-five-minute, one-use preflight token bound to the Profile revision, target
-revision, and canonical manifest. Apply mirrors the manageable scope and pins
-the exact current artifact versions, MCP revisions, secret IDs, and hashes in an
-immutable desired snapshot.
+Profiles reference Skill IDs only. Every Skill Apply begins with a five-minute,
+one-use preflight token bound to the Profile revision, target revision, and
+canonical manifest. Shared MCP changes use the separate Relay Configuration
+draft/preflight/apply flow and pin exact MCP revisions in relay snapshots.
 
 Skills carry normalized tags (lowercase slugs, up to 50 per Skill). The
 `required` tag means every non-`shared` Profile revision must include that

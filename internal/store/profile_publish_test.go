@@ -49,6 +49,32 @@ func TestPublishedProfilePointerIsPerProfile(t *testing.T) {
 	}
 }
 
+func TestActiveRelayConfigurationBundleIgnoresProfileRevisions(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	_, beforeHash, err := st.RenderRelayConfigurationBundle(ctx, RoutingBundleCandidate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "relay-hash-isolation", ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveProfile(ctx, profile.ID, ProfileInput{Name: "relay-hash-isolation-renamed", ClientKind: "claude", Category: "analysis", Revision: profile.Revision}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET default_profile_id=$1 WHERE singleton`, profile.ID); err != nil {
+		t.Fatal(err)
+	}
+	bundle, afterHash, err := st.RenderRelayConfigurationBundle(ctx, RoutingBundleCandidate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeHash != afterHash || len(bundle.Profiles) != 0 {
+		t.Fatalf("active relay bundle changed with Skill Profile revision: before=%s after=%s profiles=%d", beforeHash, afterHash, len(bundle.Profiles))
+	}
+}
+
 func TestArchiveProfileRemovesPublishedPointer(t *testing.T) {
 	ctx := context.Background()
 	st := newIntegrationStore(t, true)
@@ -345,6 +371,45 @@ func TestCreateProfileApplyRequiresExactlyOneLocalSkillAndRelayTarget(t *testing
 	}
 	if consumed {
 		t.Fatal("invalid Profile Apply consumed its confirmation token")
+	}
+}
+
+func TestCreateProfileSkillApplyOperationIsRelayIndependent(t *testing.T) {
+	ctx := context.Background()
+	st := newIntegrationStore(t, true)
+	if err := st.BootstrapEnvironment(ctx, "skill-only-host", "runner", "UTC", 6276); err != nil {
+		t.Fatal(err)
+	}
+	skillTarget := integrationTarget(t, st, "local/claude")
+	profile, err := st.SaveProfile(ctx, uuid.NewString(), ProfileInput{Name: "claude-skills-only", ClientKind: "claude", Category: "coding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := st.ResolveProfileManifest(ctx, profile.ID, skillTarget.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.MCPServers) != 0 || manifest.RelayGovernance != nil {
+		t.Fatalf("Skill-only manifest carried MCP/relay state: %+v", manifest)
+	}
+	token, _, err := st.CreatePreflightConfirmation(ctx, profile.ID, skillTarget.ID, strings.Repeat("a", 64), manifest, bridgeprotocol.Diff{}, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation, err := st.CreateProfileSkillApplyOperation(ctx, profile.ID, []string{token}, "skill-only-"+uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targets, pending int
+	var mode string
+	if err := st.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE governance_finalization_pending) FROM operation_targets WHERE operation_id=$1`, operation.ID).Scan(&targets, &pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.pool.QueryRow(ctx, `SELECT metadata->>'mode' FROM operations WHERE id=$1`, operation.ID).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if targets != 1 || pending != 0 || mode != "skills_only" {
+		t.Fatalf("Skill-only apply targets=%d pending=%d mode=%q", targets, pending, mode)
 	}
 }
 

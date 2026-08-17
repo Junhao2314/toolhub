@@ -155,7 +155,7 @@ func (s *Store) FinalizeGlobalPolicyApply(ctx context.Context, operationID, revi
 	if appliedRevisionID != stringMetadata(metadata, "expectedAppliedGlobalPolicyRevisionId") {
 		return ErrConflict
 	}
-	if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{GlobalPolicyRevisionID: revisionID}, stringMetadata(metadata, "routingHash")); err != nil {
+	if err := s.validateRelayConfigurationRoutingHashTx(ctx, tx, RoutingBundleCandidate{GlobalPolicyRevisionID: revisionID}, stringMetadata(metadata, "routingHash")); err != nil {
 		return err
 	}
 	var exists bool

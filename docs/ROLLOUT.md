@@ -58,7 +58,8 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
 
 1. Verify `/usr/libexec/toolhub-mcpm toolhub contract --json` and that port `6276` (or the configured
    fixed port) is free.
-2. Apply a Profile to `local/shared-relay`.
+2. Open the MCP page, confirm the six approved members in the Relay
+   Configuration, and apply that configuration. Profiles are Skill-only.
 3. Connect at least one Claude, Codex, and local Hermes client to the same endpoint.
 4. Verify exactly one `toolhub-relay` user-scope anchor in each native config;
    confirm the previous Hermes `mcp_servers` entries were removed by Apply.
@@ -66,21 +67,21 @@ Use [`DEPLOYMENT.md`](DEPLOYMENT.md) for exact commands.
    `intentional_paused` prevents automatic start while config drift is still
    detected/repaired.
 6. Restart and run the explicit health action.
-7. Require every desired MCP member to be `ready`; for the current canary this
+7. Require every enabled MCP member to be `ready`; for the current canary this
    means six namespaces (acemcp, agent-browser, context7, deepwiki, grok-search,
-   trellis) and 68 tools. Call the safe read-only ACEMCP indexing
+   trellis) and 68 tools. A missing governance socket is not a failure in
+   pass-through mode. Call the safe read-only ACEMCP indexing
    status, Grok config info, and Trellis UI info tools.
 8. Wait through one 30-minute full member-health cadence and repeat the check.
 
-### Relay Governance Transition
+### Retired Relay Governance Transition (historical)
 
-Relay routing governance was removed on 2026-08-16 (see
-[`README.md`](../README.md)); the relay unit now runs mcpm in compatibility
-pass-through mode without `--toolhub-routing`. The control-plane governance
-endpoints and routing-file writes remain for compatibility, but the running
-relay exposes all configured tools. The historical transition steps below are
-retained only as a record of the removed flow; do not follow them without a
-working contract-publication flow:
+Relay routing governance was removed on 2026-08-16. The steps below are
+historical evidence only and must not be followed. The current workflow is
+MCP-page Relay Configuration -> typed Bridge operation -> mcpm `toolhub`
+profile. Migrations 013-017 remove the legacy `shared-mcp` owner and its
+scoped history, including stale relay member result projections, all Profile
+MCP governance rows, and the retired text-processing Profiles.
 
 1. Observe and accept every current Contract, then resolve every Profile whose
    client/category metadata is ambiguous. First Contract acceptance may create
@@ -94,10 +95,9 @@ working contract-publication flow:
    explicit Profile catalog, Codex explicit Profile catalog, missing Profile
    default all-tools behavior, unknown Profile `profile_unknown` failure, and two
    concurrent sessions with every upstream process count still exactly one.
-4. Apply `enforced`. Only after a healthy Applied snapshot has a Restore backup
-   may the exact legacy Profile be marked `migrated_relay` and hidden from the
-   ordinary Profile list. Keep its history, Bundle references, and Secret
-   bindings.
+4. Apply `enforced`. This historical flow is superseded; do not recreate the
+   legacy Profile or retain Profile MCP bindings. The current path is the
+   compatibility/pass-through Relay Configuration workflow documented above.
 5. Use each Profile's **Launch session** action and copy the server-generated
    strict `claude --strict-mcp-config --mcp-config ...` or `codex
    --strict-config -c ...` command. Do not reuse a command for another Profile;

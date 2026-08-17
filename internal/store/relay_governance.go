@@ -378,8 +378,11 @@ func (s *Store) FinalizeRelayConfigurationApply(ctx context.Context, operationID
 			return err
 		}
 	}
-	candidate := RoutingBundleCandidate{Mode: mode, RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: affectedProfileRevisions}
-	if err := s.validateCandidateRoutingHashTx(ctx, tx, candidate, routingHash); err != nil {
+	if len(affectedProfileRevisions) == 0 {
+		if err := s.validateRelayConfigurationRoutingHashTx(ctx, tx, RoutingBundleCandidate{Mode: mode, RelayConfigurationRevisionID: revisionID}, routingHash); err != nil {
+			return err
+		}
+	} else if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{Mode: mode, RelayConfigurationRevisionID: revisionID, PublishedProfileRevisions: affectedProfileRevisions}, routingHash); err != nil {
 		return err
 	}
 	var exists bool
@@ -985,6 +988,17 @@ func (s *Store) validateCandidateRoutingHashTx(ctx context.Context, tx pgx.Tx, c
 	return nil
 }
 
+func (s *Store) validateRelayConfigurationRoutingHashTx(ctx context.Context, tx pgx.Tx, candidate RoutingBundleCandidate, expectedHash string) error {
+	_, actualHash, err := s.RenderRelayConfigurationBundleTx(ctx, tx, candidate)
+	if err != nil {
+		return err
+	}
+	if !bridgeprotocol.IsSHA256(expectedHash) || actualHash != expectedHash {
+		return ErrConflict
+	}
+	return nil
+}
+
 func stringMetadata(metadata json.RawMessage, key string) string {
 	var values map[string]any
 	if json.Unmarshal(metadata, &values) != nil {
@@ -1239,6 +1253,25 @@ func (s *Store) RenderCandidateRoutingBundle(ctx context.Context, candidate Rout
 	return bundle, hash, nil
 }
 
+// RenderRelayConfigurationBundle is the active shared-relay renderer. It
+// excludes published Profile revisions so Skill edits cannot perturb the MCP
+// routing hash.
+func (s *Store) RenderRelayConfigurationBundle(ctx context.Context, candidate RoutingBundleCandidate) (RoutingBundle, string, error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return RoutingBundle{}, "", err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	bundle, hash, err := s.RenderRelayConfigurationBundleTx(ctx, tx, candidate)
+	if err != nil {
+		return RoutingBundle{}, "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RoutingBundle{}, "", err
+	}
+	return bundle, hash, nil
+}
+
 // RenderRoutingBundleTx renders one consistent database snapshot. All pointers,
 // accepted contracts, policy decisions, and published profile rows are read
 // through the same transaction so the hash cannot describe a torn state.
@@ -1247,6 +1280,17 @@ func (s *Store) RenderRoutingBundleTx(ctx context.Context, tx pgx.Tx) (RoutingBu
 }
 
 func (s *Store) RenderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, candidate RoutingBundleCandidate) (RoutingBundle, string, error) {
+	return s.renderCandidateRoutingBundleTx(ctx, tx, candidate, true)
+}
+
+// RenderRelayConfigurationBundleTx renders the active mcpm configuration
+// bundle. Profile revisions are deliberately excluded: Skills are delivered
+// to native client targets and never participate in shared MCP routing.
+func (s *Store) RenderRelayConfigurationBundleTx(ctx context.Context, tx pgx.Tx, candidate RoutingBundleCandidate) (RoutingBundle, string, error) {
+	return s.renderCandidateRoutingBundleTx(ctx, tx, candidate, false)
+}
+
+func (s *Store) renderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, candidate RoutingBundleCandidate, includeProfiles bool) (RoutingBundle, string, error) {
 	var bundle RoutingBundle
 	var relayID, relayHash, mode, globalID, globalHash string
 	var defaultProfile string
@@ -1276,6 +1320,11 @@ func (s *Store) RenderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, c
 	}
 	if candidate.DefaultProfileID != nil {
 		defaultProfile = strings.TrimSpace(*candidate.DefaultProfileID)
+	}
+	if !includeProfiles {
+		// The active mcpm relay has no Profile default/catalog concept. Ignore
+		// the retired pointer even if an old database row still contains it.
+		defaultProfile = ""
 	}
 	bundle = RoutingBundle{SchemaVersion: 1, Mode: mode, RelayConfigurationRevisionID: relayID, RelayConfigurationHash: relayHash, GlobalPolicyRevisionID: globalID, GlobalPolicyHash: globalHash, Servers: []RoutingServer{}, Profiles: []RoutingProfile{}}
 	if defaultProfile != "" {
@@ -1376,85 +1425,87 @@ func (s *Store) RenderCandidateRoutingBundleTx(ctx context.Context, tx pgx.Tx, c
 		}
 		bundle.Servers = append(bundle.Servers, server)
 	}
-	profileRows, err := tx.Query(ctx, `SELECT pp.profile_id::text,pp.profile_revision_id::text FROM published_profiles pp JOIN profiles p ON p.id=pp.profile_id WHERE p.archived_at IS NULL ORDER BY pp.profile_id`)
-	if err != nil {
-		return bundle, "", err
-	}
-	profileRevisionIDs := map[string]string{}
-	for profileRows.Next() {
-		var profileID, revisionID string
-		if err := profileRows.Scan(&profileID, &revisionID); err != nil {
-			profileRows.Close()
-			return bundle, "", err
-		}
-		profileRevisionIDs[profileID] = revisionID
-	}
-	if err := profileRows.Err(); err != nil {
-		profileRows.Close()
-		return bundle, "", err
-	}
-	profileRows.Close()
-	if candidate.ReplacePublishedProfiles {
-		profileRevisionIDs = map[string]string{}
-	}
-	for profileID, revisionID := range candidate.PublishedProfileRevisions {
-		if uuid.Validate(profileID) != nil {
-			return bundle, "", ErrNotFound
-		}
-		if strings.TrimSpace(revisionID) == "" {
-			delete(profileRevisionIDs, profileID)
-			continue
-		}
-		profileRevisionIDs[profileID] = revisionID
-	}
-	profileIDs := make([]string, 0, len(profileRevisionIDs))
-	for profileID := range profileRevisionIDs {
-		profileIDs = append(profileIDs, profileID)
-	}
-	sort.Strings(profileIDs)
-	for _, profileID := range profileIDs {
-		profile := RoutingProfile{ProfileID: profileID, ProfileRevisionID: profileRevisionIDs[profileID], Servers: []RoutingProfileServer{}}
-		var owner string
-		var archived bool
-		if err := tx.QueryRow(ctx, `SELECT pr.profile_id::text,pr.canonical_hash,pr.name,pr.client_kind,p.archived_at IS NOT NULL FROM profile_revisions pr JOIN profiles p ON p.id=pr.profile_id WHERE pr.id=$1`, profile.ProfileRevisionID).Scan(&owner, &profile.ProfileRevisionHash, &profile.ProfileName, &profile.ClientKind, &archived); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return bundle, "", ErrNotFound
-			}
-			return bundle, "", err
-		}
-		if owner != profile.ProfileID || archived || (profile.ClientKind != domain.RuntimeClaude && profile.ClientKind != domain.RuntimeCodex) {
-			return bundle, "", ErrConflict
-		}
-		serverRows, err := tx.Query(ctx, `SELECT g.server_id::text,g.mcp_revision_id::text,g.accepted_contract_revision_id::text,g.visibility_mode FROM profile_revision_mcp_governance g WHERE g.profile_revision_id=$1 ORDER BY g.server_id`, profile.ProfileRevisionID)
+	if includeProfiles {
+		profileRows, err := tx.Query(ctx, `SELECT pp.profile_id::text,pp.profile_revision_id::text FROM published_profiles pp JOIN profiles p ON p.id=pp.profile_id WHERE p.archived_at IS NULL ORDER BY pp.profile_id`)
 		if err != nil {
 			return bundle, "", err
 		}
-		profileServers := []RoutingProfileServer{}
-		for serverRows.Next() {
-			var profileServer RoutingProfileServer
-			if err := serverRows.Scan(&profileServer.ServerID, &profileServer.MCPConfigRevisionID, &profileServer.AcceptedContractRevisionID, &profileServer.VisibilityMode); err != nil {
-				serverRows.Close()
+		profileRevisionIDs := map[string]string{}
+		for profileRows.Next() {
+			var profileID, revisionID string
+			if err := profileRows.Scan(&profileID, &revisionID); err != nil {
+				profileRows.Close()
 				return bundle, "", err
 			}
-			profileServers = append(profileServers, profileServer)
+			profileRevisionIDs[profileID] = revisionID
 		}
-		if err := serverRows.Err(); err != nil {
-			serverRows.Close()
+		if err := profileRows.Err(); err != nil {
+			profileRows.Close()
 			return bundle, "", err
 		}
-		serverRows.Close()
-		for _, profileServer := range profileServers {
-			server, ok := findStoreRoutingServer(bundle.Servers, profileServer.ServerID)
-			if !ok || server.MCPConfigRevisionID != profileServer.MCPConfigRevisionID || !sameStoreOptional(server.AcceptedContractRevisionID, profileServer.AcceptedContractRevisionID) {
+		profileRows.Close()
+		if candidate.ReplacePublishedProfiles {
+			profileRevisionIDs = map[string]string{}
+		}
+		for profileID, revisionID := range candidate.PublishedProfileRevisions {
+			if uuid.Validate(profileID) != nil {
+				return bundle, "", ErrNotFound
+			}
+			if strings.TrimSpace(revisionID) == "" {
+				delete(profileRevisionIDs, profileID)
+				continue
+			}
+			profileRevisionIDs[profileID] = revisionID
+		}
+		profileIDs := make([]string, 0, len(profileRevisionIDs))
+		for profileID := range profileRevisionIDs {
+			profileIDs = append(profileIDs, profileID)
+		}
+		sort.Strings(profileIDs)
+		for _, profileID := range profileIDs {
+			profile := RoutingProfile{ProfileID: profileID, ProfileRevisionID: profileRevisionIDs[profileID], Servers: []RoutingProfileServer{}}
+			var owner string
+			var archived bool
+			if err := tx.QueryRow(ctx, `SELECT pr.profile_id::text,pr.canonical_hash,pr.name,pr.client_kind,p.archived_at IS NOT NULL FROM profile_revisions pr JOIN profiles p ON p.id=pr.profile_id WHERE pr.id=$1`, profile.ProfileRevisionID).Scan(&owner, &profile.ProfileRevisionHash, &profile.ProfileName, &profile.ClientKind, &archived); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return bundle, "", ErrNotFound
+				}
+				return bundle, "", err
+			}
+			if owner != profile.ProfileID || archived || (profile.ClientKind != domain.RuntimeClaude && profile.ClientKind != domain.RuntimeCodex) {
 				return bundle, "", ErrConflict
 			}
-			profileServer.ToolOverrides, profileServer.ToolRules, err = s.routingProfileRulesTx(ctx, tx, profile.ProfileRevisionID, server.ServerID)
+			serverRows, err := tx.Query(ctx, `SELECT g.server_id::text,g.mcp_revision_id::text,g.accepted_contract_revision_id::text,g.visibility_mode FROM profile_revision_mcp_governance g WHERE g.profile_revision_id=$1 ORDER BY g.server_id`, profile.ProfileRevisionID)
 			if err != nil {
 				return bundle, "", err
 			}
-			profile.Servers = append(profile.Servers, profileServer)
+			profileServers := []RoutingProfileServer{}
+			for serverRows.Next() {
+				var profileServer RoutingProfileServer
+				if err := serverRows.Scan(&profileServer.ServerID, &profileServer.MCPConfigRevisionID, &profileServer.AcceptedContractRevisionID, &profileServer.VisibilityMode); err != nil {
+					serverRows.Close()
+					return bundle, "", err
+				}
+				profileServers = append(profileServers, profileServer)
+			}
+			if err := serverRows.Err(); err != nil {
+				serverRows.Close()
+				return bundle, "", err
+			}
+			serverRows.Close()
+			for _, profileServer := range profileServers {
+				server, ok := findStoreRoutingServer(bundle.Servers, profileServer.ServerID)
+				if !ok || server.MCPConfigRevisionID != profileServer.MCPConfigRevisionID || !sameStoreOptional(server.AcceptedContractRevisionID, profileServer.AcceptedContractRevisionID) {
+					return bundle, "", ErrConflict
+				}
+				profileServer.ToolOverrides, profileServer.ToolRules, err = s.routingProfileRulesTx(ctx, tx, profile.ProfileRevisionID, server.ServerID)
+				if err != nil {
+					return bundle, "", err
+				}
+				profile.Servers = append(profile.Servers, profileServer)
+			}
+			bundle.Profiles = append(bundle.Profiles, profile)
 		}
-		bundle.Profiles = append(bundle.Profiles, profile)
 	}
 	_, hash, err := bundle.Canonical()
 	if err != nil {

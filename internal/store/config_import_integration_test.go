@@ -77,6 +77,13 @@ func TestConfigImportReencryptsVerifiesAndIsIdempotentIntegration(t *testing.T) 
 	if err := st.VerifyConfigImportAcceptance(ctx, result); err != nil {
 		t.Fatal(err)
 	}
+	var profileMCPCount int
+	if err := st.pool.QueryRow(ctx, `SELECT count(*) FROM profile_mcp_servers`).Scan(&profileMCPCount); err != nil {
+		t.Fatal(err)
+	}
+	if profileMCPCount != 0 {
+		t.Fatalf("legacy MCP membership was recreated in Profiles: %d", profileMCPCount)
+	}
 
 	var destinationID, contentHash string
 	var ciphertext []byte
@@ -180,10 +187,10 @@ func configImportFixture(t *testing.T) (ConfigImportInput, *security.Cipher) {
 			Input:    MCPInput{Name: "fixture-mcp", Description: "fixture", Transport: "stdio", Command: "/usr/bin/fixture", Args: []string{}},
 			EnvRefs:  map[string]string{"TOKEN": legacySecretID}, HeaderRefs: map[string]string{},
 		}},
+		RelayMCPServerIDs: []string{legacyMCPID},
 		Profiles: []ConfigImportProfile{
-			{Name: "claude-skills", LegacySkillIDs: []string{legacySkillID}},
+			{Name: "claude-skills", LegacySkillIDs: []string{legacySkillID}, LegacyMCPServerIDs: []string{legacyMCPID}},
 			{Name: "codex-skills", LegacySkillIDs: []string{legacySkillID}},
-			{Name: "shared-mcp", LegacyMCPServerIDs: []string{legacyMCPID}},
 		},
 		UpdateCron: "15 4 * * *", Timezone: "UTC",
 	}, legacyCipher

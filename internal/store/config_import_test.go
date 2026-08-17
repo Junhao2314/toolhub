@@ -46,3 +46,32 @@ func TestNormalizeMCPInputRejectsProtectedAndMixedDefinitions(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeMCPInputAcceptsStandardMCPServersJSON(t *testing.T) {
+	input, err := NormalizeMCPInput(MCPInput{CustomJSON: json.RawMessage(`{
+      "mcpServers": {
+        "json-server": {
+          "type": "streamable-http",
+          "url": "https://example.test/mcp",
+          "headers": {"Authorization": "Bearer secret"}
+        }
+      }
+    }`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.Name != "json-server" || input.Transport != "http" || input.URL != "https://example.test/mcp" || input.Headers["Authorization"] != "Bearer secret" {
+		t.Fatalf("custom MCP JSON was not normalized: %+v", input)
+	}
+}
+
+func TestNormalizeMCPInputRejectsAmbiguousOrUnknownCustomJSON(t *testing.T) {
+	for _, raw := range []string{
+		`{"mcpServers":{"one":{"type":"stdio","command":"tool"},"two":{"type":"stdio","command":"tool"}}}`,
+		`{"mcpServers":{"one":{"type":"stdio","command":"tool","shell":"/bin/sh"}}}`,
+	} {
+		if _, err := NormalizeMCPInput(MCPInput{CustomJSON: json.RawMessage(raw)}); err == nil {
+			t.Fatalf("invalid custom MCP JSON was accepted: %s", raw)
+		}
+	}
+}

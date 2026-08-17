@@ -708,6 +708,10 @@ func (a *API) profilePreflight(w http.ResponseWriter, r *http.Request) {
 			a.handleStoreError(w, r, err)
 			return
 		}
+		if manifest.Target.Runtime == domain.RuntimeSharedRelay {
+			writeError(w, r, http.StatusBadRequest, "profile_relay_target_forbidden", "Profile Apply manages Skills only; shared MCP is managed in MCP")
+			return
+		}
 		if manifest.Target.NodeKind == bridgeprotocol.NodeKindLocal && manifest.Target.Runtime == profile.ClientKind {
 			if nativeRequest != nil {
 				writeError(w, r, http.StatusBadRequest, "invalid_request", "Select one local client target")
@@ -785,7 +789,7 @@ func (a *API) applyProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, 400, "invalid_request", "At least one confirmation token is required")
 		return
 	}
-	op, err := a.store.CreateProfileApplyOperation(r.Context(), profileID, input.ConfirmationTokens, key)
+	op, err := a.store.CreateProfileSkillApplyOperation(r.Context(), profileID, input.ConfirmationTokens, key)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, r, 409, "preflight_conflict", "Preflight expired, was already used, or no longer matches the Profile")

@@ -21,18 +21,21 @@ import (
 const maxProfileMembers = 500
 
 type ProfileInput struct {
-	Name            string                      `json:"name"`
-	Description     string                      `json:"description"`
-	ClientKind      string                      `json:"clientKind,omitempty"`
-	Category        string                      `json:"category,omitempty"`
-	Variant         string                      `json:"variant,omitempty"`
-	MigrationState  string                      `json:"migrationState,omitempty"`
-	SkillIDs        []string                    `json:"skillIds"`
-	MCPServerIDs    []string                    `json:"mcpServerIds"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	ClientKind     string   `json:"clientKind,omitempty"`
+	Category       string   `json:"category,omitempty"`
+	Variant        string   `json:"variant,omitempty"`
+	MigrationState string   `json:"migrationState,omitempty"`
+	SkillIDs       []string `json:"skillIds"`
+	// Deprecated compatibility inputs are intentionally not accepted from the
+	// Browser API. They remain available to migration/legacy bundle code until
+	// the one-time cleanup migration has removed the old owner rows.
+	MCPServerIDs    []string                    `json:"-"`
 	SkillVersionIDs map[string]string           `json:"skillVersionIds,omitempty"`
-	MCPRevisionIDs  map[string]string           `json:"mcpRevisionIds,omitempty"`
-	MCPGovernance   []ProfileMCPGovernanceInput `json:"mcpGovernance,omitempty"`
-	ToolRules       []ProfileToolRuleInput      `json:"toolRules,omitempty"`
+	MCPRevisionIDs  map[string]string           `json:"-"`
+	MCPGovernance   []ProfileMCPGovernanceInput `json:"-"`
+	ToolRules       []ProfileToolRuleInput      `json:"-"`
 	Revision        int64                       `json:"revision,omitempty"`
 	ArchivedRestore bool                        `json:"-"`
 	PendingBindings bool                        `json:"-"`
