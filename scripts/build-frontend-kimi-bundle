@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Materialize the intentionally small Skill directory used by Kimi frontend
+# dispatches. The source list is an allowlist: do not replace it with a whole
+# Hermes/Codex Skill root.
+
+usage() {
+	cat >&2 <<'EOF'
+Usage: scripts/build-frontend-kimi-bundle [--dest DIR] [--hermes-skills DIR]
+       [--project-skill-dir DIR]
+
+Environment equivalents:
+  FRONTEND_KIMI_SKILLS       destination directory
+  HERMES_SKILLS_DIR          Hermes Skill root
+  FRONTEND_KIMI_PROJECT_SKILL_DIR  Optional project-specific Skill directory
+EOF
+}
+
+hermes_skills=${HERMES_SKILLS_DIR:-${HOME:?HOME is required}/.hermes/skills}
+destination=${FRONTEND_KIMI_SKILLS:-${XDG_CACHE_HOME:-${HOME:?HOME is required}/.cache}/toolhub/frontend-kimi}
+project_skill_dir=${FRONTEND_KIMI_PROJECT_SKILL_DIR:-}
+
+while (($# > 0)); do
+	case "$1" in
+		--dest)
+			(($# >= 2)) || { usage; exit 2; }
+			destination=$2
+			shift 2
+			;;
+		--hermes-skills)
+			(($# >= 2)) || { usage; exit 2; }
+			hermes_skills=$2
+			shift 2
+			;;
+		--project-skill-dir)
+			(($# >= 2)) || { usage; exit 2; }
+			project_skill_dir=$2
+			shift 2
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			printf 'unknown argument: %s\n' "$1" >&2
+			usage
+			exit 2
+			;;
+	esac
+done
+
+hermes_skills=$(CDPATH= cd -- "$hermes_skills" && pwd)
+if [[ -n "$project_skill_dir" ]]; then
+	project_skill_dir=$(CDPATH= cd -- "$project_skill_dir" && pwd)
+fi
+
+# slug|source directory. Keep this list explicit and review additions as
+# architecture changes; Kimi must not inherit the scheduler's skill tree.
+bundle_specs=(
+	"ui-ux-pro-max-cn|$hermes_skills/ui-ux-pro-max-cn"
+	"responsive-check|$hermes_skills/responsive-check"
+	"performance-audit|$hermes_skills/performance-audit"
+	"browser-ui-verification|$hermes_skills/software-development/browser-ui-verification"
+)
+if [[ -n "$project_skill_dir" ]]; then
+	bundle_specs+=("$(basename -- "$project_skill_dir")|$project_skill_dir")
+fi
+
+destination_parent=$(dirname -- "$destination")
+mkdir -p -- "$destination_parent"
+destination_parent=$(CDPATH= cd -- "$destination_parent" && pwd)
+destination="$destination_parent/$(basename -- "$destination")"
+
+if [[ "$destination" == "/" || "$destination" == "$hermes_skills" || "$destination" == "$project_skill_dir" ]]; then
+	printf 'refusing to replace a protected path: %s\n' "$destination" >&2
+	exit 1
+fi
+for spec in "${bundle_specs[@]}"; do
+	IFS='|' read -r _ source <<<"$spec"
+	case "$destination/" in
+		"$source/"*)
+			printf 'refusing to replace a source-tree path: %s\n' "$destination" >&2
+			exit 1
+			;;
+	esac
+done
+
+staging=$(mktemp -d "$destination_parent/.frontend-kimi.XXXXXX")
+old_destination=''
+restore_old() {
+	if [[ -n "$old_destination" && -e "$old_destination" && ! -e "$destination" ]]; then
+		mv -- "$old_destination" "$destination"
+	fi
+	if [[ -n "$staging" && -e "$staging" ]]; then
+		rm -rf -- "$staging"
+	fi
+}
+trap restore_old EXIT
+
+for spec in "${bundle_specs[@]}"; do
+	IFS='|' read -r slug source <<<"$spec"
+	if [[ ! -d "$source" || ! -f "$source/SKILL.md" ]]; then
+		printf 'required frontend Skill %s is missing or has no SKILL.md: %s\n' "$slug" "$source" >&2
+		exit 1
+	fi
+	mkdir -p -- "$staging/$slug"
+	cp -a -- "$source/." "$staging/$slug/"
+done
+
+# Keep a previous generated bundle until the new one has been installed. This
+# makes a failed build recoverable without touching any source Skill.
+if [[ -e "$destination" || -L "$destination" ]]; then
+	old_destination=$(mktemp -u "$destination_parent/.frontend-kimi.previous.XXXXXX")
+	mv -- "$destination" "$old_destination"
+fi
+mv -- "$staging" "$destination"
+staging=''
+if [[ -n "$old_destination" ]]; then
+	# The old path contains only a generated bundle, never a source Skill.
+	rm -rf -- "$old_destination"
+	old_destination=''
+fi
+
+printf 'frontend Kimi bundle: %s\n' "$destination"
+for spec in "${bundle_specs[@]}"; do
+	printf '  %s\n' "${spec%%|*}"
+done
+
+# The active directory now contains only the newly validated allowlist.
+trap - EXIT

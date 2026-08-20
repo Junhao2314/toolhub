@@ -1,4 +1,0 @@
-interface:
-  display_name: "Same-Model Subagents"
-  short_description: "Keep every child invocation on the parent model"
-  default_prompt: "Use $same-model-subagents before dispatching any child agent."

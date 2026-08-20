@@ -1,0 +1,4 @@
+interface:
+  display_name: "Subagent Routing"
+  short_description: "Use Hermes as the coding hub and Kimi as the curated frontend worker"
+  default_prompt: "Use $subagent-routing before dispatching any child agent."

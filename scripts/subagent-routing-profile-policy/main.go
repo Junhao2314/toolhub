@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,25 +23,10 @@ import (
 )
 
 const (
-	policySkillSlug = "same-model-subagents"
+	policySkillSlug = "subagent-routing"
+	legacySkillSlug = "same-model-subagents"
 	maxResponseSize = 8 << 20
 )
-
-var ordinaryProfiles = []string{
-	"claude-coding", "codex-coding",
-	"claude-data-analysis", "codex-data-analysis",
-	"claude-frontend-ui", "codex-frontend-ui",
-}
-
-var codingProfiles = map[string]bool{
-	"claude-coding": true,
-	"codex-coding":  true,
-}
-
-var removedFromCoding = map[string]bool{
-	"dispatching-parallel-agents": true,
-	"subagent-driven-development": true,
-}
 
 var retainedLibrarySlugs = []string{
 	"dispatching-parallel-agents",
@@ -48,11 +34,37 @@ var retainedLibrarySlugs = []string{
 	"requesting-code-review",
 }
 
+var codingProfiles = map[string]bool{
+	"claude-coding": true,
+	"codex-coding":  true,
+}
+
+var frontendProfiles = map[string]bool{
+	"claude-frontend-ui": true,
+	"codex-frontend-ui":  true,
+}
+
+var orchestrationSkillSlugs = []string{
+	"dispatching-parallel-agents",
+	"subagent-driven-development",
+}
+
+// These are the small cross-project Kimi frontend baseline. Project-specific
+// constraints (for example ToolHub's toolhub-frontend Skill) are overlays and
+// must not become mandatory members of every frontend Profile.
+var frontendBundleSkillSlugs = []string{
+	"ui-ux-pro-max-cn",
+	"responsive-check",
+	"performance-audit",
+	"browser-ui-verification",
+}
+
 type skill struct {
-	ID               string `json:"id"`
-	Slug             string `json:"slug"`
-	CurrentVersionID string `json:"currentVersionId"`
-	CurrentSHA256    string `json:"currentSha256"`
+	ID               string   `json:"id"`
+	Slug             string   `json:"slug"`
+	CurrentVersionID string   `json:"currentVersionId"`
+	CurrentSHA256    string   `json:"currentSha256"`
+	Tags             []string `json:"tags"`
 }
 
 type skillPin struct {
@@ -166,7 +178,7 @@ func parseConfig() (commandConfig, error) {
 		BaseURL:  envOrDefault("TOOLHUB_POLICY_URL", "http://127.0.0.1:18480"),
 		Username: strings.TrimSpace(os.Getenv("TOOLHUB_POLICY_USERNAME")),
 		Password: os.Getenv("TOOLHUB_POLICY_PASSWORD"),
-		SkillDir: envOrDefault("TOOLHUB_POLICY_SKILL_DIR", ".agents/skills/same-model-subagents"),
+		SkillDir: envOrDefault("TOOLHUB_POLICY_SKILL_DIR", ".agents/skills/subagent-routing"),
 		Mode:     mode,
 	}
 	if config.Username == "" {
@@ -227,7 +239,7 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 	case policySkill.CurrentSHA256 != pkg.SHA256:
 		result.Skill.Action = "collision"
 		return result, fmt.Errorf(
-			"same-model-subagents collision: Library SHA %s differs from local SHA %s",
+			"subagent-routing collision: Library SHA %s differs from local SHA %s",
 			policySkill.CurrentSHA256,
 			pkg.SHA256,
 		)
@@ -243,13 +255,13 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 	}
 
 	if config.Mode == modePlan {
-		result.Profiles = buildReport(profilesByName, policySkill, found)
+		result.Profiles = buildReport(profilesByName, policySkill, found, library)
 		return result, nil
 	}
 	if config.Mode == modeCheck {
-		result.Profiles = buildReport(profilesByName, policySkill, found)
+		result.Profiles = buildReport(profilesByName, policySkill, found, library)
 		if !found {
-			return result, errors.New("same-model-subagents is missing from the Library")
+			return result, errors.New("subagent-routing is missing from the Library")
 		}
 		finalProfiles, err := client.listProfiles(ctx)
 		if err != nil {
@@ -287,11 +299,12 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 		found = true
 	}
 
-	result.Profiles = buildReport(profilesByName, policySkill, found)
+	result.Profiles = buildReport(profilesByName, policySkill, found, library)
 	for index := range result.Profiles {
 		result.Profiles[index].AfterRevision = result.Profiles[index].BeforeRevision
 	}
-	for index, name := range ordinaryProfiles {
+	targetNames := profileNames(profilesByName)
+	for index, name := range targetNames {
 		latestProfiles, err := client.listProfiles(ctx)
 		if err != nil {
 			return result, err
@@ -301,9 +314,9 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 			return result, err
 		}
 		current := latestByName[name]
-		result.Profiles[index] = buildReport(latestByName, policySkill, found)[index]
+		result.Profiles[index] = buildReport(latestByName, policySkill, found, library)[index]
 		result.Profiles[index].AfterRevision = result.Profiles[index].BeforeRevision
-		input, changed, err := desiredProfile(current, policySkill)
+		input, changed, err := desiredProfile(current, policySkill, library)
 		if err != nil {
 			return result, err
 		}
@@ -334,7 +347,7 @@ func execute(ctx context.Context, config commandConfig) (report, error) {
 		return result, err
 	}
 	if !found || finalPolicySkill.ID != policySkill.ID || finalPolicySkill.CurrentVersionID != policySkill.CurrentVersionID || finalPolicySkill.CurrentSHA256 != pkg.SHA256 {
-		return result, errors.New("same-model-subagents Library state changed during migration")
+		return result, errors.New("subagent-routing Library state changed during migration")
 	}
 	if err := verifyState(finalLibrary, finalByName, finalPolicySkill); err != nil {
 		return result, err
@@ -513,29 +526,29 @@ func validateBaseline(library []skill, profiles []profile) (map[string]profile, 
 			return nil, fmt.Errorf("required Library Skill %s is missing", slug)
 		}
 	}
+	for _, slug := range frontendBundleSkillSlugs {
+		if _, found, err := uniqueSkillBySlug(library, slug); err != nil {
+			return nil, err
+		} else if !found {
+			return nil, fmt.Errorf("frontend Kimi Library Skill %s is missing", slug)
+		}
+	}
 
 	counts := map[string]int{}
 	profilesByName := map[string]profile{}
-	allowedProfiles := map[string]bool{}
-	for _, name := range ordinaryProfiles {
-		allowedProfiles[name] = true
-	}
 	for _, item := range profiles {
-		if !allowedProfiles[item.Name] {
-			return nil, fmt.Errorf("unexpected active Profile %s", item.Name)
+		if strings.TrimSpace(item.Name) == "" {
+			return nil, errors.New("active Profile has an empty name")
 		}
 		counts[item.Name]++
 		profilesByName[item.Name] = item
 	}
-	for _, name := range ordinaryProfiles {
-		if counts[name] != 1 {
-			return nil, fmt.Errorf("expected active Profile %s exactly once, found %d", name, counts[name])
+	for name, count := range counts {
+		if count != 1 {
+			return nil, fmt.Errorf("active Profile %s appears %d times", name, count)
 		}
 		if err := validateProfileProjection(profilesByName[name]); err != nil {
 			return nil, fmt.Errorf("Profile %s: %w", name, err)
-		}
-		if !profileHasSlug(profilesByName[name], "requesting-code-review") {
-			return nil, fmt.Errorf("Profile %s is missing requesting-code-review", name)
 		}
 	}
 	return profilesByName, nil
@@ -585,9 +598,10 @@ func uniqueSkillBySlug(library []skill, slug string) (skill, bool, error) {
 	return result, true, nil
 }
 
-func buildReport(profilesByName map[string]profile, policySkill skill, skillExists bool) []profileChange {
-	result := make([]profileChange, 0, len(ordinaryProfiles))
-	for _, name := range ordinaryProfiles {
+func buildReport(profilesByName map[string]profile, policySkill skill, skillExists bool, library []skill) []profileChange {
+	names := profileNames(profilesByName)
+	result := make([]profileChange, 0, len(names))
+	for _, name := range names {
 		current := profilesByName[name]
 		change := profileChange{
 			Name:           name,
@@ -596,20 +610,42 @@ func buildReport(profilesByName map[string]profile, policySkill skill, skillExis
 			Add:            []string{},
 			Remove:         []string{},
 		}
-		for _, pin := range current.Skills {
-			if codingProfiles[name] && removedFromCoding[pin.Slug] {
-				change.Remove = append(change.Remove, pin.Slug)
+		if !profileHasSlug(current, "requesting-code-review") {
+			change.Add = append(change.Add, "requesting-code-review")
+		}
+		if codingProfiles[name] {
+			if !profileHasSlug(current, policySkillSlug) {
+				change.Add = append(change.Add, policySkillSlug)
+			}
+			for _, slug := range orchestrationSkillSlugs {
+				if !profileHasSlug(current, slug) {
+					change.Add = append(change.Add, slug)
+				}
+			}
+		} else if frontendProfiles[name] {
+			for _, slug := range frontendBundleSkillSlugs {
+				if !profileHasSlug(current, slug) {
+					change.Add = append(change.Add, slug)
+				}
+			}
+			for _, pin := range current.Skills {
+				if !frontendProfileKeepsSlug(pin.Slug, library) {
+					change.Remove = append(change.Remove, pin.Slug)
+				}
+			}
+		} else {
+			if profileHasSlug(current, policySkillSlug) {
+				change.Remove = append(change.Remove, policySkillSlug)
 			}
 		}
-		if !profileHasSlug(current, policySkillSlug) {
-			change.Add = append(change.Add, policySkillSlug)
-		}
 		pinChanged := false
-		if skillExists {
-			for _, pin := range current.Skills {
-				if pin.Slug == policySkillSlug && (pin.SkillID != policySkill.ID || pin.VersionID != policySkill.CurrentVersionID) {
-					pinChanged = true
-				}
+		for _, pin := range current.Skills {
+			if pin.Slug == legacySkillSlug {
+				change.Remove = appendUnique(change.Remove, legacySkillSlug)
+			}
+			if codingProfiles[name] && pin.Slug == policySkillSlug && skillExists &&
+				(pin.SkillID != policySkill.ID || pin.VersionID != policySkill.CurrentVersionID) {
+				pinChanged = true
 			}
 		}
 		if len(change.Add) > 0 || len(change.Remove) > 0 || pinChanged {
@@ -620,7 +656,7 @@ func buildReport(profilesByName map[string]profile, policySkill skill, skillExis
 	return result
 }
 
-func desiredProfile(current profile, policySkill skill) (profileInput, bool, error) {
+func desiredProfile(current profile, policySkill skill, library []skill) (profileInput, bool, error) {
 	input := profileInput{
 		Name:            current.Name,
 		Description:     current.Description,
@@ -628,9 +664,21 @@ func desiredProfile(current profile, policySkill skill) (profileInput, bool, err
 		SkillIDs:        []string{},
 		SkillVersionIDs: map[string]string{},
 	}
+	if !profileHasSlug(current, "requesting-code-review") {
+		reviewSkill, found, err := uniqueSkillBySlug(library, "requesting-code-review")
+		if err != nil {
+			return profileInput{}, false, err
+		}
+		if !found {
+			return profileInput{}, false, errors.New("required Library Skill requesting-code-review is missing")
+		}
+		input.SkillIDs = append(input.SkillIDs, reviewSkill.ID)
+		input.SkillVersionIDs[reviewSkill.ID] = reviewSkill.CurrentVersionID
+	}
 	foundPolicy := false
+	role := profileRoleFor(current.Name)
 	for _, pin := range current.Skills {
-		if codingProfiles[current.Name] && removedFromCoding[pin.Slug] {
+		if !profileKeepsPin(pin.Slug, role, library) {
 			continue
 		}
 		if pin.Slug == policySkillSlug {
@@ -645,9 +693,41 @@ func desiredProfile(current profile, policySkill skill) (profileInput, bool, err
 		input.SkillIDs = append(input.SkillIDs, pin.SkillID)
 		input.SkillVersionIDs[pin.SkillID] = pin.VersionID
 	}
-	if !foundPolicy {
+	if role == profileRoleCoding && !foundPolicy {
+		if policySkill.ID == "" || policySkill.CurrentVersionID == "" {
+			return profileInput{}, false, errors.New("coding Profile requires an uploaded subagent-routing Skill")
+		}
 		input.SkillIDs = append(input.SkillIDs, policySkill.ID)
 		input.SkillVersionIDs[policySkill.ID] = policySkill.CurrentVersionID
+	}
+	if role == profileRoleCoding {
+		for _, slug := range orchestrationSkillSlugs {
+			orchestration, found, err := uniqueSkillBySlug(library, slug)
+			if err != nil {
+				return profileInput{}, false, err
+			}
+			if !found {
+				return profileInput{}, false, fmt.Errorf("required Library Skill %s is missing", slug)
+			}
+			if !profileHasSlug(current, slug) {
+				input.SkillIDs = append(input.SkillIDs, orchestration.ID)
+				input.SkillVersionIDs[orchestration.ID] = orchestration.CurrentVersionID
+			}
+		}
+	} else if role == profileRoleFrontend {
+		for _, slug := range frontendBundleSkillSlugs {
+			frontendSkill, found, err := uniqueSkillBySlug(library, slug)
+			if err != nil {
+				return profileInput{}, false, err
+			}
+			if !found {
+				return profileInput{}, false, fmt.Errorf("required frontend Kimi Skill %s is missing", slug)
+			}
+			if !profileHasSlug(current, slug) {
+				input.SkillIDs = append(input.SkillIDs, frontendSkill.ID)
+				input.SkillVersionIDs[frontendSkill.ID] = frontendSkill.CurrentVersionID
+			}
+		}
 	}
 	currentSkillPins := map[string]string{}
 	for _, pin := range current.Skills {
@@ -666,7 +746,7 @@ func verifyState(library []skill, profilesByName map[string]profile, policySkill
 			return fmt.Errorf("required Library Skill %s is missing", slug)
 		}
 	}
-	for _, name := range ordinaryProfiles {
+	for _, name := range profileNames(profilesByName) {
 		item := profilesByName[name]
 		matched := 0
 		for _, pin := range item.Skills {
@@ -676,18 +756,116 @@ func verifyState(library []skill, profilesByName map[string]profile, policySkill
 					return fmt.Errorf("Profile %s does not pin the exact %s version", name, policySkillSlug)
 				}
 			}
-			if codingProfiles[name] && removedFromCoding[pin.Slug] {
-				return fmt.Errorf("Profile %s still contains removed Skill %s", name, pin.Slug)
+			if pin.Slug == legacySkillSlug {
+				return fmt.Errorf("Profile %s still contains legacy Skill %s", name, legacySkillSlug)
 			}
 		}
-		if matched != 1 {
-			return fmt.Errorf("Profile %s must contain %s exactly once, found %d", name, policySkillSlug, matched)
+		role := profileRoleFor(name)
+		if role == profileRoleCoding {
+			if matched != 1 {
+				return fmt.Errorf("Profile %s must contain %s exactly once, found %d", name, policySkillSlug, matched)
+			}
+			for _, slug := range orchestrationSkillSlugs {
+				if !profileHasSlug(item, slug) {
+					return fmt.Errorf("Profile %s must retain orchestration Skill %s", name, slug)
+				}
+			}
+		} else if matched != 0 {
+			return fmt.Errorf("Profile %s must not contain %s", name, policySkillSlug)
+		}
+		if role == profileRoleFrontend {
+			for _, slug := range frontendBundleSkillSlugs {
+				if !profileHasSlug(item, slug) {
+					return fmt.Errorf("Profile %s must contain frontend Kimi Skill %s", name, slug)
+				}
+			}
+			for _, pin := range item.Skills {
+				if !frontendProfileKeepsSlug(pin.Slug, library) {
+					return fmt.Errorf("Profile %s still contains non-default frontend Skill %s", name, pin.Slug)
+				}
+			}
 		}
 		if !profileHasSlug(item, "requesting-code-review") {
 			return fmt.Errorf("Profile %s is missing requesting-code-review", name)
 		}
 	}
 	return nil
+}
+
+type profileRole string
+
+const (
+	profileRoleCoding   profileRole = "coding"
+	profileRoleFrontend profileRole = "frontend"
+	profileRoleOther    profileRole = "other"
+)
+
+func profileRoleFor(name string) profileRole {
+	if codingProfiles[name] || strings.HasSuffix(name, "-coding") {
+		return profileRoleCoding
+	}
+	if frontendProfiles[name] || strings.HasSuffix(name, "-frontend-ui") {
+		return profileRoleFrontend
+	}
+	return profileRoleOther
+}
+
+func frontendProfileKeepsSlug(slug string, library []skill) bool {
+	if slug == "requesting-code-review" || hasString(frontendBundleSkillSlugs, slug) {
+		return true
+	}
+	for _, item := range library {
+		if item.Slug == slug && slug != legacySkillSlug && hasString(item.Tags, "required") {
+			return true
+		}
+	}
+	return false
+}
+
+func profileKeepsPin(slug string, role profileRole, library []skill) bool {
+	if slug == legacySkillSlug {
+		return false
+	}
+	if slug == policySkillSlug && role != profileRoleCoding {
+		return false
+	}
+	if role == profileRoleFrontend {
+		if frontendProfileKeepsSlug(slug, library) {
+			return true
+		}
+		for _, item := range library {
+			if item.Slug == slug && hasString(item.Tags, "required") && slug != legacySkillSlug {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+func appendUnique(values []string, value string) []string {
+	if hasString(values, value) {
+		return values
+	}
+	return append(values, value)
+}
+
+func hasString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func profileNames(profilesByName map[string]profile) []string {
+	result := make([]string, 0, len(profilesByName))
+	for name := range profilesByName {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func profileHasSlug(item profile, slug string) bool {

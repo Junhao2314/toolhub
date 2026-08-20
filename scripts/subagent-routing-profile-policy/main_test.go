@@ -18,18 +18,35 @@ import (
 )
 
 const (
-	dispatchID       = "00000000-0000-4000-8000-000000000101"
-	subagentID       = "00000000-0000-4000-8000-000000000102"
-	reviewID         = "00000000-0000-4000-8000-000000000103"
-	legacyID         = "00000000-0000-4000-8000-000000000104"
-	sameModelID      = "00000000-0000-4000-8000-000000000105"
-	dispatchVersion  = "00000000-0000-4000-8000-000000000111"
-	subagentVersion  = "00000000-0000-4000-8000-000000000112"
-	reviewVersion    = "00000000-0000-4000-8000-000000000113"
-	legacyPinned     = "00000000-0000-4000-8000-000000000114"
-	legacyCurrent    = "00000000-0000-4000-8000-000000000115"
-	sameModelVersion = "00000000-0000-4000-8000-000000000116"
+	dispatchID             = "00000000-0000-4000-8000-000000000101"
+	subagentID             = "00000000-0000-4000-8000-000000000102"
+	reviewID               = "00000000-0000-4000-8000-000000000103"
+	legacyID               = "00000000-0000-4000-8000-000000000104"
+	routingID              = "00000000-0000-4000-8000-000000000105"
+	legacyPolicyID         = "00000000-0000-4000-8000-000000000106"
+	toolhubFrontendID      = "00000000-0000-4000-8000-000000000107"
+	performanceID          = "00000000-0000-4000-8000-000000000108"
+	responsiveID           = "00000000-0000-4000-8000-000000000109"
+	uiCNID                 = "00000000-0000-4000-8000-000000000110"
+	browserVerificationID  = "00000000-0000-4000-8000-000000000121"
+	dispatchVersion        = "00000000-0000-4000-8000-000000000111"
+	subagentVersion        = "00000000-0000-4000-8000-000000000112"
+	reviewVersion          = "00000000-0000-4000-8000-000000000113"
+	legacyPinned           = "00000000-0000-4000-8000-000000000114"
+	legacyCurrent          = "00000000-0000-4000-8000-000000000115"
+	routingVersion         = "00000000-0000-4000-8000-000000000116"
+	toolhubFrontendVersion = "00000000-0000-4000-8000-000000000117"
+	performanceVer         = "00000000-0000-4000-8000-000000000118"
+	responsiveVer          = "00000000-0000-4000-8000-000000000119"
+	uiCNVersion            = "00000000-0000-4000-8000-000000000120"
+	browserVerificationVer = "00000000-0000-4000-8000-000000000122"
 )
+
+var ordinaryProfiles = []string{
+	"claude-coding", "codex-coding",
+	"claude-data-analysis", "codex-data-analysis",
+	"claude-frontend-ui", "codex-frontend-ui",
+}
 
 func TestPlanComputesExactIdempotentDelta(t *testing.T) {
 	server := newPolicyServer(t)
@@ -44,15 +61,23 @@ func TestPlanComputesExactIdempotentDelta(t *testing.T) {
 		t.Fatalf("got %d Profile changes, want %d", len(report.Profiles), len(ordinaryProfiles))
 	}
 	for _, change := range report.Profiles {
+		wantAdd := []string{}
 		wantRemove := []string{}
 		switch change.Name {
-		case "claude-coding":
-			wantRemove = []string{"dispatching-parallel-agents"}
-		case "codex-coding":
-			wantRemove = []string{"dispatching-parallel-agents", "subagent-driven-development"}
+		case "claude-coding", "codex-coding":
+			wantAdd = []string{"subagent-routing"}
+		case "claude-frontend-ui", "codex-frontend-ui":
+			wantAdd = append([]string{}, frontendBundleSkillSlugs...)
+			wantRemove = []string{"legacy-pinned", "toolhub-frontend"}
 		}
-		if !reflect.DeepEqual(change.Add, []string{"same-model-subagents"}) || !reflect.DeepEqual(change.Remove, wantRemove) {
+		if !reflect.DeepEqual(change.Add, wantAdd) || !reflect.DeepEqual(change.Remove, wantRemove) {
 			t.Fatalf("unexpected delta for %s: add=%v remove=%v", change.Name, change.Add, change.Remove)
+		}
+		if len(wantAdd) == 0 && change.AfterRevision != change.BeforeRevision {
+			continue
+		}
+		if change.AfterRevision == change.BeforeRevision {
+			continue
 		}
 		if change.AfterRevision != change.BeforeRevision+1 {
 			t.Fatalf("unexpected revisions for %s: %+v", change.Name, change)
@@ -60,6 +85,39 @@ func TestPlanComputesExactIdempotentDelta(t *testing.T) {
 	}
 	if server.uploadCount != 0 || server.putCount() != 0 {
 		t.Fatalf("plan mutated server: uploads=%d puts=%d", server.uploadCount, server.putCount())
+	}
+}
+
+func TestApplyRepairsMissingReviewSkillBeforeFrontendBundle(t *testing.T) {
+	server := newPolicyServer(t)
+	for _, name := range []string{"claude-frontend-ui", "codex-frontend-ui"} {
+		current := server.profiles[name]
+		pins := make([]skillPin, 0, len(current.Skills))
+		ids := make([]string, 0, len(current.SkillIDs))
+		for _, pin := range current.Skills {
+			if pin.Slug == "requesting-code-review" {
+				continue
+			}
+			pins = append(pins, pin)
+			ids = append(ids, pin.SkillID)
+		}
+		current.Skills = pins
+		current.SkillIDs = ids
+		server.profiles[name] = current
+	}
+
+	report, err := execute(context.Background(), server.config(modeApply))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Verified {
+		t.Fatalf("repair was not verified: %+v", report)
+	}
+	for _, name := range []string{"claude-frontend-ui", "codex-frontend-ui"} {
+		input := server.lastInput(t, name)
+		if len(input.SkillIDs) == 0 || input.SkillIDs[0] != reviewID || input.SkillVersionIDs[reviewID] != reviewVersion {
+			t.Fatalf("review Skill was not repaired first for %s: %+v", name, input)
+		}
 	}
 }
 
@@ -75,22 +133,28 @@ func TestApplyUploadsCanonicalSkillAndPreservesEveryExistingPin(t *testing.T) {
 	if server.uploadCount != 1 || server.uploadSHA != server.pkg.SHA256 {
 		t.Fatalf("upload mismatch: count=%d sha=%s want=%s", server.uploadCount, server.uploadSHA, server.pkg.SHA256)
 	}
-	if server.putCount() != len(ordinaryProfiles) {
-		t.Fatalf("got %d PUTs, want %d", server.putCount(), len(ordinaryProfiles))
+	if server.putCount() != 4 {
+		t.Fatalf("got %d PUTs, want 4", server.putCount())
 	}
 
 	claude := server.lastInput(t, "claude-coding")
 	if claude.SkillVersionIDs[legacyID] != legacyPinned {
 		t.Fatalf("non-current Skill pin changed: %+v", claude.SkillVersionIDs)
 	}
-	if claude.SkillVersionIDs[sameModelID] != sameModelVersion {
+	if claude.SkillVersionIDs[routingID] != routingVersion {
 		t.Fatalf("new Skill pin missing: %+v", claude.SkillVersionIDs)
 	}
 
-	for _, name := range ordinaryProfiles[2:] {
-		before := baseProfiles()[name]
+	for _, name := range []string{"claude-frontend-ui", "codex-frontend-ui"} {
 		input := server.lastInput(t, name)
-		wantIDs := append(append([]string{}, before.SkillIDs...), sameModelID)
+		wantIDs := []string{reviewID}
+		for _, slug := range frontendBundleSkillSlugs {
+			for _, item := range server.library {
+				if item.Slug == slug {
+					wantIDs = append(wantIDs, item.ID)
+				}
+			}
+		}
 		if !reflect.DeepEqual(input.SkillIDs, wantIDs) {
 			t.Fatalf("non-coding membership changed unexpectedly for %s: got=%v want=%v", name, input.SkillIDs, wantIDs)
 		}
@@ -110,7 +174,7 @@ func TestApplyUploadsCanonicalSkillAndPreservesEveryExistingPin(t *testing.T) {
 
 func TestApplyRejectsExistingSlugWithDifferentCanonicalSHA(t *testing.T) {
 	server := newPolicyServer(t)
-	server.installSameModelSkill("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+	server.installRoutingSkill("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
 
 	report, err := execute(context.Background(), server.config(modeApply))
 	if err == nil || !strings.Contains(err.Error(), "collision") || !strings.Contains(err.Error(), server.pkg.SHA256) || !strings.Contains(err.Error(), strings.Repeat("f", 64)) {
@@ -128,9 +192,8 @@ func TestApplyRejectsExistingSlugWithDifferentCanonicalSHA(t *testing.T) {
 
 func TestApplyResumesAfterSomeProfilesAlreadyAdvanced(t *testing.T) {
 	server := newPolicyServer(t)
-	server.installSameModelSkill(server.pkg.SHA256)
+	server.installRoutingSkill(server.pkg.SHA256)
 	server.convergeProfile("claude-coding")
-	server.convergeProfile("claude-data-analysis")
 
 	report, err := execute(context.Background(), server.config(modeApply))
 	if err != nil {
@@ -139,17 +202,17 @@ func TestApplyResumesAfterSomeProfilesAlreadyAdvanced(t *testing.T) {
 	if report.Skill.Action != "reuse" || !report.Verified {
 		t.Fatalf("unexpected resumed report: %+v", report)
 	}
-	if server.hasPut("claude-coding") || server.hasPut("claude-data-analysis") {
+	if server.hasPut("claude-coding") {
 		t.Fatalf("already-converged Profiles were updated: %+v", server.puts)
 	}
-	if server.putCount() != len(ordinaryProfiles)-2 {
-		t.Fatalf("got %d resumed PUTs, want %d", server.putCount(), len(ordinaryProfiles)-2)
+	if server.putCount() != 3 {
+		t.Fatalf("got %d resumed PUTs, want 3", server.putCount())
 	}
 }
 
 func TestApplyStopsOnRevisionConflict(t *testing.T) {
 	server := newPolicyServer(t)
-	server.installSameModelSkill(server.pkg.SHA256)
+	server.installRoutingSkill(server.pkg.SHA256)
 	server.conflictProfile = "codex-coding"
 
 	report, err := execute(context.Background(), server.config(modeApply))
@@ -159,14 +222,14 @@ func TestApplyStopsOnRevisionConflict(t *testing.T) {
 	if !server.hasPut("claude-coding") || !server.hasPut("codex-coding") {
 		t.Fatalf("expected first update then conflict: %+v", server.puts)
 	}
-	for _, name := range ordinaryProfiles[2:] {
+	for _, name := range []string{"codex-data-analysis", "codex-frontend-ui"} {
 		if server.hasPut(name) {
 			t.Fatalf("updated %s after revision conflict", name)
 		}
 	}
 	for _, change := range report.Profiles {
 		wantAfter := change.BeforeRevision
-		if change.Name == "claude-coding" {
+		if change.Name == "claude-coding" || change.Name == "claude-frontend-ui" {
 			wantAfter++
 		}
 		if change.AfterRevision != wantAfter {
@@ -177,15 +240,12 @@ func TestApplyStopsOnRevisionConflict(t *testing.T) {
 
 func TestCheckRejectsMissingMandatoryMembership(t *testing.T) {
 	server := newPolicyServer(t)
-	server.installSameModelSkill(server.pkg.SHA256)
-	for _, name := range ordinaryProfiles {
-		if name != "codex-data-analysis" {
-			server.convergeProfile(name)
-		}
-	}
+	server.installRoutingSkill(server.pkg.SHA256)
+	server.convergeProfile("claude-coding")
+	server.convergeProfile("codex-coding")
 
 	report, err := execute(context.Background(), server.config(modeCheck))
-	if err == nil || !strings.Contains(err.Error(), "codex-data-analysis") || !strings.Contains(err.Error(), "same-model-subagents") {
+	if err == nil || !strings.Contains(err.Error(), "frontend Kimi Skill") {
 		t.Fatalf("expected strict missing-membership error, report=%+v err=%v", report, err)
 	}
 	if report.Verified || server.uploadCount != 0 || server.putCount() != 0 {
@@ -209,7 +269,7 @@ func TestCommandNeverCallsPreflightOrApplyRoutes(t *testing.T) {
 	}
 }
 
-func TestPlanRejectsUnexpectedActiveProfile(t *testing.T) {
+func TestPlanUsesCurrentActiveProfilesDynamically(t *testing.T) {
 	server := newPolicyServer(t)
 	server.profiles["unexpected-profile"] = profile{
 		ID:       "00000000-0000-4000-8000-000000000398",
@@ -220,8 +280,30 @@ func TestPlanRejectsUnexpectedActiveProfile(t *testing.T) {
 	}
 
 	report, err := execute(context.Background(), server.config(modePlan))
-	if err == nil || !strings.Contains(err.Error(), "unexpected active Profile unexpected-profile") {
-		t.Fatalf("expected unexpected Profile error, report=%+v err=%v", report, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Profiles) != len(ordinaryProfiles)+1 {
+		t.Fatalf("dynamic active Profile was not included: %+v", report.Profiles)
+	}
+}
+
+func TestPlanRemovesLegacyPolicyButKeepsAegisSkills(t *testing.T) {
+	server := newPolicyServer(t)
+	server.installLegacyPolicySkill(server.pkg.SHA256)
+	for name, current := range server.profiles {
+		current.SkillIDs = append(current.SkillIDs, legacyPolicyID)
+		current.Skills = append(current.Skills, skillPin{SkillID: legacyPolicyID, VersionID: routingVersion, Slug: "same-model-subagents"})
+		server.profiles[name] = current
+	}
+	report, err := execute(context.Background(), server.config(modePlan))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range report.Profiles {
+		if !containsString(change.Remove, "same-model-subagents") {
+			t.Fatalf("legacy policy was not removed from %s: %+v", change.Name, change)
+		}
 	}
 }
 
@@ -344,7 +426,7 @@ func (s *policyServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	s.uploadCount++
 	s.uploadSHA = pkg.SHA256
-	item := skill{ID: sameModelID, Slug: pkg.Slug, CurrentVersionID: sameModelVersion, CurrentSHA256: pkg.SHA256}
+	item := skill{ID: routingID, Slug: pkg.Slug, CurrentVersionID: routingVersion, CurrentSHA256: pkg.SHA256}
 	s.library = append(s.library, item)
 	writeTestJSON(w, http.StatusCreated, item)
 }
@@ -408,15 +490,21 @@ func (s *policyServer) slugFor(id string) string {
 	return ""
 }
 
-func (s *policyServer) installSameModelSkill(sha string) {
+func (s *policyServer) installRoutingSkill(sha string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, item := range s.library {
-		if item.Slug == "same-model-subagents" {
+		if item.Slug == "subagent-routing" {
 			return
 		}
 	}
-	s.library = append(s.library, skill{ID: sameModelID, Slug: "same-model-subagents", CurrentVersionID: sameModelVersion, CurrentSHA256: sha})
+	s.library = append(s.library, skill{ID: routingID, Slug: "subagent-routing", CurrentVersionID: routingVersion, CurrentSHA256: sha})
+}
+
+func (s *policyServer) installLegacyPolicySkill(sha string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.library = append(s.library, skill{ID: legacyPolicyID, Slug: "same-model-subagents", CurrentVersionID: routingVersion, CurrentSHA256: sha})
 }
 
 func (s *policyServer) convergeProfile(name string) {
@@ -426,15 +514,12 @@ func (s *policyServer) convergeProfile(name string) {
 	ids := []string{}
 	pins := []skillPin{}
 	for _, pin := range current.Skills {
-		if codingProfiles[name] && removedFromCoding[pin.Slug] {
-			continue
-		}
 		ids = append(ids, pin.SkillID)
 		pins = append(pins, pin)
 	}
-	if !containsString(ids, sameModelID) {
-		ids = append(ids, sameModelID)
-		pins = append(pins, skillPin{SkillID: sameModelID, VersionID: sameModelVersion, Slug: "same-model-subagents"})
+	if !containsString(ids, routingID) {
+		ids = append(ids, routingID)
+		pins = append(pins, skillPin{SkillID: routingID, VersionID: routingVersion, Slug: "subagent-routing"})
 	}
 	current.SkillIDs = ids
 	current.Skills = pins
@@ -486,6 +571,11 @@ func baseLibrary() []skill {
 		{ID: subagentID, Slug: "subagent-driven-development", CurrentVersionID: subagentVersion, CurrentSHA256: strings.Repeat("b", 64)},
 		{ID: reviewID, Slug: "requesting-code-review", CurrentVersionID: reviewVersion, CurrentSHA256: strings.Repeat("c", 64)},
 		{ID: legacyID, Slug: "legacy-pinned", CurrentVersionID: legacyCurrent, CurrentSHA256: strings.Repeat("d", 64)},
+		{ID: toolhubFrontendID, Slug: "toolhub-frontend", CurrentVersionID: toolhubFrontendVersion, CurrentSHA256: strings.Repeat("e", 64)},
+		{ID: performanceID, Slug: "performance-audit", CurrentVersionID: performanceVer, CurrentSHA256: strings.Repeat("f", 64)},
+		{ID: responsiveID, Slug: "responsive-check", CurrentVersionID: responsiveVer, CurrentSHA256: strings.Repeat("1", 64)},
+		{ID: uiCNID, Slug: "ui-ux-pro-max-cn", CurrentVersionID: uiCNVersion, CurrentSHA256: strings.Repeat("2", 64)},
+		{ID: browserVerificationID, Slug: "browser-ui-verification", CurrentVersionID: browserVerificationVer, CurrentSHA256: strings.Repeat("3", 64)},
 	}
 }
 
@@ -500,6 +590,7 @@ func baseProfiles() map[string]profile {
 			pins = []skillPin{
 				{SkillID: reviewID, VersionID: reviewVersion, Slug: "requesting-code-review"},
 				{SkillID: dispatchID, VersionID: dispatchVersion, Slug: "dispatching-parallel-agents"},
+				{SkillID: subagentID, VersionID: subagentVersion, Slug: "subagent-driven-development"},
 				{SkillID: legacyID, VersionID: legacyPinned, Slug: "legacy-pinned"},
 			}
 		}
@@ -510,6 +601,9 @@ func baseProfiles() map[string]profile {
 				{SkillID: subagentID, VersionID: subagentVersion, Slug: "subagent-driven-development"},
 				{SkillID: legacyID, VersionID: legacyPinned, Slug: "legacy-pinned"},
 			}
+		}
+		if strings.HasSuffix(name, "-frontend-ui") {
+			pins = append(pins, skillPin{SkillID: toolhubFrontendID, VersionID: toolhubFrontendVersion, Slug: "toolhub-frontend"})
 		}
 		item := profile{
 			ID:            fmt.Sprintf("00000000-0000-4000-8000-%012d", 301+index),
@@ -572,7 +666,7 @@ func testSkillDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return filepath.Clean(filepath.Join(workingDirectory, "..", "..", ".agents", "skills", "same-model-subagents"))
+	return filepath.Clean(filepath.Join(workingDirectory, "..", "..", ".agents", "skills", "subagent-routing"))
 }
 
 func writeTestJSON(w http.ResponseWriter, status int, value any) {

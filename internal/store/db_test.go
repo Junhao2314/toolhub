@@ -77,6 +77,24 @@ func TestTextProcessingCleanupMigrationIsExactAndScoped(t *testing.T) {
 	}
 }
 
+func TestSubagentRoutingMigrationRetiresOnlyLegacyRequiredTag(t *testing.T) {
+	body, err := migrationFS.ReadFile("migrations/018_subagent_routing_policy.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(body)
+	for _, required := range []string{"array_remove(tags, 'required')", "same-model-subagents", "archived_at IS NULL"} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("subagent routing migration is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"DELETE FROM skills", "DROP TABLE", "TRUNCATE"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatalf("subagent routing migration contains destructive operation %q", forbidden)
+		}
+	}
+}
+
 func TestLegacySchemaErrorIsActionable(t *testing.T) {
 	err := legacySchemaError()
 	if !strings.Contains(err.Error(), "fresh PostgreSQL volume") || !strings.Contains(err.Error(), "generation 2") {
