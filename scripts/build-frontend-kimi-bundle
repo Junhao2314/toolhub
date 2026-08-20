@@ -1,36 +1,81 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Materialize the intentionally small Skill directory used by Kimi frontend
-# dispatches. The source list is an allowlist: do not replace it with a whole
-# Hermes/Codex Skill root.
+# Materialize a curated external-agent Skill directory. The allowlist can come
+# from ToolHub Settings (Kimi frontend or Pi) while the no-argument path keeps
+# the original Kimi baseline for offline/backward-compatible use.
 
 usage() {
 	cat >&2 <<'EOF'
-Usage: scripts/build-frontend-kimi-bundle [--dest DIR] [--hermes-skills DIR]
+Usage: scripts/build-frontend-kimi-bundle [--bundle kimi-frontend|pi]
+       [--dest DIR] [--hermes-skills DIR] [--pi-skills DIR]
+       [--config FILE] [--api-url URL] [--username USER] [--password PASS]
        [--project-skill-dir DIR]
 
 Environment equivalents:
   FRONTEND_KIMI_SKILLS       destination directory
   HERMES_SKILLS_DIR          Hermes Skill root
+  PI_SKILLS_DIR               Pi agent Skill root
+  TOOLHUB_BUNDLE_CONFIG       JSON Settings response or object with bundle lists
+  TOOLHUB_BUNDLE_API_URL      ToolHub base URL (reads /settings)
+  TOOLHUB_BUNDLE_USERNAME     ToolHub username for --api-url
+  TOOLHUB_BUNDLE_PASSWORD     ToolHub password for --api-url
   FRONTEND_KIMI_PROJECT_SKILL_DIR  Optional project-specific Skill directory
 EOF
 }
 
+bundle=kimi-frontend
 hermes_skills=${HERMES_SKILLS_DIR:-${HOME:?HOME is required}/.hermes/skills}
-destination=${FRONTEND_KIMI_SKILLS:-${XDG_CACHE_HOME:-${HOME:?HOME is required}/.cache}/toolhub/frontend-kimi}
+pi_skills=${PI_SKILLS_DIR:-${HOME:?HOME is required}/.pi/agent/skills}
+destination=${FRONTEND_KIMI_SKILLS:-}
+destination_explicit=0
 project_skill_dir=${FRONTEND_KIMI_PROJECT_SKILL_DIR:-}
+config_file=${TOOLHUB_BUNDLE_CONFIG:-}
+api_url=${TOOLHUB_BUNDLE_API_URL:-}
+api_username=${TOOLHUB_BUNDLE_USERNAME:-}
+api_password=${TOOLHUB_BUNDLE_PASSWORD:-}
 
 while (($# > 0)); do
 	case "$1" in
+		--bundle)
+			(($# >= 2)) || { usage; exit 2; }
+			bundle=$2
+			shift 2
+			;;
 		--dest)
 			(($# >= 2)) || { usage; exit 2; }
 			destination=$2
+			destination_explicit=1
 			shift 2
 			;;
 		--hermes-skills)
 			(($# >= 2)) || { usage; exit 2; }
 			hermes_skills=$2
+			shift 2
+			;;
+		--pi-skills)
+			(($# >= 2)) || { usage; exit 2; }
+			pi_skills=$2
+			shift 2
+			;;
+		--config)
+			(($# >= 2)) || { usage; exit 2; }
+			config_file=$2
+			shift 2
+			;;
+		--api-url)
+			(($# >= 2)) || { usage; exit 2; }
+			api_url=$2
+			shift 2
+			;;
+		--username)
+			(($# >= 2)) || { usage; exit 2; }
+			api_username=$2
+			shift 2
+			;;
+		--password)
+			(($# >= 2)) || { usage; exit 2; }
+			api_password=$2
 			shift 2
 			;;
 		--project-skill-dir)
@@ -50,20 +95,83 @@ while (($# > 0)); do
 	esac
 done
 
-hermes_skills=$(CDPATH= cd -- "$hermes_skills" && pwd)
+source_specs=()
+
+case "$bundle" in
+	kimi-frontend)
+		source_root=$(CDPATH= cd -- "$hermes_skills" && pwd)
+		config_field=kimiFrontendBundle
+		if (( ! destination_explicit )) && [[ -z "$destination" ]]; then
+			destination=${XDG_CACHE_HOME:-${HOME:?HOME is required}/.cache}/toolhub/frontend-kimi
+		fi
+		if [[ -z "$config_file" && -z "$api_url" ]]; then
+			source_specs=(
+				"ui-ux-pro-max-cn|$source_root/ui-ux-pro-max-cn"
+				"responsive-check|$source_root/responsive-check"
+				"performance-audit|$source_root/performance-audit"
+				"browser-ui-verification|$source_root/software-development/browser-ui-verification"
+			)
+		fi
+		;;
+	pi)
+		source_root=$(CDPATH= cd -- "$pi_skills" && pwd)
+		config_field=piBundle
+		if (( ! destination_explicit )) && [[ -z "$destination" ]]; then
+			destination=${PI_BUNDLE_SKILLS:-${XDG_CACHE_HOME:-${HOME:?HOME is required}/.cache}/toolhub/pi}
+		fi
+		;;
+	*)
+		printf 'unsupported bundle: %s\n' "$bundle" >&2
+		usage
+		exit 2
+		;;
+esac
+if [[ -d "$hermes_skills" ]]; then hermes_skills=$(CDPATH= cd -- "$hermes_skills" && pwd); fi
+if [[ -d "$pi_skills" ]]; then pi_skills=$(CDPATH= cd -- "$pi_skills" && pwd); fi
 if [[ -n "$project_skill_dir" ]]; then
 	project_skill_dir=$(CDPATH= cd -- "$project_skill_dir" && pwd)
 fi
 
-# slug|source directory. Keep this list explicit and review additions as
-# architecture changes; Kimi must not inherit the scheduler's skill tree.
-bundle_specs=(
-	"ui-ux-pro-max-cn|$hermes_skills/ui-ux-pro-max-cn"
-	"responsive-check|$hermes_skills/responsive-check"
-	"performance-audit|$hermes_skills/performance-audit"
-	"browser-ui-verification|$hermes_skills/software-development/browser-ui-verification"
-)
-if [[ -n "$project_skill_dir" ]]; then
+if [[ -n "$api_url" ]]; then
+	api_url=${api_url%/}
+	if [[ -z "$api_username" || -z "$api_password" ]]; then
+		printf 'bundle API mode requires --username/--password or TOOLHUB_BUNDLE_* credentials\n' >&2
+		exit 2
+	fi
+	api_tmp=$(mktemp)
+	api_cookie=$(mktemp)
+	curl --fail --silent --show-error --retry 1 --connect-timeout 5 --max-time 30 \
+		-c "$api_cookie" -H 'Content-Type: application/json' \
+		--data "$(jq -cn --arg username "$api_username" --arg password "$api_password" '{username:$username,password:$password}')" \
+		"$api_url/api/v1/auth/login" >/dev/null
+	curl --fail --silent --show-error --retry 1 --connect-timeout 5 --max-time 30 \
+		-b "$api_cookie" "$api_url/api/v1/settings" >"$api_tmp"
+	config_file=$api_tmp
+fi
+
+if [[ -n "$config_file" ]]; then
+	[[ -f "$config_file" ]] || { printf 'bundle config is not a file: %s\n' "$config_file" >&2; exit 1; }
+	command -v jq >/dev/null 2>&1 || { printf 'jq is required for bundle config\n' >&2; exit 1; }
+	mapfile -t configured_slugs < <(jq -r --arg field "$config_field" '.[$field] // .bundles[$field] // [] | .[]' "$config_file")
+	if [[ "$bundle" == "kimi-frontend" && ! " ${configured_slugs[*]} " =~ " ui-ux-pro-max-cn " ]]; then
+		printf 'Kimi frontend bundle config must include ui-ux-pro-max-cn\n' >&2
+		exit 1
+	fi
+	source_specs=()
+	for slug in "${configured_slugs[@]}"; do
+		[[ "$slug" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]] || { printf 'invalid Skill slug: %s\n' "$slug" >&2; exit 1; }
+		source="$source_root/$slug"
+		if [[ ! -d "$source" || ! -f "$source/SKILL.md" ]]; then
+			source=$(find "$source_root" -type f -path "*/$slug/SKILL.md" -print -quit)
+			source=${source%/SKILL.md}
+		fi
+		[[ -d "$source" && -f "$source/SKILL.md" ]] || { printf 'required Skill %s is missing under %s\n' "$slug" "$source_root" >&2; exit 1; }
+		source_specs+=("$slug|$source")
+	done
+fi
+
+bundle_specs=("${source_specs[@]}")
+if [[ "$bundle" == "kimi-frontend" && -n "$project_skill_dir" ]]; then
 	bundle_specs+=("$(basename -- "$project_skill_dir")|$project_skill_dir")
 fi
 
@@ -72,7 +180,7 @@ mkdir -p -- "$destination_parent"
 destination_parent=$(CDPATH= cd -- "$destination_parent" && pwd)
 destination="$destination_parent/$(basename -- "$destination")"
 
-if [[ "$destination" == "/" || "$destination" == "$hermes_skills" || "$destination" == "$project_skill_dir" ]]; then
+if [[ "$destination" == "/" || "$destination" == "$hermes_skills" || "$destination" == "$pi_skills" || "$destination" == "$project_skill_dir" ]]; then
 	printf 'refusing to replace a protected path: %s\n' "$destination" >&2
 	exit 1
 fi
@@ -95,13 +203,15 @@ restore_old() {
 	if [[ -n "$staging" && -e "$staging" ]]; then
 		rm -rf -- "$staging"
 	fi
+	if [[ -n "${api_tmp:-}" ]]; then rm -f -- "$api_tmp"; fi
+	if [[ -n "${api_cookie:-}" ]]; then rm -f -- "$api_cookie"; fi
 }
 trap restore_old EXIT
 
 for spec in "${bundle_specs[@]}"; do
 	IFS='|' read -r slug source <<<"$spec"
 	if [[ ! -d "$source" || ! -f "$source/SKILL.md" ]]; then
-		printf 'required frontend Skill %s is missing or has no SKILL.md: %s\n' "$slug" "$source" >&2
+		printf 'required %s Skill %s is missing or has no SKILL.md: %s\n' "$bundle" "$slug" "$source" >&2
 		exit 1
 	fi
 	mkdir -p -- "$staging/$slug"
@@ -122,7 +232,7 @@ if [[ -n "$old_destination" ]]; then
 	old_destination=''
 fi
 
-printf 'frontend Kimi bundle: %s\n' "$destination"
+printf '%s bundle: %s\n' "$bundle" "$destination"
 for spec in "${bundle_specs[@]}"; do
 	printf '  %s\n' "${spec%%|*}"
 done

@@ -57,9 +57,25 @@ make one project's Skill part of the generic bundle.
    final review still uses the parent model. Research is returned to the parent
    before implementation decisions are made.
 
-The generic curated bundle is `ui-ux-pro-max-cn`, `responsive-check`,
-`performance-audit`, and `browser-ui-verification`; `ui-ux-pro-max-cn` is
-mandatory. For ToolHub, add the project overlay explicitly:
+The generic Kimi curated bundle defaults to `ui-ux-pro-max-cn`,
+`responsive-check`, `performance-audit`, and `browser-ui-verification`;
+`ui-ux-pro-max-cn` is mandatory. ToolHub exposes both the Kimi frontend bundle
+and the Pi agent bundle in `Settings -> Subagent routing bundles`. The UI
+stores Skill slugs; it does not Apply a runtime Profile. Materialize the
+selected bundle from Settings with:
+
+```bash
+scripts/build-frontend-kimi-bundle --bundle kimi-frontend \
+  --api-url http://127.0.0.1:18480 \
+  --username "$TOOLHUB_BUNDLE_USERNAME" \
+  --password "$TOOLHUB_BUNDLE_PASSWORD"
+scripts/build-frontend-kimi-bundle --bundle pi \
+  --api-url http://127.0.0.1:18480 \
+  --username "$TOOLHUB_BUNDLE_USERNAME" \
+  --password "$TOOLHUB_BUNDLE_PASSWORD"
+```
+
+For ToolHub, add the project overlay explicitly:
 
 ```bash
 scripts/build-frontend-kimi-bundle \

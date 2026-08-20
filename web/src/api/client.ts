@@ -563,6 +563,8 @@ export interface Settings {
   timezone: string;
   relayPort: number;
   relayIntentionalPaused: boolean;
+  kimiFrontendBundle: string[];
+  piBundle: string[];
   updatedAt: string;
 }
 

@@ -1752,12 +1752,14 @@ components:
         timezone: {type: string}
         relayPort: {type: integer, minimum: 1, maximum: 65535}
         relayIntentionalPaused: {type: boolean}
+        kimiFrontendBundle: {type: array, maxItems: 100, items: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}}
+        piBundle: {type: array, maxItems: 100, items: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,127}$'}}
         updatedAt: {type: string, format: date-time, readOnly: true}
     Settings:
       allOf:
         - {$ref: '#/components/schemas/SettingsInput'}
         - type: object
-          required: [updatedAt]
+          required: [updatedAt, kimiFrontendBundle, piBundle]
     RelayStatus:
       type: object
       additionalProperties: false

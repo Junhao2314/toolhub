@@ -1741,6 +1741,56 @@ td small {
   font-size: 15px;
   color: var(--text-primary);
 }
+.section-help {
+  margin: -4px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.bundle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.bundle-card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.bundle-card > header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.bundle-card h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+}
+.bundle-card header small,
+.bundle-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.bundle-card header .status {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.bundle-list {
+  display: grid;
+  max-height: 280px;
+  overflow: auto;
+  border-top: 1px solid var(--border);
+}
+.bundle-list .selection-row {
+  border-bottom: 1px solid var(--border);
+}
+.bundle-list .selection-row:last-child {
+  border-bottom: 0;
+}
 .page-save {
   display: flex;
   justify-content: flex-end;
@@ -2269,6 +2319,7 @@ td small {
 }
 
 @media (max-width: 760px) {
+  .bundle-grid { grid-template-columns: 1fr; }
   .app-shell { display: block; }
   .sidebar {
     position: fixed;

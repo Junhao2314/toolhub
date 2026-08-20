@@ -426,6 +426,15 @@ const zh: Record<string, string> = {
   'Library updates': '资源库更新',
   'Cron schedule': 'Cron 计划',
   'Timezone': '时区',
+  'Subagent routing bundles': '子代理路由 Bundle',
+  'These bundles control curated external CLI Skills. They do not Apply a runtime Profile.': '这些 Bundle 控制外部 CLI 使用的精选 Skills，不会应用运行时配置集。',
+  'Kimi frontend bundle': 'Kimi 前端 Bundle',
+  'Pi agent bundle': 'Pi Agent Bundle',
+  'Source root': '来源目录',
+  'Hermes configured Skill root': 'Hermes 配置的 Skill 根目录',
+  'Pi configured Skill root': 'Pi 配置的 Skill 根目录',
+  'selected': '已选',
+  'ui-ux-pro-max-cn is mandatory for Kimi frontend dispatches.': 'Kimi 前端调度必须包含 ui-ux-pro-max-cn。',
   'Save settings': '保存设置',
 }
 

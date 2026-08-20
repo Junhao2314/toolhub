@@ -1,4 +1,5 @@
 import os
+import json
 import subprocess
 import tempfile
 import unittest
@@ -91,6 +92,44 @@ class FrontendKimiBundleTests(unittest.TestCase):
             result = self._run_builder(hermes, hermes)
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue((hermes / "ui-ux-pro-max-cn" / "SKILL.md").exists())
+
+    def test_materializer_uses_ui_config_for_kimi_bundle(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            hermes = root / "hermes"
+            destination = root / "bundle"
+            for slug in ("ui-ux-pro-max-cn", "responsive-check", "custom-ui"):
+                self._write_skill(hermes, slug)
+            config = root / "settings.json"
+            config.write_text(json.dumps({"kimiFrontendBundle": ["ui-ux-pro-max-cn", "custom-ui"]}), encoding="utf-8")
+            result = subprocess.run(
+                [str(BUILDER), "--hermes-skills", str(hermes), "--config", str(config), "--dest", str(destination)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HOME": str(root)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(sorted(path.name for path in destination.iterdir()), ["custom-ui", "ui-ux-pro-max-cn"])
+
+    def test_materializer_supports_pi_bundle_from_ui_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pi = root / "pi-skills"
+            destination = root / "pi-bundle"
+            self._write_skill(pi, "officecli")
+            self._write_skill(pi, "unused")
+            config = root / "settings.json"
+            config.write_text(json.dumps({"piBundle": ["officecli"]}), encoding="utf-8")
+            result = subprocess.run(
+                [str(BUILDER), "--bundle", "pi", "--pi-skills", str(pi), "--config", str(config), "--dest", str(destination)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "HOME": str(root)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([path.name for path in destination.iterdir()], ["officecli"])
 
 
 if __name__ == "__main__":

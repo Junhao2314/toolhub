@@ -57,6 +57,9 @@ Reusing a key with a different canonical request returns `409`.
   Shared MCP state is returned by `/relay/configuration` and `/targets` relay
   projections. The optional Published revision pointer distinguishes a draft
   Skill revision from the revision last delivered to a target.
+- `/settings` also carries the operator-managed `kimiFrontendBundle` and
+  `piBundle` Skill-slug lists. These are external CLI materializer inputs, not
+  runtime Profile membership and never trigger Apply by themselves.
 - `GET /profiles?includeArchived=true` includes reversible archived Profiles
   after active rows. `POST /profiles/{id}/archive` requires the current
   revision; `POST /profiles/{id}/restore` creates an `archived_restore`

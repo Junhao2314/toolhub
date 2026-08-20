@@ -363,6 +363,8 @@ type Settings struct {
 	Timezone               string    `json:"timezone"`
 	RelayPort              int       `json:"relayPort"`
 	RelayIntentionalPaused bool      `json:"relayIntentionalPaused"`
+	KimiFrontendBundle     []string  `json:"kimiFrontendBundle"`
+	PiBundle               []string  `json:"piBundle"`
 	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
