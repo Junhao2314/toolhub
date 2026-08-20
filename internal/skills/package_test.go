@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,6 +50,30 @@ func TestScanReportsRiskSignals(t *testing.T) {
 	}
 	if pkg.Report.RiskLevel != "high" || len(pkg.Report.Scripts) != 1 || len(pkg.Report.Findings) == 0 {
 		t.Fatalf("unexpected report: %+v", pkg.Report)
+	}
+}
+
+func TestScanDirectoryIgnoresPythonBytecode(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "SKILL.md"), []byte("---\nname: Example\ndescription: test\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(root, "__pycache__")
+	if err := os.Mkdir(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cache, "module.cpython-312.pyc"), []byte("generated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sibling.pyc"), []byte("generated"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pkg, err := ScanDirectory(root, DefaultLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(pkg.CanonicalZIP), "pyc") {
+		t.Fatalf("Python bytecode leaked into canonical Skill archive: %q", pkg.CanonicalZIP)
 	}
 }
 

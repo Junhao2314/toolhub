@@ -132,6 +132,15 @@ func ScanDirectory(root string, limits Limits) (Package, error) {
 		if current == resolvedRoot {
 			return nil
 		}
+		if item.IsDir() && item.Name() == "__pycache__" {
+			return filepath.SkipDir
+		}
+		if !item.IsDir() {
+			extension := strings.ToLower(filepath.Ext(item.Name()))
+			if extension == ".pyc" || extension == ".pyo" {
+				return nil
+			}
+		}
 		info, err := item.Info()
 		if err != nil {
 			return err
