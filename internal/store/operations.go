@@ -149,7 +149,7 @@ func (s *Store) createOperationTx(ctx context.Context, tx pgx.Tx, input CreateOp
 		if dependencyID := targetRowIDs[dependencies[targetID]]; dependencyID != "" {
 			dependency = dependencyID
 		}
-		governancePending := input.Kind == "relay_config_apply" || input.Kind == "policy_apply"
+		governancePending := input.Kind == "relay_config_apply" || input.Kind == "policy_apply" || (input.Kind == "apply" && stringMetadata(metadataJSON, "mode") == "skills_only")
 		if _, err := tx.Exec(ctx, `INSERT INTO operation_targets(id,operation_id,target_id,depends_on_target_id,request,governance_finalization_pending) VALUES($1,$2,$3,$4,$5,$6)`, targetRowIDs[targetID], id, targetID, dependency, jsonText(requestJSON), governancePending); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -334,7 +334,7 @@ func (s *Store) ClaimOperationTarget(ctx context.Context) (WorkItem, error) {
 		operationTargetID string
 		nodeID            string
 	}
-	rows, err := tx.Query(ctx, `SELECT o.id::text,ot.id::text,n.id::text FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.status='queued' AND NOT o.cancel_requested AND (ot.depends_on_target_id IS NULL OR EXISTS(SELECT 1 FROM operation_targets dep WHERE dep.id=ot.depends_on_target_id AND dep.status='succeeded')) AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') ORDER BY o.id,ot.id,n.id LIMIT 100`)
+	rows, err := tx.Query(ctx, `SELECT o.id::text,ot.id::text,n.id::text FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.status='queued' AND (NOT o.cancel_requested OR (o.kind IN ('apply','restore') AND ot.bridge_operation_id<>'')) AND (ot.depends_on_target_id IS NULL OR EXISTS(SELECT 1 FROM operation_targets dep WHERE dep.id=ot.depends_on_target_id AND dep.status='succeeded')) AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') ORDER BY o.id,ot.id,n.id LIMIT 100`)
 	if err != nil {
 		return WorkItem{}, err
 	}
@@ -356,14 +356,14 @@ func (s *Store) ClaimOperationTarget(ctx context.Context) (WorkItem, error) {
 	claimed := false
 	for _, candidate := range candidates {
 		var operationID string
-		err := tx.QueryRow(ctx, `SELECT id::text FROM operations WHERE id=$1 AND NOT cancel_requested FOR UPDATE SKIP LOCKED`, candidate.operationID).Scan(&operationID)
+		err := tx.QueryRow(ctx, `SELECT o.id::text FROM operations o WHERE o.id=$1 AND (NOT o.cancel_requested OR (o.kind IN ('apply','restore') AND EXISTS(SELECT 1 FROM operation_targets ot WHERE ot.id=$2 AND ot.operation_id=o.id AND ot.status='queued' AND ot.bridge_operation_id<>''))) FOR UPDATE OF o SKIP LOCKED`, candidate.operationID, candidate.operationTargetID).Scan(&operationID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return WorkItem{}, err
 		}
-		err = tx.QueryRow(ctx, `SELECT ot.id::text,ot.operation_id::text,ot.target_id::text,coalesce(ot.depends_on_target_id::text,''),ot.status,ot.attempt,ot.pending_rerun,ot.bridge_operation_id,ot.salt_jid,ot.request,ot.created_at,ot.updated_at FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.id=$1 AND ot.operation_id=$2 AND ot.status='queued' AND NOT o.cancel_requested AND (ot.depends_on_target_id IS NULL OR EXISTS(SELECT 1 FROM operation_targets dep WHERE dep.id=ot.depends_on_target_id AND dep.status='succeeded')) AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') FOR UPDATE OF ot SKIP LOCKED`, candidate.operationTargetID, operationID).Scan(&item.OperationTarget.ID, &item.OperationTarget.OperationID, &item.OperationTarget.TargetID, &item.OperationTarget.DependsOnTargetID, &item.OperationTarget.Status, &item.OperationTarget.Attempt, &item.OperationTarget.PendingRerun, &item.OperationTarget.BridgeOperationID, &item.OperationTarget.SaltJID, &item.OperationTarget.Request, &item.OperationTarget.CreatedAt, &item.OperationTarget.UpdatedAt)
+		err = tx.QueryRow(ctx, `SELECT ot.id::text,ot.operation_id::text,ot.target_id::text,coalesce(ot.depends_on_target_id::text,''),ot.status,ot.attempt,ot.pending_rerun,ot.bridge_operation_id,ot.salt_jid,ot.request,ot.created_at,ot.updated_at FROM operation_targets ot JOIN operations o ON o.id=ot.operation_id JOIN targets t ON t.id=ot.target_id JOIN nodes n ON n.id=t.node_id WHERE ot.id=$1 AND ot.operation_id=$2 AND ot.status='queued' AND (NOT o.cancel_requested OR (o.kind IN ('apply','restore') AND ot.bridge_operation_id<>'')) AND (ot.depends_on_target_id IS NULL OR EXISTS(SELECT 1 FROM operation_targets dep WHERE dep.id=ot.depends_on_target_id AND dep.status='succeeded')) AND (n.archived_at IS NULL OR ot.bridge_operation_id<>'') FOR UPDATE OF ot SKIP LOCKED`, candidate.operationTargetID, operationID).Scan(&item.OperationTarget.ID, &item.OperationTarget.OperationID, &item.OperationTarget.TargetID, &item.OperationTarget.DependsOnTargetID, &item.OperationTarget.Status, &item.OperationTarget.Attempt, &item.OperationTarget.PendingRerun, &item.OperationTarget.BridgeOperationID, &item.OperationTarget.SaltJID, &item.OperationTarget.Request, &item.OperationTarget.CreatedAt, &item.OperationTarget.UpdatedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
 		}
@@ -441,8 +441,20 @@ func (s *Store) FinishOperationTarget(ctx context.Context, operationTargetID, st
 		return err
 	}
 	if terminalFailures > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=false,updated_at=now() WHERE operation_id=$1 AND governance_finalization_pending`, operationID); err != nil {
+		// A deterministic relay failure is publishable. Keep ownership until
+		// the same finalization transaction publishes and releases all targets.
+		var relaxedPublication bool
+		if err := tx.QueryRow(ctx, `SELECT o.kind='apply' AND length(coalesce(o.metadata->>'routingHash',''))=64
+			AND EXISTS(SELECT 1 FROM operation_targets ot WHERE ot.operation_id=o.id AND ot.governance_finalization_pending)
+			AND EXISTS(SELECT 1 FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=o.id AND t.runtime='shared-relay' AND ot.status='failed' AND ot.error_code IN ('mcpm_missing','mcpm_incompatible','relay_port_conflict'))
+			AND NOT EXISTS(SELECT 1 FROM operation_targets ot JOIN targets t ON t.id=ot.target_id WHERE ot.operation_id=o.id AND ot.status IN ('partial','failed','cancelled') AND NOT (t.runtime='shared-relay' AND ot.status='failed' AND ot.error_code IN ('mcpm_missing','mcpm_incompatible','relay_port_conflict')))
+			FROM operations o WHERE o.id=$1`, operationID).Scan(&relaxedPublication); err != nil {
 			return err
+		}
+		if !relaxedPublication {
+			if _, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=false,updated_at=now() WHERE operation_id=$1 AND governance_finalization_pending`, operationID); err != nil {
+				return err
+			}
 		}
 	}
 	if err := recalculateOperation(ctx, tx, operationID); err != nil {
@@ -565,7 +577,7 @@ func (s *Store) CancelOperation(ctx context.Context, operationID string) error {
 	if _, err := tx.Exec(ctx, `UPDATE operations SET cancel_requested=true,updated_at=now() WHERE id=$1`, operationID); err != nil {
 		return err
 	}
-	cancelledTargets, err := tx.Exec(ctx, `UPDATE operation_targets SET status='cancelled',finished_at=now(),updated_at=now() WHERE operation_id=$1 AND status='queued'`, operationID)
+	cancelledTargets, err := tx.Exec(ctx, `UPDATE operation_targets SET status='cancelled',finished_at=now(),updated_at=now() WHERE operation_id=$1 AND status='queued' AND (bridge_operation_id='' OR NOT EXISTS(SELECT 1 FROM operations o WHERE o.id=operation_id AND o.kind IN ('apply','restore')))`, operationID)
 	if err != nil {
 		return err
 	}
@@ -742,6 +754,9 @@ func (s *Store) PendingGovernanceFinalizations(ctx context.Context) ([]domain.Op
 		  AND NOT EXISTS (
 		      SELECT 1 FROM operation_targets unfinished
 		      WHERE unfinished.operation_id=o.id AND unfinished.status<>'succeeded'
+		        AND NOT (o.kind='apply' AND length(coalesce(o.metadata->>'routingHash',''))=64
+		          AND unfinished.status='failed' AND unfinished.error_code IN ('mcpm_missing','mcpm_incompatible','relay_port_conflict')
+		          AND EXISTS(SELECT 1 FROM targets t WHERE t.id=unfinished.target_id AND t.runtime='shared-relay'))
 		  )
 		ORDER BY o.created_at,o.id`)
 	if err != nil {
@@ -779,7 +794,9 @@ func (s *Store) RequeueRunningOperationTarget(ctx context.Context, operationTarg
 	if err != nil {
 		return err
 	}
-	if err := tx.QueryRow(ctx, `SELECT id::text FROM operations WHERE id=$1 FOR UPDATE`, operationID).Scan(&operationID); err != nil {
+	var cancelRequested bool
+	var operationKind string
+	if err := tx.QueryRow(ctx, `SELECT id::text,cancel_requested,kind FROM operations WHERE id=$1 FOR UPDATE`, operationID).Scan(&operationID, &cancelRequested, &operationKind); err != nil {
 		return err
 	}
 	var bridgeOperationID string
@@ -790,8 +807,11 @@ func (s *Store) RequeueRunningOperationTarget(ctx context.Context, operationTarg
 	if err != nil {
 		return err
 	}
-	if !active && bridgeOperationID == "" {
+	if bridgeOperationID == "" && (!active || (cancelRequested && (operationKind == "apply" || operationKind == "restore"))) {
 		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET status='cancelled',pending_rerun=false,finished_at=now(),updated_at=now() WHERE id=$1`, operationTargetID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=false,updated_at=now() WHERE operation_id=$1 AND governance_finalization_pending`, operationID); err != nil {
 			return err
 		}
 		if err := recalculateOperation(ctx, tx, operationID); err != nil {
@@ -814,6 +834,9 @@ func (s *Store) RetryFailedTargets(ctx context.Context, operationID, idempotency
 		return domain.Operation{}, ErrNotFound
 	} else if err != nil {
 		return domain.Operation{}, err
+	}
+	if original.Kind == "apply" && stringMetadata(original.Metadata, "mode") == "skills_only" {
+		return s.retrySkillApplyTargets(ctx, operationID, idempotencyKey)
 	}
 	if original.Kind == "apply" && original.SourceID != "" && bridgeprotocol.IsSHA256(stringMetadata(original.Metadata, "routingHash")) && uuid.Validate(stringMetadata(original.Metadata, "profileRevisionId")) == nil {
 		return s.retryProfileApplyTargets(ctx, operationID, idempotencyKey)

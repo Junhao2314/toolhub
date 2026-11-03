@@ -211,11 +211,20 @@ func TestGovernanceMigrationFreshAnd003UpgradeIntegration(t *testing.T) {
 		t.Fatalf("unknown profile migration state=%q", state)
 	}
 	var capturedLegacyID string
-	if err := upgrade.pool.QueryRow(ctx, `SELECT legacy_profile_id::text FROM relay_configuration_state WHERE singleton`).Scan(&capturedLegacyID); err != nil {
+	if err := upgrade.pool.QueryRow(ctx, `SELECT coalesce(legacy_profile_id::text,'') FROM relay_configuration_state WHERE singleton`).Scan(&capturedLegacyID); err != nil {
 		t.Fatal(err)
 	}
-	if capturedLegacyID != legacyID {
-		t.Fatalf("migration captured legacy Profile %s want %s", capturedLegacyID, legacyID)
+	// Migration 013 retires the compatibility-only shared Profile and clears
+	// its pointer; retaining the captured ID would leave a dangling owner.
+	if capturedLegacyID != "" {
+		t.Fatalf("cleanup retained legacy Profile pointer %s", capturedLegacyID)
+	}
+	var legacyProfiles int
+	if err := upgrade.pool.QueryRow(ctx, `SELECT count(*) FROM profiles WHERE id=$1`, legacyID).Scan(&legacyProfiles); err != nil {
+		t.Fatal(err)
+	}
+	if legacyProfiles != 0 {
+		t.Fatal("cleanup retained compatibility Profile")
 	}
 	if err := upgrade.Migrate(ctx); err != nil {
 		t.Fatal(err)

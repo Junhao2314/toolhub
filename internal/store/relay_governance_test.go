@@ -114,6 +114,19 @@ func succeededGovernanceOperation(t *testing.T, st *Store, kind, sourceID string
 		routingHash = manifest.RelayGovernance.RoutingHash
 		targetRequest = map[string]any{"manifest": manifest}
 		if kind == "relay_config_apply" {
+			_, defaultChange := metadata["defaultProfileId"]
+			if defaultChange && metadata["revisionId"] == nil {
+				// Default-Profile compatibility finalization validates the legacy
+				// published-profile routing view, not the active Skill-only view.
+				bundle, hash, e := st.RenderCandidateRoutingBundle(ctx, candidate)
+				if e != nil {
+					t.Fatal(e)
+				}
+				body, _ := json.Marshal(bundle)
+				manifest.RelayGovernance.RoutingBundle = body
+				manifest.RelayGovernance.RoutingHash = hash
+				metadata["routingHash"], routingHash = hash, hash
+			}
 			targetRequest = map[string]any{"manifest": manifest, "sourceKind": "relay_config_apply", "sourceId": metadata["revisionId"]}
 		} else if kind == "policy_apply" {
 			targetRequest = map[string]any{"manifest": manifest, "sourceKind": "relay_config_apply", "sourceId": manifest.RelayGovernance.RelayConfigurationRevisionID}
@@ -218,7 +231,7 @@ func TestFinalizeRelayDefaultProfileRequiresExpectedPredecessorAndIsOneShot(t *t
 		t.Fatalf("stale finalization replaced Default Profile with %s", defaultProfileID)
 	}
 
-	freshOperation := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"defaultProfileId": first.ID})
+	freshOperation := succeededGovernanceOperation(t, st, "relay_config_apply", "", map[string]any{"defaultProfileId": first.ID, "expectedDefaultProfileId": second.ID})
 	if err := st.FinalizeRelayDefaultProfile(ctx, freshOperation, first.ID); err != nil {
 		t.Fatal(err)
 	}

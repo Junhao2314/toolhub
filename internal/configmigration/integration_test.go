@@ -142,7 +142,7 @@ func TestLegacyToGenerationTwoImportIntegration(t *testing.T) {
 	}
 	t.Cleanup(destinationStore.Close)
 	for table, want := range map[string]int{
-		"skills": 1, "mcp_servers": 2, "encrypted_secrets": 2, "profiles": 3,
+		"skills": 1, "mcp_servers": 2, "encrypted_secrets": 2, "profiles": 2,
 		"operations": 0, "desired_snapshots": 0, "backups": 0, "runtime_snapshots": 0,
 	} {
 		var count int

@@ -701,7 +701,11 @@ func (s *Store) CreateProfileSkillApplyOperation(ctx context.Context, profileID 
 	}
 
 	request := map[string]any{"profileId": profileID, "profileRevision": currentRevision, "confirmationTokenHashes": tokenHashes}
-	metadata := map[string]any{"profileId": profileID, "profileRevisionId": currentRevisionID, "targetCount": len(confirmed), "mode": "skills_only"}
+	var expectedPublished string
+	if err := tx.QueryRow(ctx, `SELECT coalesce((SELECT profile_revision_id::text FROM published_profiles WHERE profile_id=$1),'')`, profileID).Scan(&expectedPublished); err != nil {
+		return domain.Operation{}, err
+	}
+	metadata := map[string]any{"profileId": profileID, "profileRevisionId": currentRevisionID, "targetCount": len(confirmed), "mode": "skills_only", "expectedPublishedProfileRevisionId": expectedPublished}
 	if err := lockActiveTargets(ctx, tx, targetIDs); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return domain.Operation{}, ErrConflict

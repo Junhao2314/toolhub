@@ -1658,7 +1658,7 @@ func (s *Store) FinalizeProfileApply(ctx context.Context, operationID, profileID
 		}
 		return err
 	}
-	if operationKind != "apply" || operationSource != profileID || stringMetadata(operationMetadata, "profileRevisionId") != profileRevisionID {
+	if operationKind != "apply" || stringMetadata(operationMetadata, "governanceFinalizedAction") != "" || operationSource != profileID || stringMetadata(operationMetadata, "profileRevisionId") != profileRevisionID {
 		return ErrConflict
 	}
 	if operationStatus != bridgeprotocol.OperationRunning && operationStatus != bridgeprotocol.OperationPartial {
@@ -1695,8 +1695,10 @@ func (s *Store) FinalizeProfileApply(ctx context.Context, operationID, profileID
 	// Relaxed finalize: routing governance is not installed, so a
 	// deterministically unavailable relay target is excluded and the client
 	// snapshots are published on their own.
-	relaxedReady := operationStatus == bridgeprotocol.OperationPartial && pending == 0 && allClientSucceeded && relayUnavailable
-	if !strictReady && !relaxedReady {
+	skillsOnly := stringMetadata(operationMetadata, "mode") == "skills_only"
+	skillsReady := skillsOnly && operationStatus == bridgeprotocol.OperationRunning && relayTargets == 0 && succeeded == total && pending == total
+	relaxedReady := !skillsOnly && operationStatus == bridgeprotocol.OperationRunning && pending == total && allClientSucceeded && relayUnavailable && bridgeprotocol.IsSHA256(routingHash)
+	if !strictReady && !relaxedReady && !skillsReady {
 		if operationStatus == bridgeprotocol.OperationPartial && pending == 0 && allClientSucceeded && relayFailed {
 			// The relay failed with a retryable or unexpected condition; the
 			// operation is already terminal as partial, so defer without
@@ -1734,13 +1736,6 @@ func (s *Store) FinalizeProfileApply(ctx context.Context, operationID, profileID
 	}
 	if strictReady {
 		if err := s.validateCandidateRoutingHashTx(ctx, tx, RoutingBundleCandidate{PublishedProfileRevisions: map[string]string{profileID: profileRevisionID}}, routingHash); err != nil {
-			return err
-		}
-	} else {
-		// Relaxed finalize without a routing publication: re-mark ownership so
-		// the finalizer clears it below and the operation status is
-		// recalculated atomically with the snapshot publish.
-		if _, err := tx.Exec(ctx, `UPDATE operation_targets SET governance_finalization_pending=true,updated_at=now() WHERE operation_id=$1`, operationID); err != nil {
 			return err
 		}
 	}
@@ -1816,7 +1811,7 @@ func profileApplySnapshotsTx(ctx context.Context, tx pgx.Tx, operationID, profil
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if clientTargets != 1 || (includeRelay && relayTargets != 1) || (!includeRelay && relayTargets != 0) || len(result) != clientTargets+relayTargets {
+	if clientTargets < 1 || (includeRelay && (clientTargets != 1 || relayTargets != 1)) || (!includeRelay && relayTargets != 0) || len(result) != clientTargets+relayTargets {
 		return nil, ErrConflict
 	}
 	return result, nil

@@ -101,7 +101,7 @@ func TestProfilePreflightRejectsUnsupportedNativeClientBeforeCreatingConfirmatio
 				}
 			}))
 			api := &API{store: st, bridge: client, logger: slog.New(slog.NewTextHandler(os.Stderr, nil))}
-			body := `{"targetIds":["` + skillTargetID + `","` + relayTargetID + `"]}`
+			body := `{"targetIds":["` + skillTargetID + `"]}`
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/"+profile.ID+"/preflight", strings.NewReader(body))
 			routeContext := chi.NewRouteContext()
 			routeContext.URLParams.Add("profileID", profile.ID)
@@ -167,7 +167,7 @@ func TestProfilePreflightRejectsInvalidBridgeResponseWithoutCreatingConfirmation
 	}))
 	api := &API{store: st, bridge: client, logger: slog.New(slog.NewTextHandler(os.Stderr, nil))}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/profiles/"+profile.ID+"/preflight", strings.NewReader(
-		`{"targetIds":["`+skillTargetID+`","`+relayTargetID+`"]}`,
+		`{"targetIds":["`+skillTargetID+`"]}`,
 	))
 	routeContext := chi.NewRouteContext()
 	routeContext.URLParams.Add("profileID", profile.ID)

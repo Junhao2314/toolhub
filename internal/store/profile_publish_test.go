@@ -63,6 +63,10 @@ func TestActiveRelayConfigurationBundleIgnoresProfileRevisions(t *testing.T) {
 	if _, err := st.SaveProfile(ctx, profile.ID, ProfileInput{Name: "relay-hash-isolation-renamed", ClientKind: "claude", Category: "analysis", Revision: profile.Revision}); err != nil {
 		t.Fatal(err)
 	}
+	publishOperation := succeededGovernanceOperation(t, st, "apply", profile.ID, map[string]any{"profileRevisionId": profile.CurrentRevisionID})
+	if err := st.FinalizeProfilePublish(ctx, publishOperation, profile.ID, profile.CurrentRevisionID, governanceRoutingHash(t, st, publishOperation)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.pool.Exec(ctx, `UPDATE relay_configuration_state SET default_profile_id=$1 WHERE singleton`, profile.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +412,7 @@ func TestCreateProfileSkillApplyOperationIsRelayIndependent(t *testing.T) {
 	if err := st.pool.QueryRow(ctx, `SELECT metadata->>'mode' FROM operations WHERE id=$1`, operation.ID).Scan(&mode); err != nil {
 		t.Fatal(err)
 	}
-	if targets != 1 || pending != 0 || mode != "skills_only" {
+	if targets != 1 || pending != 1 || mode != "skills_only" {
 		t.Fatalf("Skill-only apply targets=%d pending=%d mode=%q", targets, pending, mode)
 	}
 }
@@ -529,8 +533,8 @@ func TestFinalizeProfileApplyPublishesClientSnapshotWhenRelayUnavailable(t *test
 	if err := st.pool.QueryRow(ctx, `SELECT status FROM operations WHERE id=$1`, operation.ID).Scan(&operationStatus); err != nil {
 		t.Fatal(err)
 	}
-	if operationStatus != bridgeprotocol.OperationPartial {
-		t.Fatalf("Profile Apply status before relaxed finalization=%s, want partial", operationStatus)
+	if operationStatus != bridgeprotocol.OperationRunning {
+		t.Fatalf("Profile Apply status before relaxed finalization=%s, want running", operationStatus)
 	}
 	if err := st.FinalizeProfileApply(ctx, operation.ID, operation.SourceID, operationRevisionID(t, st, operation)); err != nil {
 		t.Fatal(err)

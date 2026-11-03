@@ -629,6 +629,29 @@ func projectScanHealth(manifest bridgeprotocol.DesiredManifest, members []bridge
 }
 
 func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target bridgeprotocol.Target) (bridgeprotocol.TargetResult, *bridgeprotocol.APIError) {
+	// A persisted ID is written before dispatch. Cancellation permits only
+	// verified terminal replay, never a fresh destructive Commit.
+	if item.Operation.CancelRequested && item.OperationTarget.BridgeOperationID != "" && (item.Operation.Kind == "apply" || item.Operation.Kind == "restore") {
+		id := item.OperationTarget.BridgeOperationID
+		op, err := w.bridge.Operation(ctx, id)
+		kindMatches := op.Kind == item.Operation.Kind || (target.NodeKind == bridgeprotocol.NodeKindSalt && op.Kind == "toolhub."+item.Operation.Kind)
+		if err != nil || id != item.OperationTarget.ID || op.ID != id || !kindMatches || !bridgeprotocol.IsTerminalOperationStatus(op.Status) || len(op.Targets) != 1 {
+			return bridgeprotocol.TargetResult{}, publicError(errors.New("cancelled recovery has no verified terminal Bridge result"))
+		}
+		terminal := op.Targets[0]
+		if terminal.TargetID != target.ID || terminal.Status != op.Status {
+			return bridgeprotocol.TargetResult{}, publicError(errors.New("cancelled recovery Bridge result does not match target"))
+		}
+		if terminal.Status == bridgeprotocol.OperationFailed {
+			if terminal.Error == nil {
+				return bridgeprotocol.TargetResult{}, publicError(errors.New("cancelled recovery Bridge failure has no error"))
+			}
+			return bridgeprotocol.TargetResult{}, publicError(terminal.Error)
+		}
+		if terminal.Result == nil || terminal.Result.Status != terminal.Status || terminal.Result.Error != nil || (terminal.Status != bridgeprotocol.OperationSucceeded && terminal.Status != bridgeprotocol.OperationPartial) {
+			return bridgeprotocol.TargetResult{}, publicError(errors.New("cancelled recovery Bridge result is not replayable"))
+		}
+	}
 	var metadata struct {
 		Manifest       bridgeprotocol.DesiredManifest `json:"manifest"`
 		TargetRevision string                         `json:"targetRevision"`
@@ -756,6 +779,12 @@ func (w *Worker) executeCommit(ctx context.Context, item store.WorkItem, target 
 		}
 	} else {
 		code, reason := resultProjectionError(result)
+		// A first Apply has no active snapshot until fleet publication. There
+		// is no desired-health row to update yet; finalization creates it.
+		_, _, activeErr := w.store.ActiveDesiredManifest(ctx, target.ID)
+		if desiredSnapshotOwnedByFinalizer(item, "profile_apply") && errors.Is(activeErr, store.ErrNotFound) {
+			return result, nil
+		}
 		if _, err := w.store.UpdateTargetHealth(ctx, target.ID, result.Health, code, reason, map[string]any{}, result.Repaired); err != nil {
 			return bridgeprotocol.TargetResult{}, publicError(err)
 		}
@@ -809,25 +838,14 @@ func governanceOperationKind(kind string) bool {
 }
 
 func governanceFinalizationRequired(operation domain.Operation) bool {
-	if operation.Kind != "apply" {
-		return true
-	}
-	// The active Skill-only Profile Apply carries no routing hash and therefore
-	// has no relay publication/finalization phase. Older governance applies
-	// retain the hash and continue through the compatibility finalizer.
-	return bridgeprotocol.IsSHA256(operationRoutingHash(operation.Metadata))
+	// Every Profile Apply publishes through the shared finalizer, including
+	// relay-independent Skill-only fleets.
+	return true
 }
 
 func desiredSnapshotOwnedByFinalizer(item store.WorkItem, sourceKind string) bool {
 	if item.Operation.Kind == "apply" {
-		if sourceKind != "profile_apply" {
-			return false
-		}
-		var metadata struct {
-			Mode string `json:"mode"`
-		}
-		_ = json.Unmarshal(item.Operation.Metadata, &metadata)
-		return metadata.Mode != "skills_only"
+		return sourceKind == "profile_apply"
 	}
 	return item.Target.Runtime == domain.RuntimeSharedRelay && (item.Operation.Kind == "relay_config_apply" || item.Operation.Kind == "policy_apply")
 }
