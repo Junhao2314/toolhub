@@ -29,3 +29,22 @@ test-results/
 *.log
 *.tmp
 .DS_Store
+
+# Local Claude Code / Codex settings, credentials and session data
+**/.claude/settings.local*.json
+**/.claude/.credentials.json
+**/.claude/projects/
+**/.claude/history.jsonl
+**/.claude.json
+**/.codex/auth.json
+**/.codex/config.toml
+**/.codex/config.json
+**/.codex/history.jsonl
+**/.codex/sessions/
+**/.codex/archived_sessions/
+**/.codex/log/
+**/.codex/logs/
+**/.codex/sqlite/
+**/.codex/state_*.sqlite*
+**/.codex/.credentials.json
+**/.mcp.local.json
